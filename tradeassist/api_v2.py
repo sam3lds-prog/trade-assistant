@@ -76,6 +76,18 @@ class HistoryBuild(Strict):
     years: float = Field(5.0, ge=1.5, le=10)
 
 
+class PositionEvaluate(Strict):
+    symbol: str | None = None
+    direction: Literal["LONG", "SHORT"] = "LONG"
+    entry_price: float | None = Field(None, gt=0)
+    invalidation_price: float | None = Field(None, gt=0)
+    target_1: float | None = Field(None, gt=0)
+    target_2: float | None = Field(None, gt=0)
+    horizon_days: int | None = Field(None, ge=1, le=260)
+    earnings_date: str | None = None
+    position_id: int | None = None
+
+
 class Note(Strict):
     note: str = ""
 
@@ -166,6 +178,17 @@ def build_router(svc: Any) -> APIRouter:
     def patterns(symbol: str):
         need("signal_calibration")
         return clean(analyst.patterns(symbol))
+
+    # --- evaluators ---------------------------------------------------------------------------
+    @router.post("/position/evaluate")
+    def evaluate_position(req: PositionEvaluate):
+        need("trend_engine_v2")
+        if not req.symbol and not req.position_id:
+            raise HTTPException(status_code=400, detail="Give a symbol or a position_id")
+        try:
+            return clean(analyst.evaluate_position(req.model_dump()))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # --- positions ---------------------------------------------------------------------
     @router.get("/positions")

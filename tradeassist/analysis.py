@@ -339,6 +339,57 @@ class Analyst:
         return {"symbol": symbol, "years": 5, "patterns": rows, "history_built": bool(meta),
                 "history_run_at": meta["run_at"] if meta else None}
 
+    # --- position evaluator ------------------------------------------------------------------------
+    def evaluate_position(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Grade a stock trade idea, or an existing stock position (`position_id`) with its own plan."""
+        from .evaluator import evaluate
+        from .positions import read
+        req = dict(req)
+        if req.get("position_id"):
+            with self.svc.db.tx() as cur:
+                pos = read(cur, int(req["position_id"]))
+            if pos["instrument_type"] != "STOCK":
+                raise ValueError("This evaluates stock positions; use the options evaluator for calls and puts")
+            req.setdefault("symbol", pos["symbol"])
+            req["symbol"] = pos["symbol"]
+            req["direction"] = pos["direction"]
+            for k in ("invalidation_price", "target_1", "target_2"):
+                if req.get(k) is None and pos.get(k) is not None:
+                    req[k] = pos[k]
+            if req.get("entry_price") is None and pos["ledger"]["cost_basis"]:
+                req["entry_price"] = pos["ledger"]["cost_basis"]
+            if req.get("horizon_days") is None and pos.get("intended_horizon"):
+                req["horizon_days"] = pos["intended_horizon"]
+        symbol = self.svc._symbol(req["symbol"])
+        direction = 1 if str(req.get("direction", "LONG")).upper() == "LONG" else -1
+        entry = req.get("entry_price")
+        if entry is None:
+            entry = self.market.spot(symbol)
+        enriched = self.market.enriched(symbol, 3)
+        trend = self.trend(symbol)
+        try:
+            regime = self.regime()
+        except (DataError, ValueError):
+            regime = None
+        dq = assess(symbol, self.market.bars(symbol, 3), self.market.bar_info(symbol))
+        earnings = self.svc._earnings(symbol, req.get("earnings_date"))
+        signals = None
+        if self.svc.settings.features.get("signal_calibration"):
+            try:
+                signals = self.signals(symbol)
+            except (DataError, ValueError) as exc:
+                log.info("No signal history for the evaluation of %s: %s", symbol, exc)
+        out = evaluate(symbol=symbol, direction=direction, df=enriched, entry=float(entry), trend=trend, regime=regime,
+                       data_quality=dq, earnings=earnings, signals=signals,
+                       account_size=self.svc.settings.account_size, risk_pct=self.svc.settings.max_risk_per_trade_pct,
+                       invalidation=req.get("invalidation_price"), target_1=req.get("target_1"),
+                       target_2=req.get("target_2"), horizon=int(req.get("horizon_days") or 20))
+        out["position_id"] = req.get("position_id")
+        out["entry_source"] = "yours" if req.get("entry_price") is not None else "current price"
+        out["earnings"] = earnings
+        out["data_source"] = self.market.info.mode
+        return out
+
     # --- everything about one stock --------------------------------------------------------------
     def analysis(self, symbol: str) -> dict[str, Any]:
         symbol = self.svc._symbol(symbol)

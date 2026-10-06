@@ -2,6 +2,7 @@
 /* Trade Assistant V2 screens. Loaded after app.js, whose helpers (el, api, field, table, money, ...) it uses.
    Each screen registers itself in BUILDERS; app.js starts the page once both scripts have run. */
 
+const featureOn = name => !!(state.status && state.status.features && state.status.features[name]);
 const signedMoney = (v, d = 0) => isNum(v) ? (v > 0 ? "+" : "") + money(v, d) : "n/a";
 const qtyText = v => isNum(v) ? v.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "n/a";
 const optNum = input => input.value === "" ? null : Number(input.value);
@@ -188,12 +189,18 @@ function positionDetail(p, onChange) {
       expiration: leg.expiration, strike: leg.strike, entry_price: led.cost_basis }]));
     buttons.append(sim);
   }
+  const gradeBox = el("div");
+  if (p.instrument_type === "STOCK" && ["PLANNED", "OPEN", "PARTIALLY_CLOSED"].includes(p.status) && featureOn("trend_engine_v2")) {
+    const grade = el("button", { class: "plain", text: "Grade this position" });
+    grade.addEventListener("click", () => withBusy(grade, error, async () => { gradeBox.replaceChildren(gradeCard(await api("/v2/position/evaluate", { position_id: p.id }))); }));
+    buttons.append(grade);
+  }
   if (p.status === "PLANNED" && !p.legacy_trade_id) {
     const cancel = el("button", { class: "plain", text: "Cancel this plan" });
     cancel.addEventListener("click", () => act(cancel, () => api(`/v2/positions/${p.id}/cancel`, { note: "" })));
     buttons.append(cancel);
   }
-  box.append(buttons, error);
+  box.append(buttons, error, gradeBox);
   return box;
 }
 
@@ -469,7 +476,6 @@ ANALYSIS_SECTIONS.push(regimeSection);
 
 /* ---------- signals and how they turned out before ---------- */
 const VERDICT_WORDS = { supported: "passed", contradicted: "worked the wrong way", no_evidence: "no evidence", insufficient: "too few cases" };
-const featureOn = name => !!(state.status && state.status.features && state.status.features[name]);
 const freqText = h => {
   if (!h || !h.cases) return el("span", { class: "muted", text: "no past cases" });
   const range = isNum(h.frequency_low) ? ` (${pct(100 * h.frequency_low, 0)}–${pct(100 * h.frequency_high, 0)})` : "";
@@ -543,6 +549,53 @@ function signalHistoryPanel() {
 }
 
 ANALYSIS_SECTIONS.push(signalsSection);
+
+/* ---------- grading a trade idea ---------- */
+const GRADE_TAG = { A: "pass", B: "pass", C: "warn", D: "fail", AVOID: "fail" };
+function gradeCard(ev) {
+  const box = el("div", { class: "grade-card" });
+  const lv = ev.levels, rr = ev.reward_risk, sz = ev.sizing;
+  box.append(el("div", { class: "grade-head" }, el("div", { class: `grade-letter g-${ev.grade}`, text: ev.grade }),
+    el("div", {}, el("div", { class: "grade-title", text: `${ev.direction === "LONG" ? "Long" : "Short"} ${ev.symbol} at ${money(ev.entry)}` }),
+      el("div", { class: "small muted", text: `Score ${num(ev.score, 0)} of 100 · ${ev.entry_source === "yours" ? "your entry" : "entry at the current price"} · ${ev.version}${ev.status === "PROVISIONAL" ? " · provisional (today's bar is not finished)" : ""}` }))));
+  for (const c of ev.caps) box.append(banner(c.grade === "AVOID" ? "fail" : "warn", `Capped at ${c.grade}: ${c.reason}`));
+  box.append(el("div", { class: "metrics" },
+    metric(money(lv.invalidation), `Invalidation (${lv.invalidation_source})`), metric(money(lv.target_1), `Target 1 (${lv.targets_source})`),
+    metric(money(lv.target_2), "Target 2"), metric(`${num(rr.target_1, 2)} : 1`, "Reward to risk, target 1"),
+    metric(`${num(sz.shares, 0)} sh`, `Size for ${money(sz.risk_budget, 0)} at risk`), metric(money(sz.risk_per_share), "Risk per share")));
+  if (lv.invalidation_source === "suggested" || lv.targets_source === "suggested") box.append(el("ul", { class: "plain small muted" }, lv.notes.map(n => el("li", { text: n }))));
+  box.append(el("h4", { text: "How it was graded" }), table([
+    { label: "Check", cell: c => c.name }, { label: "Weight", num: true, cell: c => `${c.weight}%` },
+    { label: "Score", cell: c => el("div", { class: "score-track mini" }, el("i", { class: c.score >= 50 ? "pos" : "neg", style: `width:${c.score}%` })) },
+    { label: "", num: true, cell: c => num(c.score, 0) }, { label: "Why", cell: c => c.why.join(" ") }], ev.components));
+  if (ev.short_sale_risk) box.append(el("h4", { text: "Short-sale risks" }),
+    el("ul", { class: "plain small" }, ev.short_sale_risk.map(r => el("li", {}, statusTag(r.level, r.level === "fail" ? "Danger" : r.level === "warn" ? "Caution" : "Note"), ` ${r.text}`))));
+  if (ev.analogs && ev.analogs.history) {
+    const h = ev.analogs.history.same_regime && ev.analogs.history.same_regime.cases ? ev.analogs.history.same_regime : ev.analogs.history.all;
+    box.append(el("p", { class: "small", text: `Analogs: when a stock's trend turned to ${trendWord(ev.trend_state).toLowerCase()} before, it moved the expected way over 10 days in ${pct(100 * h.frequency, 0)} of ${num(h.cases, 0)} cases.` }));
+  }
+  if (ev.what_would_change_it.length) box.append(el("h4", { text: "What would improve it" }), el("ul", { class: "plain small" }, ev.what_would_change_it.map(t => el("li", { text: t }))));
+  box.append(el("p", { class: "small muted", text: ev.note }));
+  return box;
+}
+
+function evaluateSection(d) {
+  const dir = segmented(`evdir${++uid}`, [["LONG", "Long"], ["SHORT", "Short"]], (d.trend.provisional || d.trend.confirmed).state.includes("DOWN") ? "SHORT" : "LONG");
+  const entry = numInput({ placeholder: "now" }), inv = numInput({ placeholder: "suggest" }), t1 = numInput({ placeholder: "suggest" }), t2 = numInput({ placeholder: "suggest" });
+  const horizon = el("input", { type: "number", min: 1, max: 260, step: 1, value: 20 });
+  const go = el("button", { class: "primary", text: "Grade it" });
+  const err = el("div", { class: "error", role: "alert" });
+  const out = el("div");
+  go.addEventListener("click", () => withBusy(go, err, async () => {
+    const body = { symbol: d.symbol, direction: dir.value(), horizon_days: Math.round(Number(horizon.value) || 20) };
+    for (const [k, input] of [["entry_price", entry], ["invalidation_price", inv], ["target_1", t1], ["target_2", t2]]) { const v = optNum(input); if (v !== null) body[k] = v; }
+    out.replaceChildren(gradeCard(await api("/v2/position/evaluate", body)));
+  }));
+  return el("div", { class: "panel" }, el("h3", { text: "Grade a stock trade" }),
+    el("p", { class: "small muted", text: "Leave a price blank and it is suggested from the chart: the invalidation beyond the last swing, targets at the support or resistance in the way." }),
+    el("div", { class: "inline-form" }, field("Direction", dir), field("Entry", entry), field("Invalidation", inv), field("Target 1", t1), field("Target 2", t2), field("Holding days", horizon), go), err, out);
+}
+ANALYSIS_SECTIONS.push(evaluateSection);
 {
   const classicPatterns = BUILDERS.patterns;
   BUILDERS.patterns = () => {

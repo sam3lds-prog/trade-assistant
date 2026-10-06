@@ -273,3 +273,14 @@ select:disabled, input:disabled { opacity: 0.6; }
 .score-track i.pos { background: var(--div-pos); }
 .score-track i.neg { background: var(--div-neg); }
 .score-v { text-align: right; }
+
+/* Trade grades */
+.grade-card { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
+.grade-head { display: flex; gap: 16px; align-items: center; margin-bottom: 12px; }
+.grade-letter { font-size: 2.1rem; font-weight: 600; min-width: 2.4em; height: 1.6em; border-radius: 8px; display: grid;
+  place-items: center; border: 2px solid currentColor; padding: 0 8px; }
+.grade-letter.g-A, .grade-letter.g-B { color: var(--pass); background: var(--pass-bg); }
+.grade-letter.g-C { color: var(--warn); background: var(--warn-bg); }
+.grade-letter.g-D, .grade-letter.g-AVOID { color: var(--fail); background: var(--fail-bg); font-size: 1.5rem; }
+.grade-title { font-weight: 600; font-size: 1.1rem; }
+.score-track.mini { width: 120px; height: 8px; margin-top: 6px; }
