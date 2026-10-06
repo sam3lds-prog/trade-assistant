@@ -274,6 +274,7 @@ function show(name) {
   if (!state.views[name]) { state.views[name] = BUILDERS[name](); main.append(state.views[name]); }
   for (const [key, node] of Object.entries(state.views)) node.classList.toggle("hidden", key !== name);
   if (name === "journal") state.refreshJournal();
+  if (state.views[name].onShow) state.views[name].onShow();
   location.hash = name;
 }
 
@@ -1530,6 +1531,17 @@ state.openSimulation = (symbol, legs) => {
   else { state.pendingSim = { symbol, legs }; show("simulate"); }
 };
 state.refreshJournal = async () => {};
-for (const btn of document.querySelectorAll(".rail button.nav")) btn.addEventListener("click", () => show(btn.dataset.view));
-loadStatus();
-show(BUILDERS[location.hash.slice(1)] ? location.hash.slice(1) : "price");
+// Started once every script on the page has run, so later scripts (v2.js) can add screens to BUILDERS.
+// Screens behind a V2 feature flag hide their button when the flag is off.
+async function start() {
+  for (const btn of document.querySelectorAll(".rail button.nav")) btn.addEventListener("click", () => show(btn.dataset.view));
+  await loadStatus();
+  const features = (state.status && state.status.features) || {};
+  for (const btn of document.querySelectorAll(".rail button.nav[data-feature]")) {
+    const on = features[btn.dataset.feature] === true && BUILDERS[btn.dataset.view];
+    btn.classList.toggle("hidden", !on);
+    if (!on) delete BUILDERS[btn.dataset.view];
+  }
+  show(BUILDERS[location.hash.slice(1)] ? location.hash.slice(1) : "price");
+}
+document.addEventListener("DOMContentLoaded", start);

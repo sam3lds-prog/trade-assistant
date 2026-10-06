@@ -95,6 +95,8 @@ class TradeAssistant:
             "watchlist": s.watchlist,
             "sec_enabled": self.sec.enabled,
             "places_orders": False,
+            "features": s.features,
+            "schema_version": self.db.schema_version(),
         }
 
     # --- option chain ------------------------------------------------------

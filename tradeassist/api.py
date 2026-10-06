@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import __version__
 from .config import Settings, load_settings
 from .journal import JournalError
+from .positions import PositionError
 from .providers.base import DataError
 from .service import RequestError, TradeAssistant, clean
 
@@ -139,6 +140,17 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
     async def _journal_error(_: Request, exc: JournalError):
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
+    @app.exception_handler(PositionError)
+    async def _position_error(_: Request, exc: PositionError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @app.exception_handler(HTTPException)
+    async def _http_error(_: Request, exc: HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+
+    from .api_v2 import build_router
+    app.include_router(build_router(svc))
+
     @app.exception_handler(DataError)
     async def _data_error(_: Request, exc: DataError):
         return JSONResponse(status_code=502, content={"error": str(exc)})
@@ -243,7 +255,7 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
     @app.get("/")
     def index():
         html = (STATIC / "index.html").read_text()
-        for name in ("app.css", "app.js"):
+        for name in ("app.css", "app.js", "v2.js"):
             stamp = f"{__version__}-{int((STATIC / name).stat().st_mtime)}"
             html = html.replace(f'"/{name}"', f'"/{name}?v={stamp}"')
         return HTMLResponse(html, headers=fresh)

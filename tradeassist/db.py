@@ -108,6 +108,18 @@ class Database:
             self._conn.execute("PRAGMA journal_mode = WAL")
         with self.tx() as cur:
             cur.executescript(SCHEMA)
+        from .migrations import migrate
+        with self._lock:
+            # Autocommit while migrating, so each migration can manage its own transaction.
+            previous, self._conn.isolation_level = self._conn.isolation_level, None
+            try:
+                self.migrated = migrate(self._conn)
+            finally:
+                self._conn.isolation_level = previous
+
+    def schema_version(self) -> int:
+        row = self.one("SELECT MAX(version) AS v FROM schema_migrations")
+        return int(row["v"] or 0)
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Cursor]:

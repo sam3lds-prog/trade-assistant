@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .features import FEATURE_DEFAULTS, load_features
+
 ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_WATCHLIST = [
@@ -69,6 +71,9 @@ class Settings:
     robinhood_poll_seconds: float = 3.0
     robinhood_url: str = "https://agent.robinhood.com/mcp/trading"
 
+    # V2 areas that can be switched off (see features.py)
+    features: dict[str, bool] = field(default_factory=lambda: dict(FEATURE_DEFAULTS))
+
     @property
     def robinhood_signin_path(self) -> Path:
         """Where the Robinhood sign-in is kept: beside the database, readable only by you."""
@@ -122,4 +127,5 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         robinhood_callback_port=_int("ROBINHOOD_CALLBACK_PORT", 8421),
         robinhood_poll_seconds=max(_float("ROBINHOOD_POLL_SECONDS", 3.0), 1.0),
         robinhood_url=(os.getenv("ROBINHOOD_MCP_URL") or "").strip() or "https://agent.robinhood.com/mcp/trading",
+        features=load_features(),
     )

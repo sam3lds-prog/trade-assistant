@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .db import Database
+from .positions import sync_legacy_trade
 from .optionmath import NY
 from .pricer import BUCKETS, bucket_for
 
@@ -55,7 +56,9 @@ class Journal:
                 (_now(), data_source, symbol, option_symbol, option_type, strike, expiration, contracts,
                  thesis, planned_limit, max_limit, json.dumps(plan), json.dumps(quote), json.dumps(scorecard),
                  json.dumps(signals), json.dumps(overrides)))
-            return int(cur.lastrowid)
+            trade_id = int(cur.lastrowid)
+            sync_legacy_trade(cur, trade_id)          # keep the unified positions in step
+            return trade_id
 
     def get(self, trade_id: int) -> dict[str, Any]:
         row = self.db.one("SELECT * FROM trades WHERE id = ?", (trade_id,))
@@ -119,6 +122,8 @@ class Journal:
                 pnl = (limit_price - trade["entry_price"]) * 100 * trade["contracts"]
                 cur.execute("UPDATE trades SET status = 'closed', exit_price = ?, exit_at = ?, pnl = ? "
                             "WHERE id = ?", (limit_price, _now(), pnl, trade_id))
+            if filled:
+                sync_legacy_trade(cur, trade_id)
         return self.get(trade_id)
 
     def close_at(self, trade_id: int, exit_price: float, note: str = "") -> dict[str, Any]:
@@ -133,6 +138,7 @@ class Journal:
             cur.execute("UPDATE trades SET status = 'closed', exit_price = ?, exit_at = ?, pnl = ?, "
                         "notes = TRIM(notes || ' ' || ?) WHERE id = ?",
                         (exit_price, _now(), pnl, note, trade_id))
+            sync_legacy_trade(cur, trade_id)
         return self.get(trade_id)
 
     def cancel(self, trade_id: int, note: str = "") -> dict[str, Any]:
@@ -142,6 +148,7 @@ class Journal:
         with self.db.tx() as cur:
             cur.execute("UPDATE trades SET status = 'cancelled', notes = TRIM(notes || ' ' || ?) WHERE id = ?",
                         (note, trade_id))
+            sync_legacy_trade(cur, trade_id)
         return self.get(trade_id)
 
     # --- reading for limits ----------------------------------------------

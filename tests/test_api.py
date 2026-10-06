@@ -10,6 +10,13 @@ from tradeassist.patterns import PATTERNS
 from tradeassist.providers.demo import DemoData
 from tradeassist.service import TradeAssistant, clean
 
+V2_WRITES = {
+    "/v2/positions", "/v2/positions/{position_id}/executions", "/v2/positions/{position_id}/plan",
+    "/v2/positions/{position_id}/cancel", "/v2/positions/{position_id}/snapshot",
+    "/v2/position/evaluate", "/v2/options/evaluate", "/v2/options/compare", "/v2/portfolio/stress",
+    "/v2/signals/history/build", "/v2/backtest", "/v2/backtest/walkforward", "/v2/alerts/check",
+}
+
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."
 
 
@@ -42,10 +49,14 @@ def test_no_endpoint_can_place_an_order(app):
     client, _ = app
     paths = client.get("/api/openapi.json").json()["paths"]
     assert not [p for p in paths if "order" in p.lower()]
-    writes = sorted(p for p, methods in paths.items() if "post" in methods)
+    writes = sorted(p for p, methods in paths.items() if "post" in methods and p.startswith("/api/"))
     assert writes == ["/api/backtest", "/api/journal/{trade_id}/attempt", "/api/journal/{trade_id}/cancel",
                       "/api/journal/{trade_id}/close", "/api/live", "/api/patterns/run", "/api/price",
                       "/api/simulate", "/api/snapshot", "/api/ticket", "/api/walkforward"]
+    # The V2 writes only record what you did at the broker, or run analyses. Each one is listed here
+    # so that adding a route means looking at it again.
+    v2 = sorted(p for p, methods in paths.items() if "post" in methods and p.startswith("/v2/"))
+    assert set(v2) <= V2_WRITES, set(v2) - V2_WRITES
 
 
 def test_price_returns_ladder_scorecard_and_warnings(app):
