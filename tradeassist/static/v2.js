@@ -433,4 +433,38 @@ function trendHistoryChart(t) {
   return wrap;
 }
 
+/* ---------- market regime and indicators read in context ---------- */
+const REGIME_TAG = { BULL_CALM: "pass", BULL_VOLATILE: "warn", RANGE: "info", TRANSITION: "warn", BEAR_CALM: "fail", BEAR_VOLATILE: "fail" };
+const REGIME_WORDS = { BULL_CALM: "Bull market, calm", BULL_VOLATILE: "Bull market, volatile", RANGE: "Range-bound market",
+  TRANSITION: "Market in transition", BEAR_CALM: "Bear market, orderly", BEAR_VOLATILE: "Bear market, stressed" };
+const regimeTag = r => statusTag(REGIME_TAG[r] || "info", REGIME_WORDS[r] || r);
+const VOL_WORDS = { CALM: "calm", NORMAL: "normal", ELEVATED: "elevated", STRESSED: "stressed" };
+
+function regimeSection(d) {
+  const g = d.regime;
+  if (!g) return null;
+  const now = g.provisional || g.confirmed;
+  const etf = (name, e) => e ? el("li", {}, el("strong", { text: `${name}: ` }), trendTag(e.state),
+    ` ${signedPct(e.vs_200d_pct)} from its 200-day average, ${signedPct(e.off_52w_high_pct)} from its 52-week high.`) : null;
+  const v = now.volatility;
+  const box = el("div", { class: "panel" }, el("h3", { text: "Market regime" }),
+    el("p", {}, regimeTag(now.regime), " ", statusWord(now.status), ` ${now.text}`),
+    el("ul", { class: "plain small" }, etf("SPY", now.spy), etf("QQQ", now.qqq),
+      el("li", {}, el("strong", { text: "Volatility: " }), `${VOL_WORDS[v.bucket]}, ` +
+        (v.source === "VIX" ? `VIX ${num(v.vix, 1)}` : `SPY's 20-day realized volatility ${pct(100 * v.spy_realized_20d, 0)}, higher than on ${pct(100 * v.spy_realized_rank, 0)} of the past year's days`) + ".")),
+    g.changes.length ? el("p", { class: "small muted", text: "Recent changes: " + g.changes.slice(0, 4).map(c => `${shortDate(c.date)} ${REGIME_WORDS[c.from]} to ${REGIME_WORDS[c.to].toLowerCase()}`).join("; ") + "." }) : null,
+    el("ul", { class: "plain small muted" }, g.notes.map(n => el("li", { text: n }))));
+  const it = d.interpretation;
+  if (it && it.readings.length) {
+    const words = trendWord(it.stock_state).toLowerCase();
+    box.append(el("h4", { text: `Reading the indicators for a stock with ${words === "no trend" ? "no trend" : (/^[aeiou]/.test(words) ? "an " : "a ") + words} in a ${(REGIME_WORDS[it.regime] || "").toLowerCase()}` }),
+      table([{ label: "Indicator", cell: r => r.indicator }, { label: "Now", cell: r => r.value },
+        { label: "Leans", cell: r => r.lean === "bullish" ? statusTag("pass", "Bullish") : r.lean === "bearish" ? statusTag("fail", "Bearish") : el("span", { class: "muted", text: "Neither" }) },
+        { label: "What it usually means here", cell: r => r.reading }], it.readings),
+      el("p", { class: "small muted", text: it.note }));
+  }
+  return box;
+}
+ANALYSIS_SECTIONS.push(regimeSection);
+
 Object.assign(BUILDERS, { positions: buildPositions, analyze: buildAnalyze });

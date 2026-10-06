@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from . import regime as regime_engine
 from . import trend as trend_engine
 from .dataquality import assess
 from .market import complete_only
@@ -112,11 +113,52 @@ class Analyst:
         t = self.trend(symbol)
         cur = t["provisional"] or t["confirmed"]
         rs = t["relative_strength"]
+        try:
+            regime = self.regime()["regime"]
+        except (DataError, ValueError):
+            regime = None
         return {"trend_state": cur["state"], "bullish_score": cur["bullish_score"], "bearish_score": cur["bearish_score"],
+                "market_regime": regime,
                 "relative_strength_spy": rs.get("spy_3m"), "relative_strength_sector": rs.get("sector_3m"),
                 "_raw": {"trend": {"version": TREND_ENGINE_VERSION, "state": cur["state"], "status": cur["status"],
                                    "confirmed_state": (t["confirmed"] or {}).get("state"), "net": cur["net_score"],
                                    "confidence": cur["confidence"]["level"]}}}
+
+    # --- market regime -------------------------------------------------------------------------
+    def regime(self) -> dict[str, Any]:
+        spy = self.market.enriched("SPY", 3)
+        info = self.market.bar_info("SPY")
+        return self._cached(("regime", info.get("fetched_at"), len(spy)), lambda: self._regime(spy))
+
+    def _regime(self, spy: pd.DataFrame) -> dict[str, Any]:
+        notes = []
+        try:
+            qqq = self.market.enriched("QQQ", 3)
+        except DataError as exc:
+            qqq = None
+            notes.append(f"QQQ history unavailable, so SPY is not cross-checked: {exc}")
+        vix = None
+        if self.market.info.mode != "demo":       # the demo source has no VIX
+            try:
+                vix = self.market.bars("VIX", 3)
+            except DataError:
+                vix = None
+        out = regime_engine.analyse(spy, qqq, vix)
+        out["notes"] = notes + out["notes"]
+        if self.market.info.mode == "demo":
+            out["notes"].insert(0, "Demo prices are synthetic, and the demo QQQ moves largely on its own, so the "
+                                   "demo market is often 'in transition'.")
+        return out
+
+    def interpretation(self, symbol: str, trend: dict[str, Any], regime: dict[str, Any]) -> dict[str, Any]:
+        enriched = self.market.enriched(symbol, 3)
+        day = trend["provisional"] or trend["confirmed"]
+        row = enriched.iloc[-1] if trend["provisional"] else complete_only(enriched).iloc[-1]
+        readings = regime_engine.interpret(row, day["state"], regime["regime"], day["volatility"].get("band_width_rank"))
+        return {"date": day["date"], "status": day["status"], "stock_state": day["state"], "regime": regime["regime"],
+                "readings": readings,
+                "note": "How these readings are usually read in this trend and this market. They explain; they do not "
+                        "add to the trend scores."}
 
     # --- everything about one stock --------------------------------------------------------------
     def analysis(self, symbol: str) -> dict[str, Any]:
@@ -125,6 +167,12 @@ class Analyst:
         bars = self.market.bars(symbol, 3)
         out["data_quality"] = assess(symbol, bars, self.market.bar_info(symbol))
         out["trend"] = self.trend(symbol)
+        try:
+            out["regime"] = self.regime()
+            out["interpretation"] = self.interpretation(symbol, out["trend"], out["regime"])
+        except (DataError, ValueError) as exc:
+            out["regime"] = None
+            out.setdefault("errors", []).append(f"Market regime unavailable: {exc}")
         try:
             q = self.market.quote(symbol)
             out["quote"] = {"last": q.get("last"), "bid": q.get("bid"), "ask": q.get("ask"),

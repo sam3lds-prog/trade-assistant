@@ -119,6 +119,14 @@ def build_router(svc: Any) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.get("/regime")
+    def regime():
+        need("trend_engine_v2")
+        try:
+            return clean(analyst.regime())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @router.get("/analysis/{symbol}")
     def analysis(symbol: str):
         need("trend_engine_v2")
