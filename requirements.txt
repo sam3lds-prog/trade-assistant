@@ -1,0 +1,15 @@
+# Lower bounds are the major versions this was built and tested with.
+fastapi>=0.110
+uvicorn>=0.29
+pandas>=3.0
+numpy>=2.0
+scipy>=1.13
+requests>=2.31
+python-dotenv>=1.0
+pydantic>=2.5
+# Robinhood data connection (DATA_MODE=robinhood). Version 2 of this package is required.
+mcp>=2.2,<3
+
+# For running the tests
+pytest>=8.0
+httpx>=0.27

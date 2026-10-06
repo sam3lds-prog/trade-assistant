@@ -1,0 +1,12 @@
+# Your settings and tokens: never commit these.
+.env
+# Your database, Robinhood sign-in and capture files.
+data/
+*.db
+# Local Python environment and caches.
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
