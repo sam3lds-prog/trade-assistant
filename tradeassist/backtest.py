@@ -46,6 +46,7 @@ class BacktestParams:
     commission: float = 0.0             # per order
     allow_shorts: bool = True
     risk_free_rate: float = 0.0        # for the Sharpe ratio; idle cash earns nothing in the simulation
+    short_borrow_rate_pct: float = 0.0  # yearly fee to borrow shares for a short, charged per calendar day held
 
     def validate(self) -> None:
         if self.initial_capital <= 0:
@@ -58,6 +59,8 @@ class BacktestParams:
             raise ValueError("stop_loss_pct must be between 0 and 1 and take_profit_pct positive")
         if self.confirmation_days < 1 or self.holding_period_days < 1:
             raise ValueError("confirmation_days and holding_period_days must be at least 1")
+        if not 0 <= self.short_borrow_rate_pct <= 200:
+            raise ValueError("short_borrow_rate_pct must be between 0 and 200")
 
 
 # --- statistics ------------------------------------------------------------
@@ -198,14 +201,17 @@ class Backtester:
             nonlocal cash
             fill = price * (1 - slip) if pos["dir"] == 1 else price * (1 + slip)
             gross = pos["dir"] * (fill - pos["entry"]) * pos["shares"]
-            cash += pos["collateral"] + gross - params.commission
-            pnl = gross - 2 * params.commission
             entry_day = self.calendar[pos["entry_i"]]
+            # Shorts pay to borrow the shares, by the calendar day, on the value borrowed.
+            borrow = (pos["collateral"] * params.short_borrow_rate_pct / 100.0 * max((self.calendar[i] - entry_day).days, 1)
+                      / 360.0) if pos["dir"] == -1 and params.short_borrow_rate_pct > 0 else 0.0
+            cash += pos["collateral"] + gross - params.commission - borrow
+            pnl = gross - 2 * params.commission - borrow
             trades.append({
                 "symbol": self.symbols[pos["sym"]], "direction": "LONG" if pos["dir"] == 1 else "SHORT",
                 "entry_date": entry_day.strftime("%Y-%m-%d"), "exit_date": self.calendar[i].strftime("%Y-%m-%d"),
                 "entry_price": round(pos["entry"], 4), "exit_price": round(fill, 4), "shares": pos["shares"],
-                "pnl": pnl, "pnl_pct": 100.0 * pnl / pos["collateral"],
+                "pnl": pnl, "pnl_pct": 100.0 * pnl / pos["collateral"], "borrow_cost": borrow,
                 "days_held": int((self.calendar[i] - entry_day).days), "exit_reason": reason,
             })
             cooldown_until[pos["sym"]] = i + 1 + params.cooldown_days
@@ -394,7 +400,8 @@ DEFAULT_GRID = {
 
 def walk_forward(frames: dict[str, pd.DataFrame], base: BacktestParams, grid: dict[str, list[float]] | None = None,
                  train_days: int = 252, test_days: int = 63, start: str | None = None,
-                 end: str | None = None) -> dict[str, Any]:
+                 end: str | None = None, signal_override: tuple[np.ndarray, np.ndarray] | None = None,
+                 anchored: bool = False, warmup_days: int = 260) -> dict[str, Any]:
     """Choose parameters on one window, then trade the next window with them, and repeat.
 
     Only the out-of-sample windows count towards the reported result, which is the
@@ -404,22 +411,26 @@ def walk_forward(frames: dict[str, pd.DataFrame], base: BacktestParams, grid: di
     for name in grid:
         if not hasattr(base, name):
             raise ValueError(f"Unknown parameter in grid: {name}")
+    if signal_override is not None and any(k in grid for k in ("min_score", "confirmation_days")):
+        raise ValueError("min_score and confirmation_days belong to the scanner's signals, not to these")
     combos = [dict(zip(grid, values)) for values in itertools.product(*grid.values())]
-    bt = Backtester(frames)
+    bt = Backtester(frames, signal_override)
     cal = bt.calendar
     lo = int(cal.searchsorted(pd.Timestamp(start))) if start else 0
     hi = int(cal.searchsorted(pd.Timestamp(end), side="right")) if end else len(cal)
     # Signals need about a year of bars to exist, so skip that warm-up before the first training window.
-    lo = max(lo, 260)
+    lo = max(lo, warmup_days)
+    first = lo
     if hi - lo < train_days + test_days:
         raise ValueError(f"Not enough history for walk-forward: need {train_days + test_days} trading days "
-                         f"after a 260-day warm-up, have {max(hi - lo, 0)}")
+                         f"after a {warmup_days}-day warm-up, have {max(hi - lo, 0)}")
     folds = []
     oos_returns: list[np.ndarray] = []
     trial_variances: list[float] = []
     cursor = lo
     while cursor + train_days + test_days <= hi:
-        train = (cal[cursor], cal[cursor + train_days - 1])
+        # Rolling: the training window is the last `train_days`. Anchored: it grows from the start.
+        train = (cal[first if anchored else cursor], cal[cursor + train_days - 1])
         test = (cal[cursor + train_days], cal[cursor + train_days + test_days - 1])
         scored = []
         for combo in combos:
@@ -451,7 +462,7 @@ def walk_forward(frames: dict[str, pd.DataFrame], base: BacktestParams, grid: di
     variance = float(np.mean(trial_variances)) if trial_variances else None
     return {
         "folds": folds, "grid": grid, "combinations_tried": len(combos),
-        "train_days": train_days, "test_days": test_days,
+        "train_days": train_days, "test_days": test_days, "anchored": anchored,
         "out_of_sample": {
             "total_return_pct": 100.0 * (equity[-1] / base.initial_capital - 1.0) if len(equity) else None,
             "sharpe": annualise(sr),

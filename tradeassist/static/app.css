@@ -295,3 +295,8 @@ select:disabled, input:disabled { opacity: 0.6; }
 .bars { display: flex; flex-direction: column; gap: 6px; max-width: 720px; }
 .bar-row { display: grid; grid-template-columns: 180px minmax(0, 1fr) 110px; gap: 10px; align-items: center; }
 .bar-row strong { text-align: right; }
+
+/* Condition strategies */
+.conds { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.cond { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--sunk); align-items: center; }
+.cond select { max-width: 260px; }

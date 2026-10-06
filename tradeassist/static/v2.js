@@ -853,4 +853,147 @@ function positionAnalyticsBox(p) {
   return box;
 }
 
+/* ---------- backtest V2: condition strategies ---------- */
+const OP_WORDS = { ">": "is above", ">=": "is at least", "<": "is below", "<=": "is at most", crosses_above: "crosses above",
+  crosses_below: "crosses below", in: "is one of", not_in: "is not one of", fired: "fired today" };
+
+function conditionStrategyPanel() {
+  const box = el("div", { class: "panel" }, el("h3", { text: "Condition strategies" }),
+    el("p", { class: "small muted", text: "Write a strategy as conditions on indicators, the trend engine's state and the market regime. Signals are read at each close from finished bars and traded at the next open, with the same stops, targets and costs as above. Shorts pay a borrow fee." }));
+  const err = el("div", { class: "error", role: "alert" });
+  const out = el("div");
+  let meta = null;
+  const rows = { long: el("div", { class: "conds" }), short: el("div", { class: "conds" }) };
+  const preset = el("select", { "aria-label": "Start from" });
+  const regimeBox = el("div", { class: "toggles" });
+  const years = el("input", { type: "number", min: 1, max: 10, step: 1, value: 3 });
+  const stop = el("input", { type: "number", min: 0.5, max: 50, step: 0.5, value: 6 }), target = el("input", { type: "number", min: 1, max: 200, step: 1, value: 15 });
+  const hold = el("input", { type: "number", min: 1, max: 365, step: 1, value: 60 }), borrow = el("input", { type: "number", min: 0, max: 200, step: 0.25, value: 0.5 });
+  const syms = el("input", { type: "text", placeholder: "watchlist", "aria-label": "Symbols", style: "width: 260px" });
+  const mc = el("input", { type: "checkbox", checked: true });
+  const run = el("button", { class: "primary", text: "Run the backtest" }), wf = el("button", { class: "plain", text: "Walk-forward test" });
+
+  function condRow(side, c = {}) {
+    const fieldSel = el("select", { "aria-label": "Field" },
+      el("optgroup", { label: "States" }, Object.entries(meta.category_words).map(([k, v]) => el("option", { value: k, text: v }))),
+      el("option", { value: "pattern", text: "A pattern" }),
+      el("optgroup", { label: "Numbers" }, Object.entries(meta.numeric).map(([k, v]) => el("option", { value: k, text: v }))));
+    fieldSel.value = c.field || "rsi";
+    const opSel = el("select", { "aria-label": "Test" });
+    const valBox = el("span");
+    const remove = el("button", { class: "plain small-btn", type: "button", text: "Remove" });
+    const node = el("div", { class: "cond row" }, fieldSel, opSel, valBox, remove);
+    let valueGet = () => null;
+    function sync(initial) {
+      const f = fieldSel.value;
+      const ops = f === "pattern" ? ["fired"] : meta.categories[f] ? ["in", "not_in"] : [">", ">=", "<", "<=", "crosses_above", "crosses_below"];
+      opSel.replaceChildren(...ops.map(o => el("option", { value: o, text: OP_WORDS[o] })));
+      opSel.value = initial && ops.includes(c.op) ? c.op : ops[0];
+      if (f === "pattern") {
+        const sel = el("select", { "aria-label": "Pattern" }, Object.entries(meta.patterns).map(([k, v]) => el("option", { value: k, text: v })));
+        if (initial && c.value) sel.value = c.value;
+        valBox.replaceChildren(sel); valueGet = () => sel.value;
+      } else if (meta.categories[f]) {
+        const words = f === "trend_state" ? trendWord : (x => REGIME_WORDS[x] || x);
+        const boxes = meta.categories[f].map(v => { const b2 = el("input", { type: "checkbox", value: v, checked: initial && Array.isArray(c.value) && c.value.includes(v) }); return el("label", { class: "check" }, b2, words(v)); });
+        valBox.replaceChildren(el("span", { class: "toggles" }, boxes));
+        valueGet = () => [...valBox.querySelectorAll("input:checked")].map(b2 => b2.value);
+      } else {
+        const kind = el("select", { "aria-label": "Compare with" }, el("option", { value: "num", text: "a number" }), el("option", { value: "field", text: "another field" }));
+        const n = el("input", { type: "number", step: "any", value: typeof c.value === "number" ? c.value : 50 });
+        const other = el("select", { "aria-label": "Other field" }, Object.entries(meta.numeric).map(([k, v]) => el("option", { value: k, text: v })));
+        if (initial && typeof c.value === "string") { kind.value = "field"; other.value = c.value; }
+        const show2 = () => { n.classList.toggle("hidden", kind.value !== "num"); other.classList.toggle("hidden", kind.value === "num"); };
+        kind.addEventListener("change", show2); show2();
+        valBox.replaceChildren(kind, n, other);
+        valueGet = () => kind.value === "num" ? Number(n.value) : other.value;
+      }
+    }
+    fieldSel.addEventListener("change", () => sync(false));
+    sync(true);
+    node.value = () => ({ field: fieldSel.value, op: opSel.value, value: valueGet() });
+    remove.addEventListener("click", () => node.remove());
+    rows[side].append(node);
+  }
+  function load(name) {
+    const pr = meta.presets[name];
+    for (const side of ["long", "short"]) { rows[side].replaceChildren(); for (const c of pr[side]) condRow(side, c); }
+    for (const b2 of regimeBox.querySelectorAll("input")) b2.checked = pr.regimes.includes(b2.value);
+  }
+  function body() {
+    const strategy = { long: [...rows.long.children].map(n => n.value()), short: [...rows.short.children].map(n => n.value()),
+      regimes: [...regimeBox.querySelectorAll("input:checked")].map(b2 => b2.value) };
+    const symbols = syms.value.split(/[ ,]+/).map(x => x.trim()).filter(Boolean);
+    return { strategy, years: Number(years.value) || 3, symbols: symbols.length ? symbols : null, monte_carlo: mc.checked,
+      params: { stop_loss_pct: Number(stop.value) / 100, take_profit_pct: Number(target.value) / 100, holding_period_days: Math.round(Number(hold.value)), short_borrow_rate_pct: Number(borrow.value) } };
+  }
+  run.addEventListener("click", () => withBusy(run, err, async () => { out.replaceChildren(renderBacktestV2(await api("/v2/backtest", body()))); }));
+  wf.addEventListener("click", () => withBusy(wf, err, async () => { const b2 = body(); b2.years = Math.max(4, b2.years); out.replaceChildren(renderWalkForwardV2(await api("/v2/backtest/walkforward", b2))); }));
+  api("/v2/backtest/fields").then(m => {
+    meta = m;
+    preset.replaceChildren(...Object.entries(m.presets).map(([k, v]) => el("option", { value: k, text: v.label })));
+    regimeBox.replaceChildren(...m.categories.regime.map(r2 => el("label", { class: "check" }, el("input", { type: "checkbox", value: r2 }), REGIME_WORDS[r2] || r2)));
+    preset.addEventListener("change", () => load(preset.value));
+    load(preset.value);
+    const addL = el("button", { class: "plain small-btn", type: "button", text: "Add a long condition" }), addS = el("button", { class: "plain small-btn", type: "button", text: "Add a short condition" });
+    addL.addEventListener("click", () => condRow("long")); addS.addEventListener("click", () => condRow("short"));
+    box.append(el("div", { class: "row" }, field("Start from", preset), field("Symbols (blank for the watchlist)", syms)),
+      el("h4", { text: "Go long when all of these hold" }), rows.long, addL,
+      el("h4", { text: "Go short when all of these hold" }), rows.short, addS,
+      el("h4", { text: "Only in these market regimes (none ticked: any)" }), regimeBox,
+      el("div", { class: "inline-form" }, field("Years", years), field("Stop %", stop), field("Target %", target), field("Hold up to (days)", hold), field("Borrow fee % a year", borrow),
+        el("label", { class: "check" }, mc, "Monte Carlo"), run, wf), err, out,
+      m.options_backtest ? null : el("p", { class: "small muted", text: "Option strategies are not backtested: no connected source has past option prices, and pricing them from today's volatility would only look precise." }));
+  }).catch(e => { err.textContent = e.message; box.append(err); });
+  return box;
+}
+
+function renderBacktestV2(r) {
+  const frag = el("div");
+  if (r.data_source === "demo") frag.append(banner("warn", "Demo prices are random: this result says nothing about real markets."));
+  for (const w of r.data_warnings || []) frag.append(banner("warn", w));
+  const b = r.benchmark;
+  frag.append(el("div", { class: "metrics" },
+    metric(signedPct(r.total_return_pct, 1), `Return (buy and hold ${signedPct(b.total_return_pct, 1)})`),
+    metric(isNum(r.sharpe) ? num(r.sharpe, 2) : "n/a", `Sharpe (buy and hold ${isNum(b.sharpe) ? num(b.sharpe, 2) : "n/a"})`),
+    metric(pct(r.max_drawdown_pct, 1), "Deepest drawdown"), metric(num(r.num_trades, 0), "Trades"),
+    metric(isNum(r.win_rate_pct) ? pct(r.win_rate_pct, 0) : "n/a", "Winners"), metric(isNum(r.profit_factor) ? num(r.profit_factor, 2) : "n/a", "Profit factor"),
+    metric(money(r.borrow_cost, 0), "Paid to borrow for shorts"),
+    metric(isNum(r.significance.prob_sharpe_positive) ? pct(100 * r.significance.prob_sharpe_positive, 0) : "n/a", "Chance the Sharpe is above zero")));
+  frag.append(lineChart({ series: [{ name: "Strategy", color: "--series-1", points: r.equity_curve.map(p2 => ({ x: p2.date, y: p2.equity })) },
+    { name: "Buy and hold", color: "--series-2", points: r.equity_curve.map(p2 => ({ x: p2.date, y: p2.benchmark })) }], yFormat: v => money(v, 0), height: 240 }));
+  const m = r.monte_carlo;
+  if (m) frag.append(el("h4", { text: "Monte Carlo" }), el("p", { class: "small", text: `Across ${m.paths} reshuffles of the daily returns, the return ran from ${signedPct(m.return_pct.p5, 1)} to ${signedPct(m.return_pct.p95, 1)} (5th to 95th percentile, median ${signedPct(m.return_pct.p50, 1)}) and the deepest drawdown from ${pct(m.max_drawdown_pct.p5, 1)} to ${pct(m.max_drawdown_pct.p95, 1)}. It lost money in ${pct(100 * m.chance_of_loss, 0)} of them.` }),
+    el("p", { class: "small muted", text: m.note }));
+  frag.append(el("p", { class: "small muted", text: `Signal days: ${num(r.signals.long_days, 0)} long, ${num(r.signals.short_days, 0)} short${r.signals.blocked_by_regime ? `, ${num(r.signals.blocked_by_regime, 0)} skipped for the regime` : ""}.` }),
+    el("ul", { class: "plain small muted" }, r.notes.map(n => el("li", { text: n }))));
+  if (r.trades.length) frag.append(el("details", {}, el("summary", { text: `Trades (${r.trades.length}${r.trades_truncated ? ` of ${r.trades_truncated}` : ""})` }), table([
+    { label: "Symbol", cell: t => t.symbol }, { label: "Side", cell: t => t.direction === "LONG" ? "Long" : "Short" },
+    { label: "In", cell: t => shortDate(t.entry_date) }, { label: "Out", cell: t => shortDate(t.exit_date) },
+    { label: "Result", num: true, cell: t => signedMoney(t.pnl) }, { label: "Why it ended", cell: t => t.exit_reason.replaceAll("_", " ").toLowerCase() }], r.trades.slice().reverse())));
+  return frag;
+}
+
+function renderWalkForwardV2(w) {
+  const o = w.out_of_sample, frag = el("div");
+  if (w.data_source === "demo") frag.append(banner("warn", "Demo prices are random: this result says nothing about real markets."));
+  frag.append(el("div", { class: "metrics" }, metric(signedPct(o.total_return_pct, 1), "Out-of-sample return"),
+    metric(isNum(o.sharpe) ? num(o.sharpe, 2) : "n/a", "Out-of-sample Sharpe"), metric(pct(o.max_drawdown_pct, 1), "Deepest drawdown"),
+    metric(`${o.positive_folds} of ${o.folds}`, "Test windows that made money"),
+    metric(`${isNum(w.avg_train_sharpe) ? num(w.avg_train_sharpe, 2) : "n/a"} / ${isNum(w.avg_test_sharpe) ? num(w.avg_test_sharpe, 2) : "n/a"}`, "Average Sharpe, training / test")),
+    table([{ label: "Trained on", cell: f => `${shortDate(f.train_start)} to ${shortDate(f.train_end)}` }, { label: "Tested on", cell: f => `${shortDate(f.test_start)} to ${shortDate(f.test_end)}` },
+      { label: "Chosen", cell: f => Object.entries(f.chosen).map(([k, v]) => `${k.replace("_pct", "").replaceAll("_", " ")} ${k.endsWith("_pct") ? pct(100 * v, 0) : v}`).join(", ") },
+      { label: "Test return", num: true, cell: f => signedPct(f.test_return_pct, 1) }, { label: "Trades", num: true, cell: f => num(f.test_trades, 0) }], w.folds),
+    el("ul", { class: "plain small muted" }, w.notes.map(n => el("li", { text: n }))));
+  return frag;
+}
+{
+  const classicBacktest = BUILDERS.backtest;
+  BUILDERS.backtest = () => {
+    const view = classicBacktest();
+    if (featureOn("trend_engine_v2")) view.append(conditionStrategyPanel());
+    return view;
+  };
+}
+
 Object.assign(BUILDERS, { positions: buildPositions, analyze: buildAnalyze, portfolio: buildPortfolio });

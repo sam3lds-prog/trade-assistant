@@ -123,6 +123,38 @@ class StressRequest(Strict):
     scenarios: list[Scenario] = Field(..., min_length=1, max_length=20)
 
 
+class Condition(Strict):
+    field: str
+    op: str
+    value: float | str | list[str] | None = None
+
+
+class StrategySpec(Strict):
+    long: list[Condition] = Field(default_factory=list, max_length=8)
+    short: list[Condition] = Field(default_factory=list, max_length=8)
+    regimes: list[str] = Field(default_factory=list, max_length=6)
+
+
+class BacktestV2(Strict):
+    symbols: list[str] | None = Field(None, max_length=40)
+    years: float = Field(3.0, ge=1, le=10)
+    preset: str | None = None
+    regimes: list[str] | None = None
+    strategy: StrategySpec | None = None
+    params: dict[str, float | int | bool] | None = None
+    monte_carlo: bool = True
+    n_trials: int = Field(1, ge=1, le=10_000)
+    instrument: Literal["STOCK", "OPTION"] = "STOCK"
+
+
+class WalkForwardV2(BacktestV2):
+    years: float = Field(4.0, ge=2, le=10)
+    grid: dict[str, list[float]] | None = None
+    train_days: int = Field(252, ge=60, le=1000)
+    test_days: int = Field(63, ge=20, le=500)
+    anchored: bool = False
+
+
 class Note(Strict):
     note: str = ""
 
@@ -260,6 +292,39 @@ def build_router(svc: Any) -> APIRouter:
                 raise HTTPException(status_code=400, detail="Each stock move must be between -90% and +300%")
         out = analyst.portfolio([sc.model_dump() for sc in req.scenarios])
         return clean({"stress": out["stress"], "account_size": out["account_size"], "count": out["count"]})
+
+    # --- backtest V2 ----------------------------------------------------------------------------
+    @router.get("/backtest/fields")
+    def backtest_fields():
+        need("trend_engine_v2")
+        from .backtest_v2 import CATEGORY_FIELDS, NUMERIC_FIELDS, OPS, PRESETS
+        from .patterns import PATTERNS as P
+        from .regime import REGIMES
+        from .trend import STATES
+        return {"numeric": NUMERIC_FIELDS, "categories": {"trend_state": list(STATES), "regime": list(REGIMES)},
+                "category_words": CATEGORY_FIELDS, "ops": list(OPS), "presets": PRESETS,
+                "patterns": {k: p.label for k, p in P.items()},
+                "options_backtest": svc.settings.features.get("options_backtest", False)}
+
+    def _bt(req: Any, fn):
+        need("trend_engine_v2")
+        if req.instrument == "OPTION":
+            need("options_backtest")
+        body = req.model_dump()
+        if body.get("strategy"):
+            body["strategy"] = {k: v for k, v in body["strategy"].items()}
+        try:
+            return clean(fn(body))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/backtest")
+    def backtest_v2(req: BacktestV2):
+        return _bt(req, analyst.backtest)
+
+    @router.post("/backtest/walkforward")
+    def backtest_walk_forward(req: WalkForwardV2):
+        return _bt(req, analyst.backtest_walk_forward)
 
     # --- positions ---------------------------------------------------------------------
     @router.get("/positions")

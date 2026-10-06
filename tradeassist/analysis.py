@@ -560,6 +560,95 @@ class Analyst:
         exc = analytics.excursions(v, bars, until=v.get("closed_at") or datetime.now(NY).isoformat())
         return analytics.position_analytics(v, exc, limit)
 
+    # --- backtest V2 ---------------------------------------------------------------------------------
+    def _backtest_inputs(self, symbols: list[str] | None, years: float) -> tuple[dict, dict, Any, list[str]]:
+        names = [self.svc._symbol(s) for s in (symbols or self.svc.settings.watchlist) if s.strip()]
+        if not names:
+            raise ValueError("Give at least one symbol")
+        if len(names) > 40:
+            raise ValueError("At most 40 symbols per run")
+        span = years + 1.1                       # the 200-day average and the 52-week range need a year first
+        try:
+            spy = self.market.bars("SPY", span, complete=True)
+        except DataError:
+            spy = None
+        frames, states, warnings = {}, {}, []
+        for sym in dict.fromkeys(names):
+            try:
+                df = self.market.enriched(sym, span, complete=True)
+                sector = self.sector(sym)
+                bench = {"SPY": spy}
+                if sector:
+                    try:
+                        bench[sector] = self.market.bars(sector, span, complete=True)
+                    except DataError:
+                        pass
+                frames[sym] = df
+                states[sym] = trend_engine.state_series(df, bench, sector, None)
+            except (DataError, ValueError) as exc:
+                warnings.append(f"{sym}: {exc}")
+        if not frames:
+            raise ValueError("No price history could be loaded for those symbols")
+        return frames, states, self._regime_by_date(span), warnings
+
+    def _strategy(self, req: dict[str, Any]) -> dict[str, Any]:
+        from .backtest_v2 import PRESETS
+        if req.get("preset"):
+            if req["preset"] not in PRESETS:
+                raise ValueError(f"Unknown preset {req['preset']!r}; use one of {', '.join(PRESETS)}")
+            base = PRESETS[req["preset"]]
+            return {"long": base["long"], "short": base["short"], "regimes": req.get("regimes") or base["regimes"]}
+        st = req.get("strategy") or {}
+        return {"long": st.get("long") or [], "short": st.get("short") or [], "regimes": st.get("regimes") or []}
+
+    def _bt_params(self, overrides: dict[str, Any] | None) -> Any:
+        params = {"short_borrow_rate_pct": 0.5, **(overrides or {})}
+        try:
+            return self.svc._params(params)
+        except Exception as exc:                 # the classic validator raises RequestError
+            raise ValueError(str(exc)) from exc
+
+    def _options_check(self, req: dict[str, Any]) -> None:
+        if str(req.get("instrument") or "STOCK").upper() == "OPTION":
+            from .options.history import provider_for
+            provider = provider_for(self.svc.settings)
+            if not provider.available():
+                raise ValueError(provider.reason)
+
+    def backtest(self, req: dict[str, Any]) -> dict[str, Any]:
+        from . import backtest_v2
+        self._options_check(req)
+        years = max(1.0, min(float(req.get("years") or 3.0), 10.0))
+        strategy = self._strategy(req)
+        backtest_v2.validate(strategy)
+        frames, states, regimes, warnings = self._backtest_inputs(req.get("symbols"), years)
+        start = (datetime.now(NY).date() - pd.Timedelta(days=int(years * 365.25))).isoformat()
+        out = backtest_v2.run(frames, states, regimes, strategy, self._bt_params(req.get("params")), start,
+                              bool(req.get("monte_carlo", True)), int(req.get("n_trials") or 1))
+        out["data_warnings"] = warnings
+        out["data_source"] = self.market.info.mode
+        out["trend_engine_version"] = TREND_ENGINE_VERSION
+        if len(out["trades"]) > 500:
+            out["trades_truncated"] = len(out["trades"])
+            out["trades"] = out["trades"][-500:]
+        return out
+
+    def backtest_walk_forward(self, req: dict[str, Any]) -> dict[str, Any]:
+        from . import backtest_v2
+        self._options_check(req)
+        years = max(2.0, min(float(req.get("years") or 4.0), 10.0))
+        train, test = int(req.get("train_days") or 252), int(req.get("test_days") or 63)
+        if not 60 <= train <= 1000 or not 20 <= test <= 500:
+            raise ValueError("Training window must be 60 to 1000 days and test window 20 to 500 days")
+        strategy = self._strategy(req)
+        backtest_v2.validate(strategy)
+        frames, states, regimes, warnings = self._backtest_inputs(req.get("symbols"), years)
+        out = backtest_v2.run_walk_forward(frames, states, regimes, strategy, self._bt_params(req.get("params")),
+                                           req.get("grid"), train, test, bool(req.get("anchored")))
+        out["data_warnings"] = warnings
+        out["data_source"] = self.market.info.mode
+        return out
+
     # --- everything about one stock --------------------------------------------------------------
     def analysis(self, symbol: str) -> dict[str, Any]:
         symbol = self.svc._symbol(symbol)
