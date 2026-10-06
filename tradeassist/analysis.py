@@ -22,6 +22,7 @@ from . import signalbook
 from . import trend as trend_engine
 from .dataquality import assess
 from .market import complete_only
+from .optionmath import NY
 from .patterns import PATTERNS, detect_all, recent_events
 from .providers.base import DataError
 from .sectors import SECTOR_FUNDS, sector_fund
@@ -387,6 +388,58 @@ class Analyst:
         out["position_id"] = req.get("position_id")
         out["entry_source"] = "yours" if req.get("entry_price") is not None else "current price"
         out["earnings"] = earnings
+        out["data_source"] = self.market.info.mode
+        return out
+
+    # --- options contract evaluator --------------------------------------------------------------------
+    def evaluate_options(self, req: dict[str, Any], only: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Which calls (bullish) or puts (bearish) fit the thesis; with `only`, just those contracts."""
+        from .evaluator import suggest_levels
+        from .options.evaluator import evaluate as evaluate_contracts, horizon_date, pick_expirations
+        symbol = self.svc._symbol(req["symbol"])
+        direction = 1 if str(req.get("direction", "BULLISH")).upper() in ("BULLISH", "LONG") else -1
+        spot = self.market.spot(symbol)
+        enriched = self.market.enriched(symbol, 3)
+        sug = suggest_levels(enriched, direction, spot)
+        t1 = req.get("target_price") or sug["target_1"]
+        t2 = req.get("target_2") or (sug["target_2"] if not req.get("target_price") else t1 + (t1 - spot) * 0.5)
+        inv = req.get("invalidation_price") or sug["invalidation"]
+        horizon = int(req.get("horizon_days") or 20)
+        today = datetime.now(NY).date()
+        all_exps = self.market.expirations(symbol)
+        if only:
+            exps = sorted({str(c["expiration"]) for c in only})
+            missing = [e for e in exps if e not in all_exps]
+            if missing:
+                raise ValueError(f"{symbol} has no options expiring on {', '.join(missing)}")
+        elif req.get("expirations"):
+            exps = [e for e in req["expirations"] if e in all_exps][:6]
+            if not exps:
+                raise ValueError("None of those expirations are listed for this stock")
+        else:
+            exps = pick_expirations(all_exps, today, horizon_date(today, horizon))
+            if not exps:
+                raise ValueError(f"No {symbol} expiration leaves time after a {horizon}-day horizon")
+        analyses = [self.svc._chain_for(symbol, e) for e in exps]
+        earnings = self.svc._earnings(symbol, req.get("earnings_date"))
+        out = evaluate_contracts(symbol=symbol, direction=direction, spot=spot, analyses=analyses, target_1=float(t1),
+                                 target_2=float(t2), invalidation=float(inv), horizon=horizon,
+                                 rate=self.svc.settings.risk_free_rate, contracts=int(req.get("contracts") or 1),
+                                 budget=req.get("budget"), earnings=earnings,
+                                 only=[(str(c["option_type"]).lower(), float(c["strike"]), str(c["expiration"]))
+                                       for c in only] if only else None)
+        out["levels_source"] = {"target_1": "yours" if req.get("target_price") else "suggested",
+                                "invalidation": "yours" if req.get("invalidation_price") else "suggested",
+                                "notes": sug["notes"]}
+        out["earnings"] = earnings
+        try:
+            stock = self.evaluate_position({"symbol": symbol, "direction": "LONG" if direction > 0 else "SHORT",
+                                            "entry_price": spot, "invalidation_price": float(inv),
+                                            "target_1": float(t1), "target_2": float(t2), "horizon_days": horizon})
+            out["stock_grade"] = {"grade": stock["grade"], "score": stock["score"], "caps": stock["caps"],
+                                  "components": stock["components"]}
+        except (DataError, ValueError) as exc:
+            out["stock_grade"] = {"error": str(exc)}
         out["data_source"] = self.market.info.mode
         return out
 

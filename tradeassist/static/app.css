@@ -284,3 +284,9 @@ select:disabled, input:disabled { opacity: 0.6; }
 .grade-letter.g-D, .grade-letter.g-AVOID { color: var(--fail); background: var(--fail-bg); font-size: 1.5rem; }
 .grade-title { font-weight: 600; font-size: 1.1rem; }
 .score-track.mini { width: 120px; height: 8px; margin-top: 6px; }
+
+/* Option picks */
+.pick-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 12px 0; }
+.pick { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--sunk); display: flex; flex-direction: column; gap: 4px; }
+.pick-cat { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; color: var(--accent); }
+.pick-name { font-weight: 600; font-size: 1.05rem; }

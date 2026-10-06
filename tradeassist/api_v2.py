@@ -88,6 +88,29 @@ class PositionEvaluate(Strict):
     position_id: int | None = None
 
 
+class OptionsEvaluate(Strict):
+    symbol: str
+    direction: Literal["BULLISH", "BEARISH"] = "BULLISH"
+    target_price: float | None = Field(None, gt=0)
+    target_2: float | None = Field(None, gt=0)
+    invalidation_price: float | None = Field(None, gt=0)
+    horizon_days: int = Field(20, ge=1, le=260)
+    contracts: int = Field(1, ge=1, le=500)
+    budget: float | None = Field(None, gt=0)
+    expirations: list[str] | None = Field(None, max_length=6)
+    earnings_date: str | None = None
+
+
+class ContractRef(Strict):
+    option_type: Literal["CALL", "PUT", "call", "put"]
+    strike: float = Field(..., gt=0)
+    expiration: str
+
+
+class OptionsCompare(OptionsEvaluate):
+    contracts_to_compare: list[ContractRef] = Field(..., min_length=1, max_length=8)
+
+
 class Note(Strict):
     note: str = ""
 
@@ -187,6 +210,27 @@ def build_router(svc: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail="Give a symbol or a position_id")
         try:
             return clean(analyst.evaluate_position(req.model_dump()))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/options/evaluate")
+    def evaluate_options(req: OptionsEvaluate):
+        need("trend_engine_v2")
+        try:
+            return clean(analyst.evaluate_options(req.model_dump()))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/options/compare")
+    def compare_options(req: OptionsCompare):
+        need("trend_engine_v2")
+        body = req.model_dump()
+        only = body.pop("contracts_to_compare")
+        kind = "CALL" if body["direction"] == "BULLISH" else "PUT"
+        if any(c["option_type"].upper() != kind for c in only):
+            raise HTTPException(status_code=400, detail=f"A {body['direction'].lower()} thesis compares {kind.lower()}s only")
+        try:
+            return clean(analyst.evaluate_options(body, only=only))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

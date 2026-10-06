@@ -596,6 +596,75 @@ function evaluateSection(d) {
     el("div", { class: "inline-form" }, field("Direction", dir), field("Entry", entry), field("Invalidation", inv), field("Target 1", t1), field("Target 2", t2), field("Holding days", horizon), go), err, out);
 }
 ANALYSIS_SECTIONS.push(evaluateSection);
+
+/* ---------- choosing a call or put for the thesis ---------- */
+function optionsSection(d) {
+  const bearish = (d.trend.provisional || d.trend.confirmed).state.includes("DOWN");
+  const dir = segmented(`opdir${++uid}`, [["BULLISH", "Bullish (calls)"], ["BEARISH", "Bearish (puts)"]], bearish ? "BEARISH" : "BULLISH");
+  const target = numInput({ placeholder: "suggest" }), inv = numInput({ placeholder: "suggest" });
+  const horizon = el("input", { type: "number", min: 1, max: 260, step: 1, value: 20 });
+  const qty = el("input", { type: "number", min: 1, max: 500, step: 1, value: 1 });
+  const budget = numInput({ placeholder: "none", step: "1" });
+  const go = el("button", { class: "primary", text: "Find contracts" });
+  const err = el("div", { class: "error", role: "alert" });
+  const out = el("div");
+  go.addEventListener("click", () => withBusy(go, err, async () => {
+    const body = { symbol: d.symbol, direction: dir.value(), horizon_days: Math.round(Number(horizon.value) || 20), contracts: Math.max(1, Math.round(Number(qty.value) || 1)) };
+    for (const [k, input] of [["target_price", target], ["invalidation_price", inv], ["budget", budget]]) { const v = optNum(input); if (v !== null) body[k] = v; }
+    out.replaceChildren(el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Valuing contracts across expirations…" })));
+    try { out.replaceChildren(renderOptionsEval(await api("/v2/options/evaluate", body))); }
+    catch (e) { out.replaceChildren(); throw e; }
+  }));
+  return el("div", { class: "panel" }, el("h3", { text: "Choose a call or put for the thesis" }),
+    el("p", { class: "small muted", text: "The thesis is about the stock: where it should get to, by when, and the price that would prove it wrong. Leave prices blank to use the suggested levels." }),
+    el("div", { class: "inline-form" }, field("Thesis", dir), field("Stock target", target), field("Invalidation (stock)", inv), field("By (trading days)", horizon), field("Contracts", qty), field("Budget ($)", budget), go), err, out);
+}
+ANALYSIS_SECTIONS.push(optionsSection);
+
+function contractName(k) { return `${shortDate(k.expiration)} ${num(k.strike, k.strike % 1 ? 2 : 0)} ${k.option_type.toLowerCase()}`; }
+
+function renderOptionsEval(r) {
+  const th = r.thesis, frag = el("div");
+  if (r.data_source === "demo") frag.append(banner("warn", "Demo data: these option prices are made up."));
+  frag.append(el("p", { class: "small" }, el("strong", { text: `${th.direction === "BULLISH" ? "Bullish" : "Bearish"} on ${r.symbol} at ${money(th.spot)}: ` }),
+    `target ${money(th.target_1)} (${r.levels_source.target_1}) by ${shortDate(th.horizon_date)}, wrong ${th.direction === "BULLISH" ? "below" : "above"} ${money(th.invalidation)} (${r.levels_source.invalidation}). `,
+    r.stock_grade && r.stock_grade.grade ? el("span", {}, "The stock trade itself grades ", el("strong", { text: r.stock_grade.grade }), ".") : null));
+  if (r.market) frag.append(el("p", { class: "small muted", text: `Market-implied: about ${pct(100 * r.market.reach_target_1_by_horizon, 0)} chance the stock is past the target on ${shortDate(th.horizon_date)}, ${pct(100 * r.market.beyond_invalidation_at_horizon, 0)} past the invalidation price. ${r.market.note}` }));
+  frag.append(banner("info", `Exit rule: ${r.exit_rule}`));
+  if (!r.picks.length) frag.append(banner("warn", "No contract both fits the thesis and passes the checks. See the list of contracts to avoid below."));
+  const cards = el("div", { class: "pick-grid" });
+  for (const pk of r.picks) {
+    const k = pk.contract;
+    const sim = el("button", { class: "plain small-btn", text: "Simulate" });
+    sim.addEventListener("click", () => state.openSimulation(r.symbol, [{ side: "buy", contracts: th.contracts, option_type: k.option_type.toLowerCase(), expiration: k.expiration, strike: k.strike, entry_price: k.mid }]));
+    const track = el("button", { class: "plain small-btn", text: "Save as a plan" });
+    const note = el("span", { class: "small muted" });
+    track.addEventListener("click", () => withBusy(track, note, async () => {
+      const p = await api("/v2/positions", { symbol: r.symbol, instrument_type: "OPTION", quantity: th.contracts, setup_type: "option for a stock thesis",
+        option: { option_type: k.option_type, strike: k.strike, expiration: k.expiration }, invalidation_price: th.invalidation, target_1: th.target_1, target_2: th.target_2,
+        thesis: `${th.direction === "BULLISH" ? "Bullish" : "Bearish"}: ${r.symbol} to ${money(th.target_1)} by ${shortDate(th.horizon_date)}. ${r.exit_rule}` });
+      note.textContent = `Saved as planned position ${p.id}.`;
+    }));
+    cards.append(el("div", { class: "pick" }, el("div", { class: "pick-cat", text: pk.category }), el("div", { class: "pick-name", text: contractName(k) }),
+      el("div", { class: "small", text: `${money(k.mid)} mid · ${money(k.premium, 0)} for ${th.contracts} · delta ${num(k.delta, 2)}` }),
+      el("div", { class: "small", text: `At target: ${signedMoney(k.at_target)} · if invalidated: ${signedMoney(k.if_invalidated)}` }),
+      el("p", { class: "small muted", text: pk.why }), k.flags.length ? el("ul", { class: "plain small" }, k.flags.map(f => el("li", {}, statusTag("warn", "Caution"), ` ${f}`))) : null,
+      el("div", { class: "row" }, sim, track), note));
+  }
+  frag.append(cards);
+  const usable = r.contracts.filter(k => k.usable);
+  if (usable.length) frag.append(el("details", {}, el("summary", { text: `All ${usable.length} contracts that pass the checks` }), table([
+    { label: "Contract", cell: k => contractName(k) }, { label: "Mid", num: true, cell: k => money(k.mid) },
+    { label: "Cost", num: true, cell: k => money(k.premium, 0) }, { label: "Delta", num: true, cell: k => num(k.delta, 2) },
+    { label: "At target", num: true, cell: k => signedMoney(k.at_target) }, { label: "Return", num: true, cell: k => isNum(k.return_on_premium) ? signedPct(100 * k.return_on_premium, 0) : "n/a" },
+    { label: "If invalidated", num: true, cell: k => signedMoney(k.if_invalidated) }, { label: "Reward : risk", num: true, cell: k => isNum(k.reward_to_risk) ? num(k.reward_to_risk, 2) : "n/a" },
+    { label: "Flat stock", num: true, cell: k => signedMoney(k.if_unchanged) }, { label: "Breakeven by horizon", num: true, cell: k => money(k.breakeven_at_horizon) },
+    { label: "Spread", num: true, cell: k => pct(k.spread_pct, 0) }], usable)));
+  if (r.avoid.length) frag.append(el("details", {}, el("summary", { text: `${r.avoid.length} contracts to avoid, and why` }),
+    el("ul", { class: "plain small" }, r.avoid.map(a => el("li", {}, el("strong", { text: `${shortDate(a.expiration)} ${num(a.strike, a.strike % 1 ? 2 : 0)}: ` }), a.reasons.join(" "))))));
+  frag.append(el("ul", { class: "plain small muted" }, r.notes.map(n => el("li", { text: n }))));
+  return frag;
+}
 {
   const classicPatterns = BUILDERS.patterns;
   BUILDERS.patterns = () => {
