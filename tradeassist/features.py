@@ -16,7 +16,7 @@ from typing import Mapping
 FEATURE_DEFAULTS: dict[str, bool] = {
     "unified_positions": True,
     "trend_engine_v2": True,
-    "portfolio_risk": False,
+    "portfolio_risk": True,
     "signal_calibration": True,
     "options_backtest": False,
 }

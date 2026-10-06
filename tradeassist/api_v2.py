@@ -111,6 +111,18 @@ class OptionsCompare(OptionsEvaluate):
     contracts_to_compare: list[ContractRef] = Field(..., min_length=1, max_length=8)
 
 
+class Scenario(Strict):
+    name: str = ""
+    market_move_pct: float = Field(0.0, ge=-90, le=200)
+    iv_shift_points: float = Field(0.0, ge=-50, le=150)
+    largest_gap_pct: float = Field(0.0, ge=0, le=90)
+    moves: dict[str, float] | None = None
+
+
+class StressRequest(Strict):
+    scenarios: list[Scenario] = Field(..., min_length=1, max_length=20)
+
+
 class Note(Strict):
     note: str = ""
 
@@ -233,6 +245,21 @@ def build_router(svc: Any) -> APIRouter:
             return clean(analyst.evaluate_options(body, only=only))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- portfolio risk ------------------------------------------------------------------------
+    @router.get("/portfolio/risk")
+    def portfolio_risk():
+        need("portfolio_risk")
+        return clean(analyst.portfolio())
+
+    @router.post("/portfolio/stress")
+    def portfolio_stress(req: StressRequest):
+        need("portfolio_risk")
+        for sc in req.scenarios:
+            if sc.moves and any(not (-90 <= v <= 300) for v in sc.moves.values()):
+                raise HTTPException(status_code=400, detail="Each stock move must be between -90% and +300%")
+        out = analyst.portfolio([sc.model_dump() for sc in req.scenarios])
+        return clean({"stress": out["stress"], "account_size": out["account_size"], "count": out["count"]})
 
     # --- positions ---------------------------------------------------------------------
     @router.get("/positions")

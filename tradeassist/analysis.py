@@ -443,6 +443,41 @@ class Analyst:
         out["data_source"] = self.market.info.mode
         return out
 
+    # --- portfolio risk ----------------------------------------------------------------------------------
+    def _views(self, status: str) -> list[dict[str, Any]]:
+        desk = getattr(self.svc, "desk", None)
+        if desk is None:
+            from .desk import Desk
+            desk = self.svc.desk = Desk(self.svc)
+        return desk.list(status)["positions"]
+
+    def daily_loss(self, views: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        from . import portfolio
+        views = self._views("all") if views is None else views
+        relevant = [v for v in views if v["status"] in ("OPEN", "PARTIALLY_CLOSED", "CLOSED")]
+        s = self.svc.settings
+        return portfolio.daily_loss(relevant, s.daily_loss_mode, s.account_size, s.daily_loss_stop_pct)
+
+    def portfolio(self, scenarios: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        from . import portfolio
+        views = self._views("all")
+        open_views = [v for v in views if v["status"] in ("OPEN", "PARTIALLY_CLOSED")]
+        bars: dict[str, pd.DataFrame] = {}
+        notes = []
+        for sym in sorted({v["symbol"] for v in open_views} | {"SPY"}):
+            try:
+                bars[sym] = self.market.bars(sym, 1, complete=True)
+            except DataError as exc:
+                notes.append(f"{sym}: no price history for correlation and beta ({exc}).")
+        s = self.svc.settings
+        out = portfolio.analyse(open_views, bars, s.account_size, s.max_open_risk_pct, self.daily_loss(views), self.sector,
+                                scenarios)
+        out["notes"] = notes
+        out["data_source"] = self.market.info.mode
+        out["limits"] = {"account_size": s.account_size, "max_open_risk_pct": s.max_open_risk_pct,
+                         "daily_loss_stop_pct": s.daily_loss_stop_pct, "daily_loss_mode": s.daily_loss_mode}
+        return out
+
     # --- everything about one stock --------------------------------------------------------------
     def analysis(self, symbol: str) -> dict[str, Any]:
         symbol = self.svc._symbol(symbol)

@@ -674,4 +674,93 @@ function renderOptionsEval(r) {
   };
 }
 
-Object.assign(BUILDERS, { positions: buildPositions, analyze: buildAnalyze });
+/* ---------- view: portfolio risk ---------- */
+function buildPortfolio() {
+  const error = el("div", { class: "error", role: "alert" });
+  const out = el("div", {}, el("p", { class: "muted", text: "Loading…" }));
+  const refresh = el("button", { class: "plain", text: "Refresh" });
+  async function load() {
+    out.classList.add("refetching");
+    try { out.replaceChildren(renderPortfolio(await api("/v2/portfolio/risk"))); error.textContent = ""; }
+    catch (e) { error.textContent = e.message; }
+    finally { out.classList.remove("refetching"); }
+  }
+  refresh.addEventListener("click", () => withBusy(refresh, error, load));
+  const view = el("section", {}, el("div", { class: "panel-head" }, el("h2", { text: "Portfolio risk" }), refresh),
+    el("p", { class: "lede", text: "Everything open, added up: how much rides on the market, what a bad day or a crash would cost, where the risk is concentrated, and where you stand against your daily loss stop." }),
+    error, out);
+  view.onShow = load;
+  return view;
+}
+
+function renderPortfolio(r) {
+  const frag = el("div"), t = r.totals, dl = r.daily_loss;
+  if (r.data_source === "demo") frag.append(banner("warn", "Demo data: the prices are made up."));
+  for (const w of r.warnings) frag.append(banner(w.level === "fail" ? "fail" : w.level === "warn" ? "warn" : "info", w.text));
+  if (!r.count) { frag.append(el("div", { class: "panel" }, el("p", { class: "muted", text: "No open positions. Add them on the Positions screen (option-journal trades appear there automatically)." }))); }
+  const acct = r.account_size, share = v => acct ? ` (${pct(100 * v / acct, 0)} of the account)` : "";
+  frag.append(el("div", { class: "panel" }, el("h3", { text: "Totals" }), el("div", { class: "metrics" },
+    metric(signedMoney(t.net_exposure), `Net exposure in stock dollars${share(Math.abs(t.net_exposure))}`),
+    metric(money(t.gross_exposure, 0), "Gross exposure"),
+    metric(signedMoney(t.spy_equivalent), "SPY-equivalent dollars (beta-weighted)"),
+    metric(money(t.open_risk, 0), `Risk to invalidation, limit ${money(t.open_risk_limit, 0)}${t.open_risk_unknown ? `; ${t.open_risk_unknown} unknown` : ""}`),
+    metric(isNum(t.one_day_move_95) ? money(t.one_day_move_95, 0) : "n/a", "A bad day (1 in 20), from the last six months"),
+    metric(signedMoney(t.theta_per_day), "Time decay per day (options)"),
+    metric(signedMoney(t.vega_per_point), "Per point of implied volatility"),
+    metric(signedMoney(dl.counted), `Today, ${dl.mode === "REALIZED_PLUS_UNREALIZED" ? "closed and open" : "closed trades only"}; stop at ${money(-dl.stop, 0)}`)),
+    el("p", { class: "small muted", text: `${dl.note}${dl.unknown.length ? ` No previous close for: ${dl.unknown.join("; ")}, so their change today is not counted.` : ""} Set DAILY_LOSS_MODE in .env to change this.` })));
+
+  if (r.positions.length) frag.append(el("div", { class: "panel" }, el("h3", { text: "By position" }), table([
+    { label: "Position", cell: x => x.description }, { label: "Sector", cell: x => x.sector || "" },
+    { label: "Exposure", num: true, cell: x => signedMoney(x.dollar_delta) }, { label: "Beta", num: true, cell: x => isNum(x.beta) ? num(x.beta, 2) : "n/a" },
+    { label: "SPY-equivalent", num: true, cell: x => signedMoney(x.beta_dollars) },
+    { label: "Risk to invalidation", num: true, cell: x => isNum(x.risk_to_invalidation) ? money(x.risk_to_invalidation, 0) : "unknown" },
+    { label: "Theta / day", num: true, cell: x => x.instrument_type === "OPTION" ? signedMoney(x.theta) : "" },
+    { label: "Plan", cell: x => tagOf(THESIS, x.thesis_status) }], r.positions),
+    el("p", { class: "small muted", text: "Exposure is in stock dollars: shares times price, or delta times 100 times contracts times the stock price for options. Beta to SPY from six months of daily moves." })));
+
+  if (r.by_sector.length) {
+    const max = Math.max(...r.by_sector.map(x => Math.abs(x.exposure)), 1);
+    frag.append(el("div", { class: "panel" }, el("h3", { text: "By sector" }), el("div", { class: "bars" }, r.by_sector.map(x => el("div", { class: "bar-row" },
+      el("span", { text: x.sector }), el("div", { class: "score-track" }, el("i", { class: x.exposure >= 0 ? "pos" : "neg", style: `width:${100 * Math.abs(x.exposure) / max}%` })),
+      el("strong", { text: signedMoney(x.exposure) }))))));
+  }
+  if (r.correlation) {
+    const c = r.correlation;
+    const cell = v => el("td", { class: "num cell", style: `background: color-mix(in oklab, var(${v >= 0 ? "--div-pos" : "--div-neg"}) ${Math.round(70 * Math.abs(v))}%, var(--div-mid))`, text: num(v, 2) });
+    frag.append(el("div", { class: "panel" }, el("h3", { text: "How the holdings move together" }),
+      el("div", { class: "scroll" }, el("table", { class: "pnl-grid" }, el("thead", {}, el("tr", {}, el("th", { text: "" }), c.symbols.map(s2 => el("th", { class: "num", text: s2 })))),
+        el("tbody", {}, c.symbols.map((a2, i) => el("tr", {}, el("td", { text: a2 }), c.matrix[i].map(cell)))))),
+      el("p", { class: "small muted", text: "Correlation of daily returns over the last six months: 1 moves exactly together, 0 unrelated, -1 opposite." })));
+  }
+  frag.append(stressPanel(r));
+  for (const n of r.notes || []) frag.append(banner("info", n));
+  return frag;
+}
+
+function stressPanel(r) {
+  const box = el("div", { class: "panel" }, el("h3", { text: "Stress tests" }));
+  const rows = el("div");
+  const show = list => rows.replaceChildren(table([
+    { label: "Scenario", cell: x => x.name }, { label: "Profit or loss", num: true, cell: x => signedMoney(x.pnl) },
+    { label: "Of the account", num: true, cell: x => isNum(x.share_of_account) ? signedPct(100 * x.share_of_account, 1) : "n/a" },
+    { label: "Hit hardest", cell: x => x.worst && x.worst.pnl < 0 ? `${x.worst.description} (${signedMoney(x.worst.pnl)})` : "" }], list));
+  show(r.stress);
+  const mkt = el("input", { type: "number", step: 1, value: -15, min: -90, max: 200 }), iv = el("input", { type: "number", step: 1, value: 12, min: -50, max: 150 });
+  const sym = el("input", { class: "sym", type: "text", placeholder: "optional", "aria-label": "One stock" }), move = el("input", { type: "number", step: 1, value: -25 });
+  const go = el("button", { class: "plain", text: "Run this scenario" });
+  const err = el("div", { class: "error", role: "alert" });
+  go.addEventListener("click", () => withBusy(go, err, async () => {
+    const sc = { name: `Market ${signedPct(Number(mkt.value), 0)}, volatility ${Number(iv.value) >= 0 ? "+" : ""}${iv.value} points${sym.value.trim() ? `, ${sym.value.trim().toUpperCase()} ${signedPct(Number(move.value), 0)}` : ""}`,
+      market_move_pct: Number(mkt.value), iv_shift_points: Number(iv.value) };
+    if (sym.value.trim()) sc.moves = { [sym.value.trim().toUpperCase()]: Number(move.value) };
+    const res = await api("/v2/portfolio/stress", { scenarios: [sc] });
+    show([...res.stress, ...r.stress]);
+  }));
+  box.append(rows, el("h4", { text: "Your own scenario" }),
+    el("div", { class: "inline-form" }, field("Market move %", mkt), field("Volatility change (points)", iv), field("One stock", sym), field("Its move %", move), go), err,
+    el("p", { class: "small muted", text: "Each stock moves its beta times the market move unless named; calls and puts are repriced with the simulator's model at the new price and volatility, as of now." }));
+  return box;
+}
+
+Object.assign(BUILDERS, { positions: buildPositions, analyze: buildAnalyze, portfolio: buildPortfolio });

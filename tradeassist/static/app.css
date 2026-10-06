@@ -290,3 +290,8 @@ select:disabled, input:disabled { opacity: 0.6; }
 .pick { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--sunk); display: flex; flex-direction: column; gap: 4px; }
 .pick-cat { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; color: var(--accent); }
 .pick-name { font-weight: 600; font-size: 1.05rem; }
+
+/* Portfolio */
+.bars { display: flex; flex-direction: column; gap: 6px; max-width: 720px; }
+.bar-row { display: grid; grid-template-columns: 180px minmax(0, 1fr) 110px; gap: 10px; align-items: center; }
+.bar-row strong { text-align: right; }

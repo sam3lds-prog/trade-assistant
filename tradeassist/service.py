@@ -380,10 +380,10 @@ class TradeAssistant:
                             "filings point to a report before it. Confirm the date with the company, then "
                             "override this if you are sure.", "overridable": True})
         loss_cap = self.settings.account_size * self.settings.daily_loss_stop_pct / 100.0
-        realized = self.journal.realized_today()
+        realized, counted_as = self.loss_today()
         if realized <= -loss_cap:
             violations.append({"key": "daily_loss", "label": "Daily loss stop",
-                               "value": f"${-realized:,.0f} lost today",
+                               "value": f"${-realized:,.0f} lost today ({counted_as})",
                                "text": f"Your rule is to stop for the day after losing "
                                        f"{self.settings.daily_loss_stop_pct:g}% (${loss_cap:,.0f}).",
                                "overridable": True})
@@ -577,6 +577,18 @@ class TradeAssistant:
                              "Analyst estimates and guidance",
                              "Written summaries of filings: open the linked filings to read them"],
         })
+
+    def loss_today(self) -> tuple[float, str]:
+        """Today's result for the daily loss stop. With portfolio risk on, it covers every position
+        and follows DAILY_LOSS_MODE; otherwise it is the option journal's closed trades."""
+        analyst = getattr(self, "analyst", None)
+        if analyst is not None and self.settings.features.get("portfolio_risk"):
+            try:
+                d = analyst.daily_loss()
+                return d["counted"], ("closed and open" if d["mode"] == "REALIZED_PLUS_UNREALIZED" else "closed trades")
+            except (DataError, ValueError) as exc:
+                log.warning("Daily loss from positions unavailable, using the journal: %s", exc)
+        return self.journal.realized_today(), "closed trades"
 
     def regime(self) -> dict[str, Any]:
         try:

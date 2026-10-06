@@ -54,6 +54,9 @@ class Settings:
     max_risk_per_trade_pct: float = 2.0
     max_open_risk_pct: float = 10.0
     daily_loss_stop_pct: float = 3.0
+    # REALIZED_PLUS_UNREALIZED counts today's change in open positions toward the daily stop;
+    # REALIZED_ONLY counts closed trades only.
+    daily_loss_mode: str = "REALIZED_PLUS_UNREALIZED"
     max_spread_pct: float = 10.0
     min_dte: int = 7
 
@@ -109,6 +112,10 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
     if not db_path.is_absolute():
         db_path = ROOT / db_path
 
+    loss_mode = (os.getenv("DAILY_LOSS_MODE") or "REALIZED_PLUS_UNREALIZED").strip().upper()
+    if loss_mode not in ("REALIZED_PLUS_UNREALIZED", "REALIZED_ONLY"):
+        raise ValueError(f"DAILY_LOSS_MODE must be REALIZED_PLUS_UNREALIZED or REALIZED_ONLY, got {loss_mode!r}")
+
     return Settings(
         live_token=_clean_token(os.getenv("TRADIER_LIVE_TOKEN")),
         sandbox_token=_clean_token(os.getenv("TRADIER_SANDBOX_TOKEN")),
@@ -118,6 +125,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         max_risk_per_trade_pct=_float("MAX_RISK_PER_TRADE_PCT", 2.0),
         max_open_risk_pct=_float("MAX_OPEN_RISK_PCT", 10.0),
         daily_loss_stop_pct=_float("DAILY_LOSS_STOP_PCT", 3.0),
+        daily_loss_mode=loss_mode,
         max_spread_pct=_float("MAX_SPREAD_PCT", 10.0),
         min_dte=_int("MIN_DTE", 7),
         risk_free_rate=_float("RISK_FREE_RATE", 0.04),
