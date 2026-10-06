@@ -17,7 +17,7 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "unified_positions": True,
     "trend_engine_v2": True,
     "portfolio_risk": False,
-    "signal_calibration": False,
+    "signal_calibration": True,
     "options_backtest": False,
 }
 

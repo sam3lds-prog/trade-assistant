@@ -467,4 +467,89 @@ function regimeSection(d) {
 }
 ANALYSIS_SECTIONS.push(regimeSection);
 
+/* ---------- signals and how they turned out before ---------- */
+const VERDICT_WORDS = { supported: "passed", contradicted: "worked the wrong way", no_evidence: "no evidence", insufficient: "too few cases" };
+const featureOn = name => !!(state.status && state.status.features && state.status.features[name]);
+const freqText = h => {
+  if (!h || !h.cases) return el("span", { class: "muted", text: "no past cases" });
+  const range = isNum(h.frequency_low) ? ` (${pct(100 * h.frequency_low, 0)}–${pct(100 * h.frequency_high, 0)})` : "";
+  return el("span", { title: `Average ${signedPct(100 * h.mean_return, 1)} over ${h.horizon} days, ${signedPct(100 * (h.mean_excess_vs_spy || 0), 1)} against SPY` },
+    h.enough ? "" : statusTag("warn", "Few"), `${h.enough ? "" : " "}${pct(100 * h.frequency, 0)} of ${num(h.cases, 0)}${range}`);
+};
+
+function signalsSection(d) {
+  if (!featureOn("signal_calibration")) return null;
+  const box = el("div", { class: "panel" }, el("h3", { text: "Signals and how they turned out before" }), el("p", { class: "small muted", text: "Loading past cases…" }));
+  const load = () => api(`/v2/signals/${encodeURIComponent(d.symbol)}`).then(g => renderSignals(box, g, load))
+    .catch(e => box.replaceChildren(el("h3", { text: "Signals and how they turned out before" }), el("p", { class: "small error", text: e.message })));
+  load();
+  return box;
+}
+
+function renderSignals(box, g, reload) {
+  box.replaceChildren(el("h3", { text: "Signals and how they turned out before" }));
+  for (const n of g.notes) box.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
+  if (!g.history_built) box.append(buildHistoryButton(reload));
+  if (!g.signals.length) box.append(el("p", { class: "small muted", text: "No pattern or change of trend state in the last ten trading days." }));
+  else box.append(table([
+    { label: "Signal", cell: x => el("span", {}, el("strong", { text: x.label }), x.direction ? el("span", { class: "small muted", text: x.direction > 0 ? " · expects a rise" : " · expects a fall" }) : null) },
+    { label: "When", cell: x => el("span", {}, shortDate(x.date), " ", x.status === "PROVISIONAL" ? statusTag("warn", "Provisional") : null) },
+    { label: "All stocks", cell: x => freqText(x.history.all) },
+    { label: g.regime ? `In a ${(REGIME_WORDS[g.regime] || "").toLowerCase()}` : "Same market", cell: x => freqText(x.history.same_regime) },
+    { label: "This stock", cell: x => freqText(x.history.this_stock) },
+    { label: "Pattern lab", cell: x => x.lab.length ? x.lab.map(v => `${v.horizon}d ${VERDICT_WORDS[v.verdict] || v.verdict}`).join(", ") : el("span", { class: "muted", text: x.key.startsWith("pattern:") ? "not tested" : "not a pattern" }) }], g.signals));
+  box.append(el("p", { class: "small muted", text: `How often each signal was followed by a move its way over the next 10 trading days (entry at the next day's open), in the past cases ${g.history_built ? `recorded on ${g.history_symbols} stocks (${shortDate(g.history_run_at)})` : "once the history is built"}, with the 95% range. These are counts from the past, not forecasts; overlapping cases are not independent.` }));
+  const sc = g.score;
+  if (sc && isNum(sc.net_score_for_calibration)) {
+    const h = sc.h10, b = h && h.bucket;
+    box.append(el("h4", { text: "Is the evidence score calibrated?" }));
+    if (!g.history_built) box.append(el("p", { class: "small muted", text: "Build the signal history to check the score against what followed." }));
+    else {
+      box.append(el("p", { class: "small" }, sc.calibrated ? statusTag("pass", "Calibrated on this data") : statusTag("warn", "Not calibrated"), ` ${h.verdict}`));
+      if (b) box.append(el("p", { class: "small", text: `Net score ${num(sc.net_score_for_calibration, 0)} on ${shortDate(sc.date)} is in the ${num(b.low, 0)} to ${num(b.high, 0)} range. On ${num(b.cases, 0)} past days in that range across the stocks in the history, the stock was higher 10 days later ${pct(100 * b.frequency, 0)} of the time (${pct(100 * b.frequency_low, 0)}–${pct(100 * b.frequency_high, 0)})` +
+        (h.same_regime ? `; ${pct(100 * h.same_regime.frequency, 0)} of ${num(h.same_regime.cases, 0)} in the same market regime.` : ".") }));
+      box.append(el("p", { class: "small muted", text: sc.note }));
+    }
+  }
+}
+
+function buildHistoryButton(after) {
+  const btn = el("button", { class: "plain", text: "Build the signal history now" });
+  const err = el("div", { class: "error", role: "alert" });
+  btn.addEventListener("click", () => withBusy(btn, err, async () => { await api("/v2/signals/history/build", {}); if (after) await after(); }));
+  return el("div", { class: "row", style: "margin:8px 0" }, btn, el("span", { class: "small muted", text: "Uses five years of your watchlist; takes a little while." }), err);
+}
+
+function signalHistoryPanel() {
+  const box = el("div", { class: "panel" }, el("h3", { text: "Signal history and score calibration" }));
+  const body = el("div", {}, el("p", { class: "small muted", text: "Loading…" }));
+  const btn = el("button", { class: "primary", text: "Build or refresh the signal history" });
+  const err = el("div", { class: "error", role: "alert" });
+  const show = c => {
+    if (!c.built) { body.replaceChildren(el("p", { class: "small muted", text: "Not built yet. It records every pattern and change of trend state on your watchlist over five years, with what followed, so live signals can be compared with their past cases and the trend score can be checked against outcomes." })); return; }
+    const cal = c.calibration["10"];
+    body.replaceChildren(el("p", { class: "small", text: `Built ${shortDate(c.run_at)} from ${c.symbols.length} stocks (${c.data_source} data, ${c.trend_engine_version}).` }),
+      el("p", { class: "small" }, cal.calibrated ? statusTag("pass", "Calibrated") : statusTag("warn", "Not calibrated"), ` ${cal.verdict}`),
+      table([{ label: "Net score range", cell: b => `${num(b.low, 0)} to ${num(b.high, 0)}` }, { label: "Days", num: true, cell: b => num(b.cases, 0) },
+        { label: "Higher 10 days later", num: true, cell: b => isNum(b.frequency) ? `${pct(100 * b.frequency, 0)} (${pct(100 * b.frequency_low, 0)}–${pct(100 * b.frequency_high, 0)})` : "n/a" },
+        { label: "Average return", num: true, cell: b => isNum(b.mean_return) ? signedPct(100 * b.mean_return, 2) : "n/a" },
+        { label: "Against SPY", num: true, cell: b => isNum(b.mean_excess_vs_spy) ? signedPct(100 * b.mean_excess_vs_spy, 2) : "n/a" }], cal.buckets));
+  };
+  const load = () => api("/v2/signals/calibration").then(show).catch(e => { err.textContent = e.message; });
+  btn.addEventListener("click", () => withBusy(btn, err, async () => { await api("/v2/signals/history/build", {}); await load(); }));
+  load();
+  box.append(body, el("div", { class: "row", style: "margin-top:10px" }, btn), err);
+  return box;
+}
+
+ANALYSIS_SECTIONS.push(signalsSection);
+{
+  const classicPatterns = BUILDERS.patterns;
+  BUILDERS.patterns = () => {
+    const view = classicPatterns();
+    if (featureOn("signal_calibration")) view.append(signalHistoryPanel());
+    return view;
+  };
+}
+
 Object.assign(BUILDERS, { positions: buildPositions, analyze: buildAnalyze });

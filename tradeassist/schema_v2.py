@@ -101,3 +101,26 @@ def bar_adjustment(cur: sqlite3.Cursor) -> None:
     columns = {row[1] for row in cur.execute("PRAGMA table_info(bars_meta)").fetchall()}
     if "adjustment" not in columns:
         cur.execute("ALTER TABLE bars_meta ADD COLUMN adjustment TEXT NOT NULL DEFAULT 'unknown'")
+
+
+@migration(3, "signal occurrences: each past signal with its context and what followed")
+def signal_occurrences(cur: sqlite3.Cursor) -> None:
+    cur.execute("""CREATE TABLE IF NOT EXISTS signal_occurrences (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        data_source    TEXT NOT NULL,
+        engine_version TEXT NOT NULL,
+        trend_version  TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        symbol         TEXT NOT NULL,
+        signal_key     TEXT NOT NULL,      -- pattern:<key> or trend:<state>
+        direction      INTEGER NOT NULL,   -- +1 expects a rise, -1 a fall, 0 neither
+        date           TEXT NOT NULL,      -- the finished bar the signal came from
+        close          REAL,
+        trend_state    TEXT, net_score REAL, regime TEXT,
+        fwd_5 REAL, fwd_10 REAL, fwd_20 REAL,   -- next open to the close 5, 10, 20 days on
+        spy_5 REAL, spy_10 REAL, spy_20 REAL,   -- SPY over the same days
+        high_20 REAL, low_20 REAL,              -- best and worst prices in the next 20 days, from entry
+        UNIQUE (data_source, symbol, signal_key, date)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_key ON signal_occurrences (data_source, signal_key)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signal_occurrences (data_source, symbol)")

@@ -71,6 +71,11 @@ class PlanUpdate(Strict):
     notes: str | None = None
 
 
+class HistoryBuild(Strict):
+    symbols: list[str] | None = Field(None, max_length=60)
+    years: float = Field(5.0, ge=1.5, le=10)
+
+
 class Note(Strict):
     note: str = ""
 
@@ -134,6 +139,33 @@ def build_router(svc: Any) -> APIRouter:
             return clean(analyst.analysis(symbol))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- signals, calibration and patterns -----------------------------------------------------
+    @router.post("/signals/history/build")
+    def build_signal_history(req: HistoryBuild):
+        need("signal_calibration")
+        try:
+            return clean(analyst.build_history(req.symbols, req.years))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/signals/calibration")
+    def calibration():
+        need("signal_calibration")
+        return clean(analyst.calibration())
+
+    @router.get("/signals/{symbol}")
+    def signals(symbol: str):
+        need("signal_calibration")
+        try:
+            return clean(analyst.signals(symbol))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/patterns/{symbol}")
+    def patterns(symbol: str):
+        need("signal_calibration")
+        return clean(analyst.patterns(symbol))
 
     # --- positions ---------------------------------------------------------------------
     @router.get("/positions")

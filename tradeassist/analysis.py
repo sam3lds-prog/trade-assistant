@@ -9,19 +9,23 @@ screen that asks twice in a row does not do the work twice.
 from __future__ import annotations
 
 import logging
+import math
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from . import regime as regime_engine
+from . import signalbook
 from . import trend as trend_engine
 from .dataquality import assess
 from .market import complete_only
+from .patterns import PATTERNS, detect_all, recent_events
 from .providers.base import DataError
 from .sectors import SECTOR_FUNDS, sector_fund
-from .versions import TREND_ENGINE_VERSION
+from .versions import SIGNAL_ENGINE_VERSION, TREND_ENGINE_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +163,181 @@ class Analyst:
                 "readings": readings,
                 "note": "How these readings are usually read in this trend and this market. They explain; they do not "
                         "add to the trend scores."}
+
+    # --- signal history and calibration -----------------------------------------------------------
+    def _regime_by_date(self, years: float) -> pd.Series | None:
+        try:
+            spy = self.market.enriched("SPY", years, complete=True)
+        except DataError:
+            return None
+        try:
+            qqq = self.market.enriched("QQQ", years, complete=True)
+        except DataError:
+            qqq = None
+        vix = None
+        if self.market.info.mode != "demo":
+            try:
+                vix = self.market.bars("VIX", years, complete=True)
+            except DataError:
+                vix = None
+        series = regime_engine.regime_series(spy, qqq, vix)
+        return pd.Series(series["regime"].to_numpy(), index=pd.to_datetime(series["date"]))
+
+    def build_history(self, symbols: list[str] | None = None, years: float = 5.0) -> dict[str, Any]:
+        """Record every past signal on `symbols` (default: the watchlist) with what followed, and
+        check the evidence score against outcomes. Finished bars only."""
+        source = self.market.info.mode
+        names = [self.svc._symbol(s) for s in (symbols or self.svc.settings.watchlist) if s.strip()]
+        if not names:
+            raise ValueError("Give at least one symbol")
+        if len(names) > 60:
+            raise ValueError("At most 60 symbols per run")
+        years = max(1.5, min(float(years), 10.0))
+        regimes = self._regime_by_date(years)
+        try:
+            spy = self.market.bars("SPY", years, complete=True)
+        except DataError:
+            spy = None
+        built, warnings, days, total = [], [], [], 0
+        for sym in dict.fromkeys(names):
+            try:
+                df = self.market.enriched(sym, years, complete=True)
+                sector = self.sector(sym)
+                bench = {"SPY": spy}
+                if sector:
+                    try:
+                        bench[sector] = self.market.bars(sector, years, complete=True)
+                    except DataError:
+                        pass
+                # Without the validated-pattern points: the lab found those on this same history.
+                states = trend_engine.state_series(df, bench, sector, None)
+                rows = signalbook.collect(sym, df, spy, regimes, states)
+                signalbook.store(self.svc.db, source, sym, rows)
+                days.append(signalbook.score_days(sym, df, states, spy, regimes))
+                total += len(rows)
+                built.append(sym)
+            except (DataError, ValueError) as exc:
+                warnings.append(f"{sym}: {exc}")
+        if not built:
+            raise ValueError("No price history could be loaded for those symbols")
+        all_days = pd.concat(days, ignore_index=True)
+        calibration = {str(h): signalbook.calibrate(all_days, h) for h in (10, 20)}
+        meta = {"run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "data_source": source,
+                "symbols": built, "years": years, "occurrences": total, "warnings": warnings,
+                "signal_engine_version": SIGNAL_ENGINE_VERSION, "trend_engine_version": TREND_ENGINE_VERSION,
+                "calibration": calibration}
+        self.svc.db.cache_put(f"signals:history:{source}", meta)
+        return meta
+
+    def history_meta(self) -> dict[str, Any] | None:
+        return self.svc.db.cache_get(f"signals:history:{self.market.info.mode}")
+
+    def calibration(self) -> dict[str, Any]:
+        meta = self.history_meta()
+        if not meta:
+            return {"built": False, "note": "Build the signal history first (Pattern lab screen, or "
+                                            "POST /v2/signals/history/build)."}
+        return {"built": True, "run_at": meta["run_at"], "symbols": meta["symbols"], "data_source": meta["data_source"],
+                "trend_engine_version": meta["trend_engine_version"], "calibration": meta["calibration"]}
+
+    def signals(self, symbol: str) -> dict[str, Any]:
+        """What has fired on `symbol` in the last ten bars, and how the same signals turned out before:
+        across all stocks in the history, in the current market regime, and on this stock alone."""
+        symbol = self.svc._symbol(symbol)
+        source = self.market.info.mode
+        meta = self.history_meta()
+        enriched = self.market.enriched(symbol, 3)
+        t = self.trend(symbol)
+        try:
+            regime_now = self.regime()["regime"]
+        except (DataError, ValueError):
+            regime_now = None
+        validated = self.validated()
+        live = []
+        for e in recent_events(enriched, lookback=10):
+            live.append({"key": f"pattern:{e['key']}", "label": e["label"], "direction": e["direction"],
+                         "date": e["date"], "bars_ago": e["bars_ago"], "status": e["status"],
+                         "lab": validated.get(e["key"], [])})
+        last_date = enriched["date"].iloc[-1].strftime("%Y-%m-%d")
+        recent_dates = {d.strftime("%Y-%m-%d") for d in enriched["date"].tail(10)}
+        for tr in t["transitions"]:
+            if tr["date"] in recent_dates:
+                key = f"trend:{tr['to']}"
+                live.append({"key": key, "label": signalbook.signal_label(key), "direction": signalbook.signal_direction(key),
+                             "date": tr["date"], "status": "CONFIRMED", "lab": []})
+        if t["changed_today"]:
+            key = f"trend:{t['provisional']['state']}"
+            live.append({"key": key, "label": signalbook.signal_label(key), "direction": signalbook.signal_direction(key),
+                         "date": last_date, "status": "PROVISIONAL", "lab": []})
+        for s in live:
+            rows = signalbook.load(self.svc.db, source, s["key"]) if meta else []
+            s["history"] = {
+                "all": signalbook.summarize(rows, s["direction"]),
+                "by_horizon": [signalbook.summarize(rows, s["direction"], h) for h in signalbook.HORIZONS],
+                "same_regime": signalbook.summarize([r for r in rows if r["regime"] == regime_now], s["direction"])
+                if regime_now else None,
+                "this_stock": signalbook.summarize([r for r in rows if r["symbol"] == symbol], s["direction"]),
+            }
+        out = {"symbol": symbol, "as_of": last_date, "regime": regime_now, "signals": live,
+               "history_built": bool(meta), "history_run_at": meta["run_at"] if meta else None,
+               "history_symbols": len(meta["symbols"]) if meta else 0, "notes": []}
+        out["score"] = self._score_calibration(symbol, enriched, meta, regime_now)
+        if not meta:
+            out["notes"].append("The signal history has not been built, so there are no past cases to compare with. "
+                                "Build it from the Pattern lab screen.")
+        elif symbol not in meta["symbols"]:
+            out["notes"].append(f"{symbol} is not in the signal history, so its own past cases are not counted; the "
+                                "figures across all stocks still apply.")
+        if source == "demo":
+            out["notes"].insert(0, "Demo prices are random: these frequencies say nothing about real markets.")
+        return out
+
+    def _score_calibration(self, symbol: str, enriched: pd.DataFrame, meta: dict[str, Any] | None,
+                           regime_now: str | None) -> dict[str, Any]:
+        sector = self.sector(symbol)
+        bench, _ = self.benchmarks(symbol, sector)
+        states = trend_engine.state_series(enriched, bench, sector, None)
+        complete = enriched["bar_complete"].to_numpy(dtype=bool) if "bar_complete" in enriched.columns else None
+        idx = len(enriched) - 1
+        if complete is not None and not complete[-1]:
+            idx = int(np.flatnonzero(complete)[-1]) if complete.any() else idx
+        net = float(states["net_score"].iloc[idx])
+        out: dict[str, Any] = {"net_score_for_calibration": round(net, 1) if math.isfinite(net) else None,
+                               "date": enriched["date"].iloc[idx].strftime("%Y-%m-%d"),
+                               "note": "The net score without validated-pattern points, on the last finished bar, so it "
+                                       "matches how the history was scored."}
+        if not meta:
+            return {**out, "calibrated": None}
+        bucket = signalbook.bucket_for(net)
+        for h, cal in meta["calibration"].items():
+            row = next((b for b in cal["buckets"] if bucket and b["low"] == bucket[0]), None)
+            out[f"h{h}"] = {"calibrated": cal["calibrated"], "verdict": cal["verdict"], "bucket": row,
+                            "same_regime": (row or {}).get("by_regime", {}).get(regime_now) if regime_now else None}
+        out["calibrated"] = meta["calibration"][str(signalbook.MAIN_HORIZON)]["calibrated"]
+        return out
+
+    def patterns(self, symbol: str) -> dict[str, Any]:
+        """Each pattern on this stock: how often it fired, how it turned out here and across all stocks,
+        and the pattern lab's verdict."""
+        symbol = self.svc._symbol(symbol)
+        source = self.market.info.mode
+        meta = self.history_meta()
+        enriched = self.market.enriched(symbol, 5, complete=True)
+        hits = detect_all(enriched)
+        validated = self.validated()
+        mine = signalbook.grouped(signalbook.load(self.svc.db, source, symbol=symbol)) if meta else {}
+        rows = []
+        for key, pat in PATTERNS.items():
+            fired = np.flatnonzero(hits[key].to_numpy(dtype=bool)) if key in hits.columns else []
+            pooled = signalbook.load(self.svc.db, source, f"pattern:{key}") if meta else []
+            rows.append({"key": key, "label": pat.label, "direction": pat.direction, "description": pat.description,
+                         "events_here": int(len(fired)),
+                         "last_date": enriched["date"].iloc[fired[-1]].strftime("%Y-%m-%d") if len(fired) else None,
+                         "this_stock": signalbook.summarize(mine.get(f"pattern:{key}", []), pat.direction),
+                         "all_stocks": signalbook.summarize(pooled, pat.direction), "lab": validated.get(key, [])})
+        rows.sort(key=lambda r: -(r["events_here"]))
+        return {"symbol": symbol, "years": 5, "patterns": rows, "history_built": bool(meta),
+                "history_run_at": meta["run_at"] if meta else None}
 
     # --- everything about one stock --------------------------------------------------------------
     def analysis(self, symbol: str) -> dict[str, Any]:
