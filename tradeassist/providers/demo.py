@@ -55,7 +55,8 @@ class DemoData:
         self._occ_index: dict[str, tuple[str, str]] = {}   # option symbol -> (underlying, expiration)
         self.info = ProviderInfo(
             mode="demo", label="Demo data (synthetic)", realtime=False, has_greeks=with_greeks,
-            note="Synthetic prices for trying the app. Add a Tradier token to .env for real data.")
+            note="Synthetic prices for trying the app. Add a Tradier token to .env for real data.",
+            history_adjustment="none")
         self._history_cache: dict[str, pd.DataFrame] = {}
         self._market_cache: dict[str, np.ndarray] = {}
 

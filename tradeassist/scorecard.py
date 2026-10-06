@@ -84,8 +84,11 @@ def trend_snapshot(enriched: pd.DataFrame) -> dict[str, Any]:
             f"Price sits {last['pos52']:.0f}% of the way up its 52-week range")
     bullish = sum(1 for r in readings if r["lean"] == "bullish")
     bearish = sum(1 for r in readings if r["lean"] == "bearish")
+    finished = bool(last["bar_complete"]) if "bar_complete" in enriched.columns else True
     return {"as_of": last["date"].strftime("%Y-%m-%d"), "readings": readings,
-            "bullish": bullish, "bearish": bearish}
+            "bullish": bullish, "bearish": bearish,
+            # Readings from today's unfinished bar can change by the close.
+            "status": "CONFIRMED" if finished else "PROVISIONAL"}
 
 
 def build_scorecard(row: dict[str, Any], analysis: ChainAnalysis, enriched: pd.DataFrame, settings: Settings,
@@ -229,7 +232,9 @@ def build_scorecard(row: dict[str, Any], analysis: ChainAnalysis, enriched: pd.D
               "context, not evidence.")
     checks.append(_check("Trend", "trend", "Trend indicators", status,
                          f"{aligned} with the trade, {against} against",
-                         "Counts MACD, RSI extremes, the 50- and 200-day averages and the swing structure." + caveat))
+                         "Counts MACD, RSI extremes, the 50- and 200-day averages and the swing structure." + caveat
+                         + (" Today's daily bar is not finished, so these readings are provisional until the close."
+                            if trend.get("status") == "PROVISIONAL" else "")))
 
     # --- sizing ----------------------------------------------------------
     premium = round(limit_price * 100 * contracts, 2)

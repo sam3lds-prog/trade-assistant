@@ -94,3 +94,10 @@ def unified_positions(cur: sqlite3.Cursor) -> None:
     from .positions import sync_legacy_trade
     for (trade_id,) in cur.execute("SELECT id FROM trades ORDER BY id").fetchall():
         sync_legacy_trade(cur, trade_id)
+
+
+@migration(2, "record how cached daily bars are adjusted for splits and dividends")
+def bar_adjustment(cur: sqlite3.Cursor) -> None:
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(bars_meta)").fetchall()}
+    if "adjustment" not in columns:
+        cur.execute("ALTER TABLE bars_meta ADD COLUMN adjustment TEXT NOT NULL DEFAULT 'unknown'")

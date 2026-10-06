@@ -630,6 +630,7 @@ function buildResearch() {
 function renderResearch(d) {
   const frag = el("div");
   for (const w of d.data_warnings) frag.append(banner("warn", w));
+  if (d.last_bar && d.last_bar.status === "PROVISIONAL") frag.append(banner("info", d.last_bar.note));
   const q = d.quote, change = isNum(q.last) && isNum(q.prevclose) ? 100 * (q.last / q.prevclose - 1) : null;
   const top = el("div", { class: "panel" },
     el("div", { class: "price-head" }, el("span", { class: "name", text: `${d.symbol} ${d.description || ""}` }),
@@ -658,14 +659,16 @@ function renderResearch(d) {
     el("p", {}, el("strong", { text: "Next earnings: " }), e ? `${shortDate(e.date)} (${e.source}). ${e.estimated ? "Confirm the date with the company before trading around it." : ""}` : "unknown. Look it up before buying options on this stock."));
   frag.append(el("div", { class: "two" }, volPanel, ctx));
 
-  const trend = el("div", { class: "panel" }, el("h3", { text: "Indicators" }),
+  const trend = el("div", { class: "panel" }, el("h3", { text: d.trend.status === "PROVISIONAL" ? "Indicators (provisional: today's bar is still forming)" : "Indicators" }),
     table([{ label: "Indicator", cell: r => r.name }, { label: "Reading", cell: r => r.text },
       { label: "Leans", cell: r => r.lean === "neutral" ? "Neither way" : r.lean[0].toUpperCase() + r.lean.slice(1) }], d.trend.readings),
     el("h4", { text: "Patterns completed in the last ten trading days" }),
     d.recent_patterns.length ? el("ul", { class: "plain small" }, d.recent_patterns.map(p => el("li", {},
-      `${p.label}, ${shortDate(p.date)} (${p.direction > 0 ? "bullish" : "bearish"} idea). `, el("span", { class: "muted", text: labVerdictText(p.verdicts) }))))
+      `${p.label}, ${shortDate(p.date)} (${p.direction > 0 ? "bullish" : "bearish"} idea). `,
+      p.status === "PROVISIONAL" ? el("span", {}, statusTag("warn", "Provisional"), " today's bar is not finished, so this can still disappear by the close. ") : null,
+      el("span", { class: "muted", text: labVerdictText(p.verdicts) }))))
       : el("p", { class: "small muted", text: "None." }));
-  frag.append(trend);
+  frag.append(trend, dataChecksPanel(d.symbol));
 
   const co = d.company;
   const filings = el("div", { class: "panel" }, el("h3", { text: co.company ? `SEC filings: ${co.company.name}` : "SEC filings" }));
@@ -690,6 +693,18 @@ function renderResearch(d) {
   filings.append(el("h4", { text: "Not in this brief" }), el("ul", { class: "plain small muted" }, d.not_included.map(t => el("li", { text: t }))));
   frag.append(filings);
   return frag;
+}
+
+// What was found when the daily bars were checked: unfinished bar, gaps, bad prices, possible splits.
+const CHECK_LEVEL = { info: "info", warn: "warn", fail: "fail" };
+function dataChecksPanel(symbol) {
+  const box = el("div", { class: "panel" }, el("h3", { text: "Data checks" }), el("p", { class: "small muted", text: "Checking the daily bars…" }));
+  api(`/v2/data/${encodeURIComponent(symbol)}`).then(q => {
+    box.replaceChildren(el("h3", { text: "Data checks" }),
+      el("p", { class: "small muted", text: `${num(q.bars, 0)} daily bars, ${shortDate(q.first_date)} to ${shortDate(q.last_date)}; the last finished one is ${shortDate(q.last_complete_date)}. Fetched ${q.fetched_at ? q.fetched_at.replace("T", " ").slice(0, 16) : "earlier"} New York time.` }),
+      el("ul", { class: "plain small" }, q.checks.map(c => el("li", {}, statusTag(CHECK_LEVEL[c.level] || "info", c.level === "info" ? "Note" : c.level === "warn" ? "Caution" : "Problem"), ` ${c.text}`))));
+  }).catch(e => box.replaceChildren(el("h3", { text: "Data checks" }), el("p", { class: "small error", text: e.message })));
+  return box;
 }
 
 let uid = 0;
@@ -773,12 +788,15 @@ function techChart(t, opt) {
 
   // Price: candles when they are wide enough to read, a closing line otherwise.
   const step = (R - L) / (n - 1), candles = step >= 3;
+  // Today's bar so far is drawn dashed: it is not finished and can still change shape by the close.
+  const forming = !!(t.last_bar && t.last_bar.status === "PROVISIONAL");
   if (candles) {
     const bw = Math.max(1.5, Math.min(9, step * 0.62));
     for (const [i, r] of rows.entries()) {
       const up = r.close >= r.open, top = Y(Math.max(r.open, r.close)), h = Math.max(1, Math.abs(Y(r.open) - Y(r.close)));
-      plot.append(svg("line", { class: "wick", x1: X(i), x2: X(i), y1: Y(r.high), y2: Y(r.low) }),
-        svg("rect", { class: up ? "candle up" : "candle down", x: X(i) - bw / 2, y: top, width: bw, height: h }));
+      const open = forming && i === n - 1 ? " forming" : "";
+      plot.append(svg("line", { class: "wick" + open, x1: X(i), x2: X(i), y1: Y(r.high), y2: Y(r.low) }),
+        svg("rect", { class: (up ? "candle up" : "candle down") + open, x: X(i) - bw / 2, y: top, width: bw, height: h }));
     }
   } else {
     plot.append(svg("path", { class: "close-line", d: rows.map((r, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(r.close).toFixed(1)}`).join(" ") }));
@@ -897,6 +915,7 @@ function techChart(t, opt) {
     ...TECH_LINES.filter(s => show[s.key]).map(s => el("span", {}, el("i", { style: `background: var(${s.color})` }), s.name + " average")),
     show.levels ? el("span", {}, el("i", { class: "key-dash" }), "R resistance, S support (×2: two swings formed it)") : null,
     show.trend && t.trendlines.length ? el("span", {}, el("i", { style: "background: var(--accent)" }), "Trendline") : null,
+    forming && candles ? el("span", {}, el("b", { class: "key-candle forming-key" }), "Today so far (not finished)") : null,
     el("span", {}, "Trend strip: ", el("b", { class: "key-box", style: "background: var(--div-pos)" }), "up ",
       el("b", { class: "key-box", style: "background: var(--div-neg)" }), "down ", el("b", { class: "key-box", style: "background: var(--div-mid)" }), "mixed"));
   wrap.append(el("div", { class: "chart-scroll" }, root, tip), legend);
@@ -955,6 +974,12 @@ function structureView(t) {
   const what = s.headline.split(": ").slice(1).join(": ") || s.headline;
   out.push(el("p", {}, tag, ` ${what[0].toUpperCase()}${what.slice(1)} (since ${shortDate(s.state_since)}).`),
     el("p", { class: "small", text: s.detail }), s.watch ? el("p", { class: "small", text: s.watch }) : null);
+  if (t.structure_status === "PROVISIONAL" && t.confirmed_structure) {
+    const c = t.confirmed_structure, same = c.state === s.state && c.headline === s.headline;
+    out.push(el("p", { class: "small" }, statusTag("warn", "Provisional"),
+      same ? ` This includes today's unfinished bar; on finished bars alone (through ${shortDate(t.last_bar.last_complete_date)}) the reading is the same.`
+        : ` This includes today's unfinished bar. On finished bars alone (through ${shortDate(t.last_bar.last_complete_date)}): ${c.headline}`));
+  }
   const rows = [...t.levels.resistance.slice().reverse().map(l => ({ ...l, side: "Resistance" })), ...t.levels.support.map(l => ({ ...l, side: "Support" }))];
   if (rows.length) {
     out.push(el("h4", { text: "Support and resistance" }), table([

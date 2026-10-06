@@ -22,7 +22,7 @@ from .config import Settings
 from .db import Database
 from .eventstudy import MIN_SYMBOLS, run_study
 from .journal import Journal
-from .market import Market
+from .market import CONFIRMED, PROVISIONAL, Market, complete_only, signal_status
 from .optionmath import NY, black76_price, days_to_expiry, years_to_expiry
 from .patterns import PATTERNS, detect_all, recent_events
 from .pricer import build_ladder, quote_age_seconds, tick_rule
@@ -570,7 +570,7 @@ class TradeAssistant:
             "range": {"low": float(tail["low"].min()), "high": float(tail["high"].max()),
                       "position": last["pos52"]},
             "volatility": {"realized_20d": last["hv20"], "implied_30d": iv_now, "iv_rank": self.iv_rank(symbol)},
-            "trend": trend_snapshot(enriched), "recent_patterns": events,
+            "trend": trend_snapshot(enriched), "recent_patterns": events, "last_bar": self._last_bar(symbol, enriched),
             "earnings": earnings, "company": company, "regime": self.regime(),
             "chart": chart, "data_warnings": Market.data_warnings(symbol, enriched),
             "not_included": ["News headlines (Tradier has no news feed)",
@@ -631,14 +631,35 @@ class TradeAssistant:
         validated = self._validated_patterns()
         lab = {key: validated.get(key, []) for key in ("structure_up", "structure_down", "structure_up_break",
                                                          "structure_down_break")}
+        keys = ("state", "headline", "detail", "watch", "state_since", "broke", "reversal_atr")
+        bar = self._last_bar(symbol, enriched)
+        confirmed = None
+        if bar["status"] == PROVISIONAL:
+            # What the structure says on finished bars alone, beside what today's bar so far suggests.
+            done = analyse_structure(complete_only(enriched), swing_atr)
+            confirmed = {k: done.get(k) for k in keys}
         return clean({
             "symbol": symbol, "as_of": rows[-1]["date"] if rows else None, "bars": rows, "swings": swings,
             "levels": structure["levels"], "trendlines": structure["trendlines"],
-            "structure": {k: structure[k] for k in ("state", "headline", "detail", "watch", "state_since", "broke",
-                                                     "reversal_atr")},
+            "structure": {k: structure[k] for k in keys}, "structure_status": bar["status"],
+            "confirmed_structure": confirmed, "last_bar": bar,
             "atr": float(enriched["atr"].iloc[-1]), "lab": lab,
             "data_warnings": Market.data_warnings(symbol, enriched),
         })
+
+    def _last_bar(self, symbol: str, bars: pd.DataFrame) -> dict[str, Any]:
+        """The date and state of the last daily bar: finished, or today's bar so far."""
+        info = self.market.bar_info(symbol)
+        status = signal_status(bars)
+        out = {"date": bars["date"].iloc[-1].strftime("%Y-%m-%d") if len(bars) else None,
+               "complete": status == CONFIRMED, "status": status, "fetched_at": info.get("fetched_at"),
+               "adjustment": info.get("adjustment")}
+        if status == PROVISIONAL:
+            done = complete_only(bars)
+            out["last_complete_date"] = done["date"].iloc[-1].strftime("%Y-%m-%d") if len(done) else None
+            out["note"] = (f"Today's bar is still forming (prices as of {info.get('fetched_text', 'the last fetch')}). "
+                           "Anything read from it is provisional until the close.")
+        return out
 
     # --- option simulator ----------------------------------------------------
     def _chain_for(self, symbol: str, expiration: str) -> Any:
@@ -731,7 +752,8 @@ class TradeAssistant:
         frames, warnings = {}, []
         for symbol in dict.fromkeys(symbols):
             try:
-                frames[symbol] = self.market.enriched(symbol, years)
+                # Studies only see finished bars: today's bar so far is neither an event nor an outcome.
+                frames[symbol] = self.market.enriched(symbol, years, complete=True)
                 warnings.extend(Market.data_warnings(symbol, frames[symbol]))
             except DataError as exc:
                 warnings.append(f"{symbol}: {exc}")
@@ -748,7 +770,7 @@ class TradeAssistant:
         benchmark = None
         if len(frames) < MIN_SYMBOLS:
             try:
-                benchmark = self.market.bars("SPY", years)
+                benchmark = self.market.bars("SPY", years, complete=True)
             except DataError as exc:
                 raise RequestError(f"A run with fewer than {MIN_SYMBOLS} symbols is shown against SPY, and SPY "
                                    f"history could not be loaded: {exc}") from exc

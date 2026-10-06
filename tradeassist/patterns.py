@@ -162,8 +162,12 @@ def recent_events(enriched: pd.DataFrame, lookback: int = 5) -> list[dict]:
         hits = np.flatnonzero(events[key].to_numpy())
         if len(hits):
             last = hits[-1]
+            row = len(enriched) - len(events) + int(last)
+            finished = bool(enriched["bar_complete"].iloc[row]) if "bar_complete" in enriched.columns else True
             out.append({"key": key, "label": PATTERNS[key].label, "direction": PATTERNS[key].direction,
                         "date": dates.iloc[last].strftime("%Y-%m-%d"),
-                        "bars_ago": len(events) - 1 - int(last)})
+                        "bars_ago": len(events) - 1 - int(last),
+                        # A pattern on today's unfinished bar can still disappear by the close.
+                        "status": "CONFIRMED" if finished else "PROVISIONAL"})
     out.sort(key=lambda e: e["bars_ago"])
     return out

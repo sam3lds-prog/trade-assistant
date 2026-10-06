@@ -24,6 +24,10 @@ class ProviderInfo:
     has_greeks: bool
     note: str
     poll_seconds: float = 1.0   # shortest sensible gap between live quote refreshes for this source
+    # What the source says about corporate actions in its daily history: "none" for synthetic
+    # prices with no splits or dividends, "split" or "split_dividend" when the source states it,
+    # "unknown" when it does not say. Unadjusted splits are also looked for in the data itself.
+    history_adjustment: str = "unknown"
 
 
 class MarketData(Protocol):

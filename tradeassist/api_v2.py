@@ -92,6 +92,14 @@ def build_router(svc: Any) -> APIRouter:
     def features():
         return svc.settings.features
 
+    # --- data quality --------------------------------------------------------------------
+    @router.get("/data/{symbol}")
+    def data_quality(symbol: str, years: float = 3.0):
+        from .dataquality import assess
+        sym = svc._symbol(symbol)
+        bars = svc.market.bars(sym, max(1.0, min(years, 10.0)))
+        return clean(assess(sym, bars, svc.market.bar_info(sym)))
+
     # --- positions ---------------------------------------------------------------------
     @router.get("/positions")
     def positions(status: str = "all"):
