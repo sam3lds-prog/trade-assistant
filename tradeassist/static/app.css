@@ -260,3 +260,16 @@ select:disabled, input:disabled { opacity: 0.6; }
 .chart .candle.forming { stroke-dasharray: 2 2; fill-opacity: 0.35; }
 .chart .wick.forming { stroke-dasharray: 2 2; }
 .legend .key-candle.forming-key { border-style: dashed; background: transparent; margin-right: 6px; }
+
+/* Trend engine */
+.trend-head { margin: 6px 0 12px; }
+.trend-state { font-size: 1.15rem; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.trend-state .status-tag { font-size: 1rem; }
+.scores { max-width: 560px; }
+.score-row { display: grid; grid-template-columns: 70px minmax(0, 1fr) 40px; gap: 10px; align-items: center; margin: 4px 0; }
+.score-k { font-size: 0.86rem; color: var(--muted); }
+.score-track { height: 12px; background: var(--sunk); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.score-track i { display: block; height: 100%; }
+.score-track i.pos { background: var(--div-pos); }
+.score-track i.neg { background: var(--div-neg); }
+.score-v { text-align: right; }

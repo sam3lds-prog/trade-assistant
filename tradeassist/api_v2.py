@@ -79,9 +79,19 @@ def build_router(svc: Any) -> APIRouter:
     from .desk import Desk
     from .service import clean
 
+    from .analysis import Analyst
+
     router = APIRouter(prefix="/v2")
     desk = svc.desk if getattr(svc, "desk", None) else Desk(svc)
     svc.desk = desk
+    analyst = svc.analyst if getattr(svc, "analyst", None) else Analyst(svc)
+    svc.analyst = analyst
+
+    def trend_for_snapshot(symbol: str, values: dict[str, Any]) -> dict[str, Any]:
+        return analyst.snapshot_extra(symbol, values) if svc.settings.features.get("trend_engine_v2") else {}
+    trend_for_snapshot.__name__ = "trend"
+    if not any(getattr(f, "__name__", "") == "trend" for f in desk.snapshot_extras):
+        desk.snapshot_extras.append(trend_for_snapshot)
 
     def need(flag: str) -> None:
         if not svc.settings.features.get(flag, False):
@@ -99,6 +109,23 @@ def build_router(svc: Any) -> APIRouter:
         sym = svc._symbol(symbol)
         bars = svc.market.bars(sym, max(1.0, min(years, 10.0)))
         return clean(assess(sym, bars, svc.market.bar_info(sym)))
+
+    # --- trend and analysis ------------------------------------------------------------------
+    @router.get("/trend/{symbol}")
+    def trend(symbol: str):
+        need("trend_engine_v2")
+        try:
+            return clean(analyst.trend(symbol))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/analysis/{symbol}")
+    def analysis(symbol: str):
+        need("trend_engine_v2")
+        try:
+            return clean(analyst.analysis(symbol))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # --- positions ---------------------------------------------------------------------
     @router.get("/positions")

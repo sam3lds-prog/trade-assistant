@@ -289,4 +289,148 @@ function newPositionForm(onSaved) {
     el("div", { class: "row" }, save), error);
 }
 
-Object.assign(BUILDERS, { positions: buildPositions });
+/* ---------- view: analyze a stock ---------- */
+const TREND_TAG = { STRONG_UP: "pass", UP: "pass", UP_WEAKENING: "warn", NEUTRAL: "info", DOWN_DEVELOPING: "warn", DOWN: "fail", STRONG_DOWN: "fail" };
+const TREND_FILL = { STRONG_UP: "color-mix(in oklab, var(--div-pos) 70%, var(--div-mid))", UP: "color-mix(in oklab, var(--div-pos) 42%, var(--div-mid))",
+  UP_WEAKENING: "color-mix(in oklab, var(--div-pos) 18%, var(--div-mid))", NEUTRAL: "var(--div-mid)",
+  DOWN_DEVELOPING: "color-mix(in oklab, var(--div-neg) 18%, var(--div-mid))", DOWN: "color-mix(in oklab, var(--div-neg) 42%, var(--div-mid))",
+  STRONG_DOWN: "color-mix(in oklab, var(--div-neg) 70%, var(--div-mid))" };
+const TREND_ORDER = ["STRONG_UP", "UP", "UP_WEAKENING", "NEUTRAL", "DOWN_DEVELOPING", "DOWN", "STRONG_DOWN"];
+const trendWord = s => ({ STRONG_UP: "Strong uptrend", UP: "Uptrend", UP_WEAKENING: "Uptrend weakening", NEUTRAL: "No trend",
+  DOWN_DEVELOPING: "Downtrend developing", DOWN: "Downtrend", STRONG_DOWN: "Strong downtrend" })[s] || s;
+const trendTag = s => statusTag(TREND_TAG[s] || "info", trendWord(s));
+const statusWord = s => s === "PROVISIONAL" ? statusTag("warn", "Provisional") : statusTag("pass", "Confirmed");
+
+function buildAnalyze() {
+  const sym = el("input", { class: "sym", type: "text", value: "AAPL", "aria-label": "Ticker", autocomplete: "off", spellcheck: "false" });
+  const go = el("button", { class: "primary", text: "Analyze" });
+  const error = el("div", { class: "error", role: "alert" });
+  const out = el("div");
+  const run = () => withBusy(go, error, async () => {
+    out.classList.add("refetching");
+    try {
+      const d = await api(`/v2/analysis/${encodeURIComponent(sym.value.trim())}`);
+      sym.value = d.symbol;
+      out.replaceChildren(renderAnalysis(d));
+    } finally { out.classList.remove("refetching"); }
+  });
+  go.addEventListener("click", run);
+  sym.addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+  const view = el("section", {}, el("h2", { text: "Analyze a stock" }),
+    el("p", { class: "lede", text: "The trend state and every piece of evidence behind it, how settled it is, and how the stock is doing against the market and its sector. Scores count evidence; they are not chances of anything." }),
+    el("div", { class: "panel" }, el("div", { class: "row" }, field("Ticker", sym), go), error), out);
+  view.analyze = symbol => { sym.value = symbol; run(); };
+  return view;
+}
+
+// Later parts of V2 add sections to the analysis screen through this list.
+const ANALYSIS_SECTIONS = [];
+
+function renderAnalysis(d) {
+  const frag = el("div"), t = d.trend;
+  for (const n of t.notes || []) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
+  const now = t.provisional || t.confirmed, conf = t.confirmed;
+  const q = d.quote || {};
+  const head = el("div", { class: "panel" },
+    el("div", { class: "price-head" }, el("span", { class: "name", text: `${d.symbol}${q.description ? " " + q.description : ""}` }),
+      isNum(q.last) ? el("span", { text: `${money(q.last)}${isNum(q.prevclose) ? ` (${signedPct(100 * (q.last / q.prevclose - 1))} today)` : ""}` }) : null,
+      el("span", { class: "muted small", text: `Trend engine ${t.version}` })),
+    el("div", { class: "trend-head" }, el("div", { class: "trend-state" }, trendTag(now.state), " ", statusWord(now.status)),
+      t.provisional ? el("p", { class: "small" }, t.changed_today
+        ? `Today's bar so far would change the state. On the last finished bar (${shortDate(conf.date)}) it is `
+        : `Today's bar is still forming. On the last finished bar (${shortDate(conf.date)}) the state is the same: `, trendTag(conf.state), ".") : null),
+    scoreBars(now),
+    el("div", { class: "metrics", style: "margin-top:12px" },
+      metric(`${now.confirmation.level[0]}${now.confirmation.level.slice(1).toLowerCase()}`, `In this state ${now.confirmation.days_in_state} day${now.confirmation.days_in_state === 1 ? "" : "s"}, since ${shortDate(now.confirmation.since)}`),
+      metric(now.confidence.level[0] + now.confidence.level.slice(1).toLowerCase(), "Confidence in the reading"),
+      metric(pct(100 * now.coverage, 0), "Of the evidence that could be scored"),
+      metric(isNum(now.volatility.atr_pct) ? pct(now.volatility.atr_pct, 1) : "n/a", `Typical daily range${now.volatility.high ? " (high for this stock)" : now.volatility.squeeze ? " (bands squeezed)" : ""}`)),
+    now.confidence.reasons.length ? el("ul", { class: "plain small muted" }, now.confidence.reasons.map(r => el("li", { text: r }))) : null);
+  frag.append(head, trendHistoryChart(t));
+
+  const rs = t.relative_strength || {};
+  const rsCell = (k, label) => metric(isNum(rs[k]) ? `${rs[k] > 0 ? "+" : ""}${num(rs[k], 1)} pts` : "n/a", label);
+  frag.append(el("div", { class: "panel" }, el("h3", { text: "Against the market" }),
+    el("div", { class: "metrics" }, rsCell("spy_1m", "vs SPY, one month"), rsCell("spy_3m", "vs SPY, three months"),
+      rsCell("qqq_3m", "vs QQQ, three months"), rsCell("sector_3m", rs.sector_fund ? `vs ${rs.sector_fund}, three months` : "Sector not known")),
+    el("p", { class: "small muted", text: "The stock's return less the fund's, in percentage points, to the last finished bar." })));
+
+  for (const section of ANALYSIS_SECTIONS) { try { const node = section(d); if (node) frag.append(node); } catch (e) { console.error(e); } }
+
+  const ev = el("div", { class: "panel" }, el("h3", { text: `Evidence on ${shortDate(now.date)}` }));
+  ev.append(table([
+    { label: "Kind", cell: c => c.name },
+    { label: "Bullish", num: true, cell: c => `${num(c.bullish, 1)}` },
+    { label: "Bearish", num: true, cell: c => `${num(c.bearish, 1)}` },
+    { label: "Of", num: true, cell: c => c.available ? `${num(c.available, 0)} of ${c.weight}` : `0 of ${c.weight} (no data)` }], now.components));
+  ev.append(el("h4", { text: "Each reading" }), table([
+    { label: "Reading", cell: e => e.name },
+    { label: "Leans", cell: e => e.side === "bullish" ? statusTag("pass", "Bullish") : e.side === "bearish" ? statusTag("fail", "Bearish") : e.side === "unavailable" ? el("span", { class: "muted", text: "No data" }) : el("span", { class: "muted", text: "Neither" }) },
+    { label: "Points", num: true, cell: e => `${num(e.points, 1)} / ${e.weight}` },
+    { label: "What it shows", cell: e => e.text }], now.evidence));
+  ev.append(el("p", { class: "small muted", text: `Each side's score is the points it won as a share of the points that could be scored. A state is entered at ${t.thresholds.enter} points net and kept down to ${t.thresholds.stay}; a strong state needs ${t.thresholds.strong} and the swings and averages to agree.` }));
+  frag.append(ev);
+
+  if (t.transitions.length) {
+    frag.append(el("div", { class: "panel" }, el("h3", { text: "Recent changes of state" }), table([
+      { label: "Date", cell: r => shortDate(r.date) }, { label: "From", cell: r => trendTag(r.from) }, { label: "To", cell: r => trendTag(r.to) },
+      { label: "Net score", num: true, cell: r => num(r.net_score, 0) }, { label: "Close", num: true, cell: r => money(r.close) }], t.transitions)));
+  }
+  const dq = d.data_quality;
+  if (dq) frag.append(el("div", { class: "panel" }, el("h3", { text: "Data checks" }),
+    el("ul", { class: "plain small" }, dq.checks.map(c => el("li", {}, statusTag(c.level, c.level === "info" ? "Note" : c.level === "warn" ? "Caution" : "Problem"), ` ${c.text}`)))));
+  const tech = techPanel(d.symbol);
+  frag.append(tech.panel, tech.structure);
+  return frag;
+}
+
+function scoreBars(day) {
+  const bar = (v, side) => el("div", { class: "score-row" }, el("span", { class: "score-k", text: side === "pos" ? "Bullish" : "Bearish" }),
+    el("div", { class: "score-track" }, el("i", { class: side, style: `width:${Math.max(0, Math.min(100, v || 0))}%` })),
+    el("strong", { class: "score-v", text: isNum(v) ? num(v, 0) : "n/a" }));
+  return el("div", { class: "scores" }, bar(day.bullish_score, "pos"), bar(day.bearish_score, "neg"),
+    el("p", { class: "small muted", text: `Net ${isNum(day.net_score) ? (day.net_score > 0 ? "+" : "") + num(day.net_score, 0) : "n/a"} points. Evidence points out of 100 on each side, not probabilities.` }));
+}
+
+function trendHistoryChart(t) {
+  const rows = t.history, n = rows.length;
+  const wrap = el("div", { class: "panel" }, el("h3", { text: "Trend state over the last year" }));
+  if (n < 2) return wrap;
+  const W = 760, H = 250, pad = { l: 58, r: 16, t: 10, b: 54 }, L = pad.l, R = W - pad.r, bandTop = H - pad.b + 8, bandH = 14;
+  const X = i => L + (R - L) * i / (n - 1);
+  const ys = niceScale(Math.min(...rows.map(r => r.close)), Math.max(...rows.map(r => r.close)), 5);
+  const Y = v => pad.t + (H - pad.b - pad.t) * (1 - (v - ys.lo) / (ys.hi - ys.lo));
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${t.symbol} closing price with its trend state on each day` });
+  let start = 0;
+  for (let i = 1; i <= n; i++) {
+    if (i === n || rows[i].state !== rows[start].state) {
+      const x0 = start === 0 ? L : (X(start - 1) + X(start)) / 2, x1 = i === n ? R : (X(i - 1) + X(i)) / 2;
+      root.append(svg("rect", { x: x0, y: pad.t, width: Math.max(0.5, x1 - x0), height: H - pad.b - pad.t, fill: TREND_FILL[rows[start].state], opacity: 0.45 }),
+        svg("rect", { x: x0, y: bandTop, width: Math.max(0.5, x1 - x0), height: bandH, fill: TREND_FILL[rows[start].state] }));
+      start = i;
+    }
+  }
+  for (const v of ys.ticks) root.append(svg("line", { class: "grid", x1: L, x2: R, y1: Y(v), y2: Y(v) }),
+    svg("text", { x: L - 8, y: Y(v) + 4, "text-anchor": "end", text: money(v, ys.step < 1 ? 2 : 0) }));
+  rows.forEach((r, i) => { if (i > 0 && r.date.slice(5, 7) !== rows[i - 1].date.slice(5, 7) && X(i) < R - 24) root.append(svg("text", { x: X(i), y: bandTop + bandH + 14, "text-anchor": "middle", text: monthLabel(r.date) })); });
+  root.append(svg("path", { d: rows.map((r, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(r.close).toFixed(1)}`).join(" "), fill: "none", stroke: "var(--ink)", "stroke-width": 1.6 }));
+  if (!rows[n - 1].complete) root.append(svg("circle", { cx: X(n - 1), cy: Y(rows[n - 1].close), r: 3.5, fill: "var(--panel)", stroke: "var(--ink)", "stroke-dasharray": "2 1.5" }));
+  const hover = svg("line", { class: "hover-line", y1: pad.t, y2: bandTop + bandH, visibility: "hidden" });
+  root.append(hover);
+  const tip = el("div", { class: "tip" });
+  root.addEventListener("pointermove", evt => {
+    const box = root.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1, Math.round(((evt.clientX - box.left) * W / box.width - L) / (R - L) * (n - 1))));
+    hover.setAttribute("x1", X(i)); hover.setAttribute("x2", X(i)); hover.setAttribute("visibility", "visible");
+    tip.replaceChildren(el("div", { class: "tip-head", text: shortDate(rows[i].date) + (rows[i].complete ? "" : " (so far)") }),
+      el("div", { text: `${money(rows[i].close)} · ${trendWord(rows[i].state)}` }), el("div", { class: "tip-sub", text: `Net ${num(rows[i].net, 0)} points` }));
+    tooltipAt(tip, box, X(i), W);
+  });
+  root.addEventListener("pointerleave", () => { hover.setAttribute("visibility", "hidden"); tip.style.display = "none"; });
+  const present = TREND_ORDER.filter(s => rows.some(r => r.state === s));
+  wrap.append(el("div", { class: "chart" }, root, tip),
+    el("div", { class: "legend" }, present.map(s => el("span", {}, el("b", { class: "key-box", style: `background:${TREND_FILL[s]}` }), trendWord(s)))));
+  return wrap;
+}
+
+Object.assign(BUILDERS, { positions: buildPositions, analyze: buildAnalyze });

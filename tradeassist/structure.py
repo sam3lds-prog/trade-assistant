@@ -139,6 +139,38 @@ def structure_series(df: pd.DataFrame, swings: list[Swing] | None = None,
                          "struct_up_break": up_break, "struct_down_break": down_break}, index=df.index)
 
 
+def structure_detail(df: pd.DataFrame, swings: list[Swing]) -> pd.DataFrame:
+    """Per bar, the labels of the latest known swing high and low and whether an up or down
+    structure has been broken since (+1 an uptrend broken, -1 a downtrend broken, 0 neither).
+    Uses the same rule as structure_series and, like it, only swings known by each bar."""
+    close = df["close"].to_numpy(dtype=float)
+    n = len(close)
+    hi_label, lo_label = np.full(n, "", dtype=object), np.full(n, "", dtype=object)
+    hi_price, lo_price = np.full(n, np.nan), np.full(n, np.nan)
+    broken_side = np.zeros(n, dtype=int)
+    last: dict[str, Swing] = {}
+    broken, k = 0, 0
+    for t in range(n):
+        while k < len(swings) and swings[k].confirmed == t:
+            last[swings[k].kind] = swings[k]
+            broken = 0
+            k += 1
+        hi, lo = last.get("high"), last.get("low")
+        rising = hi is not None and lo is not None and hi.label == "HH" and lo.label == "HL"
+        falling = hi is not None and lo is not None and hi.label == "LH" and lo.label == "LL"
+        if rising and not broken and close[t] < lo.price:
+            broken = 1
+        if falling and not broken and close[t] > hi.price:
+            broken = -1
+        broken_side[t] = broken
+        if hi is not None:
+            hi_label[t], hi_price[t] = hi.label, hi.price
+        if lo is not None:
+            lo_label[t], lo_price[t] = lo.label, lo.price
+    return pd.DataFrame({"hi_label": hi_label, "lo_label": lo_label, "hi_price": hi_price, "lo_price": lo_price,
+                         "broken": broken_side}, index=df.index)
+
+
 def find_levels(swings: list[Swing], close: float, atr: float, as_of: int,
                 lookback: int = LEVEL_LOOKBACK, per_side: int = 3) -> dict[str, list[dict[str, Any]]]:
     """Support and resistance from swings known by bar `as_of`.

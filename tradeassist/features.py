@@ -15,7 +15,7 @@ from typing import Mapping
 # source of historical option prices is connected (see options/history.py).
 FEATURE_DEFAULTS: dict[str, bool] = {
     "unified_positions": True,
-    "trend_engine_v2": False,
+    "trend_engine_v2": True,
     "portfolio_risk": False,
     "signal_calibration": False,
     "options_backtest": False,
