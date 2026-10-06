@@ -139,8 +139,8 @@ def build_router(svc: Any) -> APIRouter:
     analyst = svc.analyst if getattr(svc, "analyst", None) else Analyst(svc)
     svc.analyst = analyst
 
-    def trend_for_snapshot(symbol: str, values: dict[str, Any]) -> dict[str, Any]:
-        return analyst.snapshot_extra(symbol, values) if svc.settings.features.get("trend_engine_v2") else {}
+    def trend_for_snapshot(symbol: str, values: dict[str, Any], as_of: Any = None) -> dict[str, Any]:
+        return analyst.snapshot_extra(symbol, values, as_of) if svc.settings.features.get("trend_engine_v2") else {}
     trend_for_snapshot.__name__ = "trend"
     if not any(getattr(f, "__name__", "") == "trend" for f in desk.snapshot_extras):
         desk.snapshot_extras.append(trend_for_snapshot)
@@ -279,6 +279,16 @@ def build_router(svc: Any) -> APIRouter:
     def position(position_id: int):
         need("unified_positions")
         return clean(desk.view(position_id))
+
+    @router.get("/positions/{position_id}/analytics")
+    def position_analytics(position_id: int):
+        need("unified_positions")
+        return clean(analyst.position_analytics(position_id))
+
+    @router.get("/journal/stats")
+    def journal_stats():
+        need("unified_positions")
+        return clean(analyst.journal_stats())
 
     @router.post("/positions/{position_id}/executions")
     def add_execution(position_id: int, req: ExecutionCreate):

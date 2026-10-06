@@ -113,8 +113,11 @@ class Analyst:
         out["data_source"] = self.market.info.mode
         return out
 
-    def snapshot_extra(self, symbol: str, values: dict[str, Any]) -> dict[str, Any]:
-        """Trend readings for a position snapshot (Desk.snapshot_extras)."""
+    def snapshot_extra(self, symbol: str, values: dict[str, Any], as_of: Any = None) -> dict[str, Any]:
+        """Trend readings for a position snapshot (Desk.snapshot_extras). With `as_of`, a past date,
+        they are worked out from the bars up to that day, as the engines would have seen them then."""
+        if as_of is not None:
+            return self._snapshot_extra_on(symbol, as_of)
         t = self.trend(symbol)
         cur = t["provisional"] or t["confirmed"]
         rs = t["relative_strength"]
@@ -128,6 +131,39 @@ class Analyst:
                 "_raw": {"trend": {"version": TREND_ENGINE_VERSION, "state": cur["state"], "status": cur["status"],
                                    "confirmed_state": (t["confirmed"] or {}).get("state"), "net": cur["net_score"],
                                    "confidence": cur["confidence"]["level"]}}}
+
+    def _snapshot_extra_on(self, symbol: str, as_of: Any) -> dict[str, Any]:
+        cut = pd.Timestamp(as_of)
+        years = min(10.0, max(3.0, (datetime.now(NY).date() - cut.date()).days / 365 + 2.2))
+        df = complete_only(self.market.enriched(symbol, years))
+        df = df[df["date"] <= cut].reset_index(drop=True)
+        if len(df) < 30:
+            raise ValueError(f"not enough history before {cut.date()} for a trend reading")
+        sector = self.sector(symbol)
+        bench, _ = self.benchmarks(symbol, sector)
+        states = trend_engine.state_series(df, bench, sector, None)
+        last = states.iloc[-1]
+        rs = relative_strength(df, bench, sector)
+        regime = None
+        try:
+            spy = complete_only(self.market.enriched("SPY", years))
+            spy = spy[spy["date"] <= cut].reset_index(drop=True)
+            qqq = complete_only(self.market.enriched("QQQ", years))
+            qqq = qqq[qqq["date"] <= cut].reset_index(drop=True)
+            if len(spy) >= 60:
+                regime = regime_engine.regime_series(spy, qqq if len(qqq) >= 30 else None)["regime"].iloc[-1]
+        except DataError:
+            regime = None
+        net = float(last["net_score"])
+        return {"trend_state": last["trend_state"],
+                "bullish_score": round(float(last["bullish_score"]), 1) if math.isfinite(float(last["bullish_score"])) else None,
+                "bearish_score": round(float(last["bearish_score"]), 1) if math.isfinite(float(last["bearish_score"])) else None,
+                "market_regime": regime, "relative_strength_spy": rs.get("spy_3m"),
+                "relative_strength_sector": rs.get("sector_3m"),
+                "_raw": {"trend": {"version": TREND_ENGINE_VERSION, "state": last["trend_state"], "status": "CONFIRMED",
+                                   "as_of": df["date"].iloc[-1].strftime("%Y-%m-%d"),
+                                   "net": round(net, 1) if math.isfinite(net) else None,
+                                   "note": "Worked out from the bars up to the fill date, without validated-pattern points."}}}
 
     # --- market regime -------------------------------------------------------------------------
     def regime(self) -> dict[str, Any]:
@@ -477,6 +513,52 @@ class Analyst:
         out["limits"] = {"account_size": s.account_size, "max_open_risk_pct": s.max_open_risk_pct,
                          "daily_loss_stop_pct": s.daily_loss_stop_pct, "daily_loss_mode": s.daily_loss_mode}
         return out
+
+    # --- journal analytics ----------------------------------------------------------------------------
+    def _history_for(self, symbol: str, since: str | None, cache: dict[str, Any]) -> pd.DataFrame | None:
+        if symbol not in cache:
+            years = 1.0
+            if since:
+                years = min(5.0, max(1.0, (datetime.now(NY).date() - datetime.fromisoformat(since).date()).days / 365 + 0.2))
+            try:
+                cache[symbol] = self.market.bars(symbol, years)
+            except DataError:
+                cache[symbol] = None
+        return cache[symbol]
+
+    def _with_overrides(self, view: dict[str, Any]) -> dict[str, Any]:
+        from .journal import JournalError
+        if view.get("legacy_trade_id"):
+            try:
+                view["legacy_overrides"] = self.svc.journal.get(view["legacy_trade_id"]).get("overrides") or []
+            except JournalError:                 # the classic entry is gone; the mirror still counts
+                view["legacy_overrides"] = []
+        return view
+
+    def journal_stats(self) -> dict[str, Any]:
+        from . import analytics
+        views = [self._with_overrides(v) for v in self._views("closed")]
+        limit = self.svc.settings.account_size * self.svc.settings.max_risk_per_trade_pct / 100.0
+        cache: dict[str, Any] = {}
+        rows = []
+        for v in views:
+            bars = self._history_for(v["symbol"], v.get("opened_at"), cache)
+            rows.append(analytics.trade_row(v, analytics.excursions(v, bars), limit))
+        out = analytics.journal_stats(rows)
+        out["risk_limit_per_trade"] = limit
+        return out
+
+    def position_analytics(self, position_id: int) -> dict[str, Any]:
+        from . import analytics
+        desk = getattr(self.svc, "desk", None)
+        if desk is None:
+            from .desk import Desk
+            desk = self.svc.desk = Desk(self.svc)
+        v = self._with_overrides(desk.view(position_id))
+        bars = self._history_for(v["symbol"], v.get("opened_at"), {})
+        limit = self.svc.settings.account_size * self.svc.settings.max_risk_per_trade_pct / 100.0
+        exc = analytics.excursions(v, bars, until=v.get("closed_at") or datetime.now(NY).isoformat())
+        return analytics.position_analytics(v, exc, limit)
 
     # --- everything about one stock --------------------------------------------------------------
     def analysis(self, symbol: str) -> dict[str, Any]:

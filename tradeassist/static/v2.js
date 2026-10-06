@@ -200,6 +200,7 @@ function positionDetail(p, onChange) {
     cancel.addEventListener("click", () => act(cancel, () => api(`/v2/positions/${p.id}/cancel`, { note: "" })));
     buttons.append(cancel);
   }
+  if (p.executions.length) box.append(positionAnalyticsBox(p));
   box.append(buttons, error, gradeBox);
   return box;
 }
@@ -760,6 +761,95 @@ function stressPanel(r) {
   box.append(rows, el("h4", { text: "Your own scenario" }),
     el("div", { class: "inline-form" }, field("Market move %", mkt), field("Volatility change (points)", iv), field("One stock", sym), field("Its move %", move), go), err,
     el("p", { class: "small muted", text: "Each stock moves its beta times the market move unless named; calls and puts are repriced with the simulator's model at the new price and volatility, as of now." }));
+  return box;
+}
+
+/* ---------- journal analytics ---------- */
+const rText = v => isNum(v) ? `${v > 0 ? "+" : ""}${num(v, 2)}R` : "n/a";
+function statCells(g) {
+  return [{ label: "Trades", num: true, cell: x => num(x.trades, 0) },
+    { label: "Win rate", num: true, cell: x => isNum(x.win_rate) ? pct(100 * x.win_rate, 0) : "n/a" },
+    { label: "Profit factor", num: true, cell: x => isNum(x.profit_factor) ? num(x.profit_factor, 2) : (x.losses === 0 && x.wins ? "no losses" : "n/a") },
+    { label: "Per trade", num: true, cell: x => signedMoney(x.expectancy) },
+    { label: "Per trade (R)", num: true, cell: x => rText(x.expectancy_r) },
+    { label: "Total", num: true, cell: x => signedMoney(x.total) }];
+}
+
+function journalAnalyticsPanel() {
+  const box = el("div", { class: "panel" }, el("h3", { text: "Analytics across all closed positions" }), el("p", { class: "small muted", text: "Loading…" }));
+  const load = () => api("/v2/journal/stats").then(r => renderJournalStats(box, r)).catch(e => box.replaceChildren(el("h3", { text: "Analytics" }), el("p", { class: "error", text: e.message })));
+  box.reload = load;
+  load();
+  return box;
+}
+
+function renderJournalStats(box, r) {
+  const o = r.overall;
+  box.replaceChildren(el("h3", { text: "Analytics across all closed positions" }));
+  if (!o.trades) { box.append(el("p", { class: "small muted", text: "No closed positions yet. Stock trades from the Positions screen and option-journal trades both count once closed." })); return; }
+  for (const n of r.notes) box.append(banner("info", n));
+  box.append(el("div", { class: "metrics" },
+    metric(`${num(o.trades, 0)}`, `Closed (${o.wins} won, ${o.losses} lost)`), metric(pct(100 * o.win_rate, 0), "Win rate"),
+    metric(isNum(o.profit_factor) ? num(o.profit_factor, 2) : "n/a", "Profit factor (wins ÷ losses)"),
+    metric(signedMoney(o.expectancy), "Expectancy per trade"), metric(rText(o.expectancy_r), `Per trade in R (${o.r_trades} with a risk)`),
+    metric(`${signedMoney(o.average_win)} / ${signedMoney(o.average_loss)}`, "Average win / loss"),
+    metric(signedMoney(r.max_drawdown), "Deepest drawdown of closed results"), metric(String(o.longest_losing_streak), "Longest losing streak"),
+    metric(`${rText(o.average_mfe_r)} / ${rText(o.average_mae_r)}`, "Average best / worst move while held (stock, in R)")));
+  if (r.equity_curve.length > 1) box.append(lineChart({ series: [{ name: "Closed results", color: "--series-1",
+    points: r.equity_curve.map(p2 => ({ x: p2.date, y: p2.equity })) }], yFormat: v => money(v, 0), height: 200 }));
+  const groups = [["By setup", r.by_setup], ["Bet on a rise or a fall", r.by_direction], ["Stock or options", r.by_instrument],
+    ["Trend at entry", r.by_trend_at_entry.map(g => ({ ...g, group: g.group === "not recorded" ? g.group : trendWord(g.group) }))],
+    ["Market regime at entry", r.by_regime_at_entry.map(g => ({ ...g, group: REGIME_WORDS[g.group] || g.group }))], ["Holding time", r.by_holding_time]];
+  for (const [title, rows] of groups) {
+    if (rows.length > 1 || (rows.length === 1 && !["not given", "not recorded"].includes(rows[0].group)))
+      box.append(el("h4", { text: title }), table([{ label: "", cell: x => x.group }, ...statCells()], rows));
+  }
+  if (r.behaviour.length) {
+    box.append(el("h4", { text: "What your habits cost or earned" }), table([
+      { label: "Habit", cell: b => b.label }, { label: "Trades", num: true, cell: b => num(b.with.trades, 0) },
+      { label: "Per trade, with it", num: true, cell: b => `${signedMoney(b.with.expectancy)} (${rText(b.with.expectancy_r)})` },
+      { label: "Per trade, without it", num: true, cell: b => b.without.trades ? `${signedMoney(b.without.expectancy)} (${rText(b.without.expectancy_r)})` : "n/a" }], r.behaviour),
+      el("p", { class: "small muted", text: "MAE and MFE are the worst and best the stock moved while each trade was open, from daily highs and lows after the entry day; for calls and puts they are measured on the stock." }));
+  }
+}
+{
+  const classicJournal = BUILDERS.journal;
+  BUILDERS.journal = () => {
+    const view = classicJournal();
+    if (featureOn("unified_positions")) {
+      const panel = journalAnalyticsPanel();
+      view.append(panel);
+      const old = state.refreshJournal;
+      state.refreshJournal = async () => { await old(); panel.reload(); };
+    }
+    return view;
+  };
+}
+
+const FIELD_WORDS = { underlying_price: "Stock price", trend_state: "Trend", market_regime: "Market regime", bullish_score: "Bullish score",
+  bearish_score: "Bearish score", rsi_14: "RSI (14)", structure_state: "Swings", relative_strength_spy: "Against SPY, 3 months (points)", iv: "Implied volatility", delta: "Delta" };
+function fieldValue(field, v) {
+  if (v === null || v === undefined) return "n/a";
+  if (field === "trend_state") return trendWord(v);
+  if (field === "market_regime") return REGIME_WORDS[v] || v;
+  if (field === "underlying_price") return money(v);
+  if (field === "iv") return pct(100 * v, 0);
+  return typeof v === "number" ? num(v, field === "delta" ? 2 : 1) : v;
+}
+
+function positionAnalyticsBox(p) {
+  const box = el("div", {}, el("p", { class: "small muted", text: "Loading analytics…" }));
+  api(`/v2/positions/${p.id}/analytics`).then(a => {
+    const x = a.excursions;
+    box.replaceChildren(el("h4", { text: "While it was held" }));
+    if (x.available) box.append(el("p", { class: "small", text: `The stock went ${signedPct(x.mfe_pct, 1)} the trade's way at best${isNum(x.mfe_r) ? ` (${rText(x.mfe_r)})` : ""} and ${signedPct(x.mae_pct, 1)} at worst${isNum(x.mae_r) ? ` (${rText(x.mae_r)})` : ""}, over ${x.days} daily bars from ${money(x.underlying_entry)}.` + (x.closed_beyond_invalidation ? " It closed through the invalidation price on one of those days." : "") + (x.reached_target_1 ? " It reached target 1." : "") }));
+    else box.append(el("p", { class: "small muted", text: `No excursions yet: ${x.reason || "no daily bars since the entry"}.` }));
+    if (a.behaviour.length) box.append(el("ul", { class: "plain small" }, a.behaviour.map(b => el("li", {}, statusTag("warn", "Habit"), ` ${b.label}`))));
+    if (a.compare.length && a.compared_with) box.append(el("h4", { text: `At entry and at the ${a.compared_with.toLowerCase()} snapshot` }), table([
+      { label: "", cell: c => FIELD_WORDS[c.field] || c.field.replaceAll("_", " ") },
+      { label: "Entry", cell: c => fieldValue(c.field, c.entry) },
+      { label: a.compared_with[0] + a.compared_with.slice(1).toLowerCase(), cell: c => fieldValue(c.field, c.latest) }], a.compare));
+  }).catch(e => box.replaceChildren(el("p", { class: "small error", text: e.message })));
   return box;
 }
 

@@ -8,10 +8,13 @@ the trade's thesis still holds.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 from datetime import date, datetime
 from typing import Any, Callable
+
+import pandas as pd
 
 from .optionmath import NY, days_to_expiry
 from .positions import (DIRECTIONS, OptionLeg, PositionError, add_execution, add_snapshot, cancel, create,
@@ -183,8 +186,16 @@ class Desk:
                 add_execution(cur, pid, side=side, quantity=float(entry.get("quantity") or req["quantity"]),
                               price=float(entry["price"]), fees=float(entry.get("fees") or 0),
                               executed_at=entry.get("executed_at"), source="MANUAL", note=entry.get("note") or "")
-        self.take_snapshot(pid, "ENTRY" if entry else "PLAN")
+        self.take_snapshot(pid, "ENTRY" if entry else "PLAN", self._fill_day(pid, 0) if entry else None)
         return self.view(pid)
+
+    def _fill_day(self, position_id: int, which: int) -> date | None:
+        """New York date of a position's fill (0 the first, -1 the last)."""
+        with self.db.tx() as cur:
+            pos = read(cur, position_id)
+        if not pos["executions"]:
+            return None
+        return datetime.fromisoformat(pos["executions"][which]["executed_at"]).astimezone(NY).date()
 
     def add_execution(self, position_id: int, req: dict[str, Any]) -> dict[str, Any]:
         with self.db.tx() as cur:
@@ -197,9 +208,9 @@ class Desk:
                                 executed_at=req.get("executed_at"), source=req.get("source") or "MANUAL",
                                 note=req.get("note") or "")
         if before["ledger"]["fills"] == 0:
-            self.take_snapshot(position_id, "ENTRY")
+            self.take_snapshot(position_id, "ENTRY", self._fill_day(position_id, 0))
         elif led.open_quantity == 0 and before["ledger"]["open_quantity"] > 0:
-            self.take_snapshot(position_id, "EXIT")
+            self.take_snapshot(position_id, "EXIT", self._fill_day(position_id, -1))
         return self.view(position_id)
 
     def cancel(self, position_id: int, note: str = "") -> dict[str, Any]:
@@ -216,7 +227,13 @@ class Desk:
         return self.view(position_id)
 
     # --- snapshots ---------------------------------------------------------------------------
-    def snapshot_values(self, symbol: str, leg: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    def snapshot_values(self, symbol: str, leg: dict[str, Any] | None = None,
+                        as_of: date | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """What the market looked like now, or, for a fill recorded after the fact (`as_of` a past
+        date), at that day's close: indicators, trend and regime from the bars up to that day.
+        Option quotes and Greeks have no history here, so a past snapshot leaves them out."""
+        if as_of is not None and as_of < datetime.now(NY).date():
+            return self._past_snapshot_values(symbol, as_of)
         values: dict[str, Any] = {"signal_engine_version": SIGNAL_ENGINE_VERSION, "data_source": self.market.info.mode}
         raw: dict[str, Any] = {"errors": [], "taken_at": now_iso()}
         try:
@@ -269,10 +286,50 @@ class Desk:
                 raw["errors"].append(f"{getattr(extra, '__name__', 'extra')}: {exc}")
         return values, raw
 
-    def take_snapshot(self, position_id: int, snapshot_type: str = "REVIEW") -> dict[str, Any]:
+    def _past_snapshot_values(self, symbol: str, as_of: date) -> tuple[dict[str, Any], dict[str, Any]]:
+        values: dict[str, Any] = {"signal_engine_version": SIGNAL_ENGINE_VERSION, "data_source": self.market.info.mode,
+                                  "bar_status": "COMPLETE"}
+        raw: dict[str, Any] = {"errors": [], "taken_at": now_iso(), "as_of": as_of.isoformat(),
+                               "note": "Recorded after the fact: the market as of the fill date's close."}
+        years = min(10.0, max(3.0, (datetime.now(NY).date() - as_of).days / 365 + 1.5))
+        try:
+            df = self.market.enriched(symbol, years)
+            df = df[df["date"] <= pd.Timestamp(as_of)]
+            last = df.iloc[-1]
+            values["underlying_price"] = finite(last["close"])
+            for col, key in (("rsi", "rsi_14"), ("macd", "macd"), ("macd_signal", "macd_signal"),
+                             ("macd_hist", "macd_histogram"), ("sma20", "sma_20"), ("sma50", "sma_50"),
+                             ("sma200", "sma_200"), ("ema20", "ema_20"), ("adx", "adx"), ("atr", "atr"),
+                             ("vol_ratio", "volume_ratio")):
+                values[key] = finite(last.get(col))
+            values["structure_state"] = STATE_WORDS.get(int(last.get("struct_state", 0)), "range")
+            values["data_timestamp"] = last["date"].strftime("%Y-%m-%d")
+        except (DataError, ValueError, KeyError, IndexError) as exc:
+            raw["errors"].append(f"history: {exc}")
+        for etf, key in (("SPY", "spy_price"), ("QQQ", "qqq_price")):
+            try:
+                b = self.market.bars(etf, years)
+                b = b[b["date"] <= pd.Timestamp(as_of)]
+                values[key] = finite(b["close"].iloc[-1])
+            except (DataError, IndexError) as exc:
+                raw["errors"].append(f"{etf}: {exc}")
+        for extra in self.snapshot_extras:
+            if len(inspect.signature(extra).parameters) < 3:
+                continue                          # an extra that only knows about now
+            try:
+                more = extra(symbol, values, as_of)
+                raw.setdefault("analysis", {}).update(more.pop("_raw", {}))
+                values.update(more)
+            except (DataError, ValueError, KeyError) as exc:
+                raw["errors"].append(f"{getattr(extra, '__name__', 'extra')}: {exc}")
+        return values, raw
+
+    def take_snapshot(self, position_id: int, snapshot_type: str = "REVIEW", as_of: date | None = None) -> dict[str, Any]:
         with self.db.tx() as cur:
             pos = read(cur, position_id)
-        values, raw = self.snapshot_values(pos["symbol"], pos["legs"][0] if pos["legs"] else None)
+        values, raw = self.snapshot_values(pos["symbol"], pos["legs"][0] if pos["legs"] else None, as_of)
         with self.db.tx() as cur:
-            sid = add_snapshot(cur, position_id, snapshot_type, values, raw)
+            sid = add_snapshot(cur, position_id, snapshot_type, values, raw,
+                               datetime.combine(as_of, datetime.min.time().replace(hour=16), tzinfo=NY).isoformat()
+                               if as_of is not None and as_of < datetime.now(NY).date() else None)
         return {"id": sid, "snapshot_type": snapshot_type, **values, "errors": raw["errors"]}
