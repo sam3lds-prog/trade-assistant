@@ -300,3 +300,7 @@ select:disabled, input:disabled { opacity: 0.6; }
 .conds { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
 .cond { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--sunk); align-items: center; }
 .cond select { max-width: 260px; }
+
+/* Alert badge on the rail */
+.rail .badge { display: inline-block; min-width: 1.4em; padding: 0 6px; margin-left: 8px; border-radius: 999px; background: var(--fail);
+  color: #fff; font-size: 0.75rem; font-weight: 600; text-align: center; line-height: 1.5; }

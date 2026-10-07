@@ -213,6 +213,11 @@ def test_option_positions_planning_and_cancelling(client):
     future = c.post("/v2/positions", json={"symbol": "KO", "quantity": 1, "entry": {"price": 60, "executed_at": "2099-01-01"}})
     assert future.status_code == 400 and "future" in future.json()["error"]
     assert c.get("/v2/positions/99999").status_code == 400
+    wrong = c.post("/v2/positions", json={"symbol": "KO", "quantity": 1, "invalidation_price": 70, "entry": {"price": 60}})
+    assert wrong.status_code == 400 and "below the entry" in wrong.json()["error"]
+    short_t = c.post("/v2/positions", json={"symbol": "KO", "direction": "SHORT", "quantity": 1, "target_1": 70,
+                                            "entry": {"price": 60}})
+    assert short_t.status_code == 400 and "target 1 must be below" in short_t.json()["error"]
 
 
 def test_the_feature_flag_switches_the_positions_api_off(tmp_path):

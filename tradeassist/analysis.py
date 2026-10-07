@@ -649,6 +649,39 @@ class Analyst:
         out["data_source"] = self.market.info.mode
         return out
 
+    # --- alerts ---------------------------------------------------------------------------------------
+    def alerts(self) -> dict[str, Any]:
+        """Alerts only: a list of things to look at. Nothing is acted on."""
+        from . import alerts as alert_rules
+        from .portfolio import exposure
+        views = self._views("all")
+        open_views = [v for v in views if v["status"] in ("OPEN", "PARTIALLY_CLOSED")]
+        today = datetime.now(NY).date()
+        found, errors = [], []
+        for v in open_views:
+            trend = None
+            if self.svc.settings.features.get("trend_engine_v2"):
+                try:
+                    trend = self.trend(v["symbol"])
+                except (DataError, ValueError) as exc:
+                    errors.append(f"{v['symbol']}: {exc}")
+            try:
+                earnings = self.svc._earnings(v["symbol"], None)
+            except Exception as exc:              # an earnings lookup must not hide the other alerts
+                earnings = None
+                log.info("No earnings date for %s: %s", v["symbol"], exc)
+            found.extend(alert_rules.position_alerts(v, trend, earnings, today))
+        s = self.svc.settings
+        risks = [exposure(v, None)["risk_to_invalidation"] for v in open_views]
+        open_risk = float(sum(r for r in risks if r is not None)) if open_views else None
+        daily = self.daily_loss(views) if self.svc.settings.features.get("portfolio_risk") else None
+        found.extend(alert_rules.account_alerts(daily, open_risk, s.account_size * s.max_open_risk_pct / 100.0))
+        out = {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "alerts": alert_rules.sort_alerts(found),
+               "open_positions": len(open_views), "errors": errors,
+               "note": "Alerts only: nothing is bought, sold or sent. You decide what to do."}
+        self.svc.db.cache_put(f"alerts:last:{self.market.info.mode}", {"checked_at": out["checked_at"], "count": len(found)})
+        return out
+
     # --- everything about one stock --------------------------------------------------------------
     def analysis(self, symbol: str) -> dict[str, Any]:
         symbol = self.svc._symbol(symbol)

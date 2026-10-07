@@ -996,4 +996,44 @@ function renderWalkForwardV2(w) {
   };
 }
 
-Object.assign(BUILDERS, { positions: buildPositions, analyze: buildAnalyze, portfolio: buildPortfolio });
+/* ---------- alerts (alerts only) ---------- */
+function alertsPanel() {
+  const box = el("div", { class: "panel" }, el("h3", { text: "Alerts" }), el("p", { class: "small muted", text: "Checking…" }));
+  const check = el("button", { class: "plain small-btn", text: "Check again" });
+  const load = () => api("/v2/alerts/check", {}).then(a => {
+    box.replaceChildren(el("div", { class: "panel-head" }, el("h3", { text: `Alerts (${a.alerts.length})` }), check));
+    if (!a.alerts.length) box.append(el("p", { class: "small muted", text: a.open_positions ? "Nothing needs a look right now." : "No open positions." }));
+    else box.append(el("ul", { class: "plain small" }, a.alerts.map(x => el("li", {}, statusTag(x.level, { fail: "Act", warn: "Look", info: "Note" }[x.level]),
+      x.status === "PROVISIONAL" ? el("span", { class: "muted", text: " (provisional)" }) : null, ` ${x.text}`))));
+    box.append(el("p", { class: "small muted", text: `${a.note} Checked ${a.checked_at.slice(11, 16)} New York time.` }));
+    updateAlertBadge(a.alerts.filter(x => x.level !== "info").length);
+  }).catch(e => box.replaceChildren(el("h3", { text: "Alerts" }), el("p", { class: "small error", text: e.message })));
+  check.addEventListener("click", () => withBusy(check, null, load));
+  box.reload = load;
+  load();
+  return box;
+}
+function updateAlertBadge(n) {
+  for (const btn of document.querySelectorAll('.rail button.nav[data-view="positions"]')) {
+    let b2 = btn.querySelector(".badge");
+    if (!b2) { b2 = el("span", { class: "badge" }); btn.append(b2); }
+    b2.textContent = n ? String(n) : "";
+    b2.classList.toggle("hidden", !n);
+    btn.setAttribute("aria-label", n ? `Positions, ${n} alert${n === 1 ? "" : "s"}` : "Positions");
+  }
+}
+{
+  const classicPositions = buildPositions;
+  BUILDERS.positions = () => {
+    const view = classicPositions();
+    const panel = alertsPanel();
+    view.insertBefore(panel, view.children[3] || null);
+    const shown = view.onShow;
+    view.onShow = () => { shown(); panel.reload(); };
+    return view;
+  };
+  // A quiet check every ten minutes keeps the badge current while the page is open.
+  setInterval(() => { if (featureOn("unified_positions")) api("/v2/alerts").then(a => updateAlertBadge(a.alerts.filter(x => x.level !== "info").length)).catch(() => {}); }, 600000);
+}
+
+Object.assign(BUILDERS, { analyze: buildAnalyze, portfolio: buildPortfolio });

@@ -53,6 +53,19 @@ def describe(pos: dict[str, Any]) -> str:
     return f"{verb} {qty:,.0f} {pos['symbol']} shares" if qty == int(qty) else f"{verb} {qty:g} {pos['symbol']} shares"
 
 
+def check_levels(direction: str, entry: float, invalidation: float | None, t1: float | None, t2: float | None) -> None:
+    """A stock plan's levels must sit on the right sides of the entry: for a long, the invalidation
+    below and the targets above; for a short, the other way round."""
+    sign = 1 if direction == "LONG" else -1
+    word = "long" if sign > 0 else "short"
+    if invalidation is not None and sign * (entry - invalidation) <= 0:
+        raise PositionError(f"For a {word} the invalidation price must be {'below' if sign > 0 else 'above'} the entry "
+                            f"({entry:,.2f}); {invalidation:,.2f} would mean it is wrong from the start.")
+    for name, level in (("target 1", t1), ("target 2", t2)):
+        if level is not None and sign * (level - entry) <= 0:
+            raise PositionError(f"For a {word}, {name} must be {'above' if sign > 0 else 'below'} the entry ({entry:,.2f}).")
+
+
 class Desk:
     def __init__(self, svc: Any):
         self.svc = svc
@@ -173,6 +186,9 @@ class Desk:
             leg = OptionLeg(kind, float(opt["strike"]), str(opt["expiration"]),
                             occ_symbol(symbol, str(opt["expiration"]), kind.lower(), float(opt["strike"])))
         entry = req.get("entry") or None
+        if instrument == "STOCK" and entry:
+            check_levels(direction, float(entry["price"]), req.get("invalidation_price"), req.get("target_1"),
+                         req.get("target_2"))
         with self.db.tx() as cur:
             pid = create(cur, symbol=symbol, instrument_type=instrument, direction=direction,
                          quantity=float(req["quantity"]), thesis=req.get("thesis") or "",
@@ -223,6 +239,11 @@ class Desk:
 
     def update(self, position_id: int, changes: dict[str, Any]) -> dict[str, Any]:
         with self.db.tx() as cur:
+            pos = read(cur, position_id)
+            basis = pos["ledger"]["cost_basis"]
+            if pos["instrument_type"] == "STOCK" and basis and pos["ledger"]["open_quantity"] > 0:
+                merged = {k: changes.get(k, pos.get(k)) for k in ("invalidation_price", "target_1", "target_2")}
+                check_levels(pos["direction"], basis, merged["invalidation_price"], merged["target_1"], merged["target_2"])
             update_plan(cur, position_id, changes)
         return self.view(position_id)
 

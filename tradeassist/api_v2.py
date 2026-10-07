@@ -326,6 +326,17 @@ def build_router(svc: Any) -> APIRouter:
     def backtest_walk_forward(req: WalkForwardV2):
         return _bt(req, analyst.backtest_walk_forward)
 
+    # --- alerts (alerts only: nothing is acted on) ----------------------------------------------
+    @router.get("/alerts")
+    def alerts():
+        need("unified_positions")
+        return clean(analyst.alerts())
+
+    @router.post("/alerts/check")
+    def alerts_check():
+        need("unified_positions")
+        return clean(analyst.alerts())
+
     # --- positions ---------------------------------------------------------------------
     @router.get("/positions")
     def positions(status: str = "all"):
