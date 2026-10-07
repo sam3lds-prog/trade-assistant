@@ -9,6 +9,12 @@ It is advisory only. There is no code in it that places an order: you enter trad
 in Robinhood yourself. It is not financial advice, and passing every check does not
 make a trade safe. Buying an option always puts the whole premium at risk.
 
+Version 2 adds position intelligence: stock you are long or short and the calls and puts
+you hold, in one place with correct accounting; a trend engine that shows its evidence;
+the market regime; signals with their past record; trade grades; an option picker for a
+stock thesis; portfolio risk and stress tests; journal analytics; condition-based
+backtests; and alerts. See "Version 2" below and `docs/V2.md` for the details.
+
 ## Start it
 
 Needs Python 3.11 or newer (built and tested on 3.13 with pandas 3 and numpy 2).
@@ -298,6 +304,56 @@ and repeats; only the held-out quarters are reported.
 far across the spread you bid; results by pattern present at entry; results with
 and without rule overrides.
 
+## Version 2
+
+Six screens are new or extended. Each part can be switched off in `.env` (see the end of
+`.env.example`); the classic screens work as before.
+
+**Analyze a stock.** The trend engine gives one of seven states (strong uptrend to strong
+downtrend, with "uptrend weakening" and "downtrend developing" between), the bullish and
+bearish evidence behind it point by point (swing structure, moving averages, momentum,
+strength against SPY and the stock's sector fund, volume, and patterns that passed the
+pattern lab), how long the state has held and how much confidence it deserves. Scores are
+evidence points, not chances. While the market is open, today's bar is still forming: the
+reading from it is marked provisional and the confirmed reading from yesterday's close is
+shown beside it. Below that: the market regime and what RSI, the 52-week range and the
+Bollinger bands usually mean in it; the signals of the last ten days with how often they
+worked before (once the signal history is built); grading a stock trade, long or short,
+from A to AVOID with suggested invalidation, targets and size; and choosing a call or put
+for the thesis, with the best match, cheapest, best risk-adjusted and most conservative
+contract and the ones to avoid.
+
+**Positions.** Record what you did at your broker: stock long or short, calls and puts,
+with every fill. Average cost, partial exits, fees, realized and unrealized profit and R
+multiples come out of the fills. Each position keeps a snapshot of the market at entry and
+exit. Option-journal trades appear here automatically. Alerts at the top say what needs a
+look (a stop level crossed, a target reached, the trend turning against you, an option
+about to expire, earnings coming, the daily loss stop). Alerts only: nothing is ever
+bought or sold.
+
+**Portfolio risk.** Exposure in stock dollars and in SPY terms, Greeks, risk to each
+position's invalidation price against your limit, sector concentration, how the holdings
+move together, a bad-day estimate, stress tests (including your own), and where today
+stands against the daily loss stop. `DAILY_LOSS_MODE` decides whether open losses count
+toward that stop (they do by default, which is the safer choice).
+
+**Journal** adds analytics across all closed positions: win rate, profit factor,
+expectancy in dollars and R, drawdown, the best and worst the stock moved while each trade
+was open, results by setup, trend and regime at entry, and what habits such as holding past
+the stop have cost.
+
+**Pattern lab** adds the signal history: five years of every pattern and trend change on
+your watchlist with what followed, used for live signals and to check whether the trend
+score is calibrated (it says plainly when it is not).
+
+**Backtest** adds condition strategies: rules on indicators, the trend state and the
+market regime, with shorts that pay a borrow fee, walk-forward testing and a Monte Carlo
+range. Option strategies are not backtested, because no connected source has past option
+prices and faking them would only look precise.
+
+The database is upgraded in place the first time version 2 starts. Back up
+`data/tradeassist.db` first if you want a way back.
+
 ## Implied-volatility rank
 
 The rank needs a daily record of each stock's implied volatility. The app records
@@ -400,7 +456,21 @@ tradeassist/
   research.py              SEC filings, results, earnings estimate
   journal.py db.py         journal and SQLite storage
   service.py api.py        the operations behind each screen, and the HTTP API
-  static/                  the web page
+  features.py              version 2 feature switches (FEATURE_... in .env)
+  migrations.py schema_v2.py   numbered database upgrades
+  positions.py desk.py     unified positions: accounting from fills, marks, snapshots
+  dataquality.py           checks on daily bars; finished versus unfinished bars
+  trend.py regime.py       trend engine and market regime
+  sectors.py               the sector fund for relative strength
+  signalbook.py            signal history and score calibration
+  evaluator.py             trade grades for stock ideas
+  options/                 the option picker; historical option data (none connected)
+  portfolio.py analytics.py alerts.py   portfolio risk, journal analytics, alerts
+  backtest_v2.py           condition strategies, Monte Carlo
+  analysis.py api_v2.py    the version 2 operations and the /v2 HTTP API
+  versions.py              version labels recorded with every result
+  static/                  the web page (app.js classic screens, v2.js version 2 screens)
+docs/V2.md                 version 2 in detail: rules, formulas, database and API
 tests/                     automated tests
 ```
 
