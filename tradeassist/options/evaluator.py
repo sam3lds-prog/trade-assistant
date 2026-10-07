@@ -131,7 +131,7 @@ def value_contract(row: dict[str, Any], analysis: Any, thesis: dict[str, Any], n
     out["return_on_premium"] = gain / premium if premium > 0 else None
     out["reward_to_risk"] = gain / abs(loss) if loss < 0 else None
     out["loss_share_of_premium"] = abs(loss) / premium if premium > 0 else None
-    out["after_spread_at_target"] = gain - spread_cost / 2
+    out["after_spread_at_target"] = gain - spread_cost       # half the spread to get in, half to get out
     prof = expiry_profile([leg])
     out["breakeven_at_expiration"] = prof["breakevens"][0] if prof["breakevens"] else None
     # The stock price at which the contract breaks even on the horizon date, from a fine grid.

@@ -513,8 +513,9 @@ function renderSignals(box, g, reload) {
     if (!g.history_built) box.append(el("p", { class: "small muted", text: "Build the signal history to check the score against what followed." }));
     else {
       box.append(el("p", { class: "small" }, sc.calibrated ? statusTag("pass", "Calibrated on this data") : statusTag("warn", "Not calibrated"), ` ${h.verdict}`));
-      if (b) box.append(el("p", { class: "small", text: `Net score ${num(sc.net_score_for_calibration, 0)} on ${shortDate(sc.date)} is in the ${num(b.low, 0)} to ${num(b.high, 0)} range. On ${num(b.cases, 0)} past days in that range across the stocks in the history, the stock was higher 10 days later ${pct(100 * b.frequency, 0)} of the time (${pct(100 * b.frequency_low, 0)}–${pct(100 * b.frequency_high, 0)})` +
-        (h.same_regime ? `; ${pct(100 * h.same_regime.frequency, 0)} of ${num(h.same_regime.cases, 0)} in the same market regime.` : ".") }));
+      if (b && b.cases > 0 && isNum(b.frequency)) box.append(el("p", { class: "small", text: `Net score ${num(sc.net_score_for_calibration, 0)} on ${shortDate(sc.date)} is in the ${num(b.low, 0)} to ${num(b.high, 0)} range. On ${num(b.cases, 0)} past days in that range across the stocks in the history, the stock was higher 10 days later ${pct(100 * b.frequency, 0)} of the time (${pct(100 * b.frequency_low, 0)}–${pct(100 * b.frequency_high, 0)})` +
+        (h.same_regime && h.same_regime.cases > 0 ? `; ${pct(100 * h.same_regime.frequency, 0)} of ${num(h.same_regime.cases, 0)} in the same market regime.` : ".") }));
+      else box.append(el("p", { class: "small muted", text: `Net score ${num(sc.net_score_for_calibration, 0)}: no past days in that range to compare with.` }));
       box.append(el("p", { class: "small muted", text: sc.note }));
     }
   }
@@ -571,8 +572,10 @@ function gradeCard(ev) {
     { label: "", num: true, cell: c => num(c.score, 0) }, { label: "Why", cell: c => c.why.join(" ") }], ev.components));
   if (ev.short_sale_risk) box.append(el("h4", { text: "Short-sale risks" }),
     el("ul", { class: "plain small" }, ev.short_sale_risk.map(r => el("li", {}, statusTag(r.level, r.level === "fail" ? "Danger" : r.level === "warn" ? "Caution" : "Note"), ` ${r.text}`))));
-  if (ev.analogs && ev.analogs.history) {
-    const h = ev.analogs.history.same_regime && ev.analogs.history.same_regime.cases ? ev.analogs.history.same_regime : ev.analogs.history.all;
+  const analog = ev.analogs && ev.analogs.history
+    ? (ev.analogs.history.same_regime && ev.analogs.history.same_regime.cases ? ev.analogs.history.same_regime : ev.analogs.history.all) : null;
+  if (analog && analog.cases > 0 && isNum(analog.frequency)) {
+    const h = analog;
     box.append(el("p", { class: "small", text: `Analogs: when a stock's trend turned to ${trendWord(ev.trend_state).toLowerCase()} before, it moved the expected way over 10 days in ${pct(100 * h.frequency, 0)} of ${num(h.cases, 0)} cases.` }));
   }
   if (ev.what_would_change_it.length) box.append(el("h4", { text: "What would improve it" }), el("ul", { class: "plain small" }, ev.what_would_change_it.map(t => el("li", { text: t }))));

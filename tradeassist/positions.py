@@ -54,8 +54,10 @@ def parse_time(value: str | None) -> str:
     try:
         if len(text) == 10:
             from .optionmath import NY
-            moment = datetime.combine(datetime.fromisoformat(text).date(), datetime.min.time().replace(hour=16),
-                                      tzinfo=NY)
+            day = datetime.fromisoformat(text).date()
+            moment = datetime.combine(day, datetime.min.time().replace(hour=16), tzinfo=NY)
+            if day == datetime.now(NY).date() and moment > datetime.now(NY):
+                moment = datetime.now(NY).replace(microsecond=0)     # today, before the close: now
         else:
             moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
             if moment.tzinfo is None:
@@ -187,7 +189,8 @@ def initial_risk(pos: dict[str, Any], led: Ledger) -> float | None:
 
     Uses, in order: the risk amount entered; the risk per unit entered; the distance from the
     average entry to the invalidation price; for a bought option, the premium paid."""
-    size = max(led.max_open_quantity, float(pos.get("quantity") or 0))
+    # The size actually held at most, once there are fills; the planned size before that.
+    size = led.max_open_quantity if led.fills else float(pos.get("quantity") or 0)
     mult = float(pos.get("multiplier") or 1)
     if pos.get("risk_amount"):
         return float(pos["risk_amount"])

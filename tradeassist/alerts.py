@@ -73,6 +73,9 @@ def account_alerts(daily: dict[str, Any], open_risk: float | None, risk_limit: f
     out = []
     if daily and daily["status"] != "OK":
         out.append(_alert("DAILY_LOSS", "fail" if daily["status"] == "STOP" else "warn", daily["text"]))
+    if daily and daily.get("unknown"):
+        out.append(_alert("DAILY_LOSS_UNKNOWN", "warn", "Today's change is not counted toward the daily stop for "
+                                                        + "; ".join(daily["unknown"]) + ": no previous close was found."))
     if open_risk is not None and risk_limit and open_risk > risk_limit:
         out.append(_alert("OPEN_RISK", "fail", f"Risk to invalidation across open positions is ${open_risk:,.0f}, above the "
                                                f"${risk_limit:,.0f} limit."))

@@ -209,10 +209,9 @@ def calibrate(days: pd.DataFrame, horizon: int = MAIN_HORIZON) -> dict[str, Any]
     ordered = len(usable) >= 3 and all(x["frequency"] <= y["frequency"] + 0.02 for x, y in zip(usable, usable[1:]))
     p_value = None
     if len(usable) >= 2:
-        lo_b, hi_b = usable[0], usable[-1]
-        table = [[hi_b["rose"], hi_b["cases"] - hi_b["rose"]], [lo_b["rose"], lo_b["cases"] - lo_b["rose"]]]
-        if min(sum(r) for r in table) > 0:
-            p_value = float(stats.chi2_contingency(table)[1]) if hi_b["frequency"] > lo_b["frequency"] else 1.0
+        p_value = block_gap_test(d, col, (usable[0]["low"], usable[0]["high"]),
+                                 (usable[-1]["low"], usable[-1]["high"] + (0.01 if usable[-1]["high"] >= 100 else 0)),
+                                 horizon)
     calibrated = bool(ordered and p_value is not None and p_value < 0.05)
     if calibrated:
         verdict = ("On this data, higher net scores have been followed by gains more often, in order, and the gap "
@@ -225,6 +224,29 @@ def calibrate(days: pd.DataFrame, horizon: int = MAIN_HORIZON) -> dict[str, Any]
                    "score as a count of evidence only.")
     return {"horizon": horizon, "buckets": buckets, "calibrated": calibrated, "ordered": ordered,
             "p_value": p_value, "verdict": verdict, "days": int(len(d))}
+
+
+def block_gap_test(d: pd.DataFrame, col: str, low: tuple[float, float], high: tuple[float, float],
+                   horizon: int) -> float | None:
+    """One-sided p-value that days in the `high` score range were followed by a gain more often than
+    days in the `low` range. Days are grouped into non-overlapping blocks of `horizon` trading days
+    across all stocks, and each block counts once: overlapping holding windows, and stocks moving
+    together on the same dates, are not independent observations."""
+    span = max(1, round(horizon * 7 / 5))
+    blocks = pd.to_datetime(d["date"]).map(pd.Timestamp.toordinal) // span
+    rose = (d[col] > 0).astype(float)
+
+    def means(lo: float, hi: float) -> np.ndarray:
+        sel = (d["net"] >= lo) & (d["net"] < hi)
+        return rose[sel].groupby(blocks[sel]).mean().to_numpy()
+
+    top, bottom = means(*high), means(*low)
+    if len(top) < 10 or len(bottom) < 10:
+        return None
+    t = stats.ttest_ind(top, bottom, equal_var=False)
+    if not np.isfinite(t.statistic):
+        return None
+    return float(t.pvalue / 2) if t.statistic > 0 else 1.0 - float(t.pvalue / 2)
 
 
 def bucket_for(net: float | None) -> tuple[float, float] | None:

@@ -145,6 +145,7 @@ def normalize_contract(raw: dict[str, Any]) -> dict[str, Any]:
         "bidsize": num(raw.get("bidsize")),
         "asksize": num(raw.get("asksize")),
         "last": num(raw.get("last")),
+        "prevclose": num(raw.get("prevclose")),
         "volume": num(raw.get("volume")) or 0.0,
         "open_interest": num(raw.get("open_interest")) or 0.0,
         "bid_time": epoch_ms_to_iso(raw.get("bid_date")),

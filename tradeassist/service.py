@@ -585,7 +585,10 @@ class TradeAssistant:
         if analyst is not None and self.settings.features.get("portfolio_risk"):
             try:
                 d = analyst.daily_loss()
-                return d["counted"], ("closed and open" if d["mode"] == "REALIZED_PLUS_UNREALIZED" else "closed trades")
+                how = "closed and open" if d["mode"] == "REALIZED_PLUS_UNREALIZED" else "closed trades"
+                if d["unknown"]:
+                    how += f"; {len(d['unknown'])} position{'s' if len(d['unknown']) != 1 else ''} without a previous close not counted"
+                return d["counted"], how
             except (DataError, ValueError) as exc:
                 log.warning("Daily loss from positions unavailable, using the journal: %s", exc)
         return self.journal.realized_today(), "closed trades"

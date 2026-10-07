@@ -69,14 +69,15 @@ class Analyst:
         self._sectors[symbol] = fund
         return fund
 
-    def benchmarks(self, symbol: str, sector: str | None) -> tuple[dict[str, pd.DataFrame | None], list[str]]:
+    def benchmarks(self, symbol: str, sector: str | None,
+                   years: float = BENCH_YEARS) -> tuple[dict[str, pd.DataFrame | None], list[str]]:
         out: dict[str, pd.DataFrame | None] = {}
         notes: list[str] = []
         for etf in dict.fromkeys(["SPY", "QQQ"] + ([sector] if sector else [])):
             if etf == symbol:
                 continue
             try:
-                out[etf] = self.market.bars(etf, BENCH_YEARS)
+                out[etf] = self.market.bars(etf, years)
             except DataError as exc:
                 out[etf] = None
                 notes.append(f"{etf} history unavailable, so relative strength against it is left out: {exc}")
@@ -140,7 +141,7 @@ class Analyst:
         if len(df) < 30:
             raise ValueError(f"not enough history before {cut.date()} for a trend reading")
         sector = self.sector(symbol)
-        bench, _ = self.benchmarks(symbol, sector)
+        bench, _ = self.benchmarks(symbol, sector, years)
         states = trend_engine.state_series(df, bench, sector, None)
         last = states.iloc[-1]
         rs = relative_strength(df, bench, sector)
@@ -150,8 +151,15 @@ class Analyst:
             spy = spy[spy["date"] <= cut].reset_index(drop=True)
             qqq = complete_only(self.market.enriched("QQQ", years))
             qqq = qqq[qqq["date"] <= cut].reset_index(drop=True)
+            vix = None
+            if self.market.info.mode != "demo":       # as the live regime does, when the source has VIX
+                try:
+                    vix = self.market.bars("VIX", years, complete=True)
+                    vix = vix[vix["date"] <= cut]
+                except DataError:
+                    vix = None
             if len(spy) >= 60:
-                regime = regime_engine.regime_series(spy, qqq if len(qqq) >= 30 else None)["regime"].iloc[-1]
+                regime = regime_engine.regime_series(spy, qqq if len(qqq) >= 30 else None, vix)["regime"].iloc[-1]
         except DataError:
             regime = None
         net = float(last["net_score"])
@@ -284,7 +292,13 @@ class Analyst:
         source = self.market.info.mode
         meta = self.history_meta()
         enriched = self.market.enriched(symbol, 3)
-        t = self.trend(symbol)
+        # Trend changes are found the way the history was recorded: without validated-pattern points,
+        # so a live change is the same kind of event as the past cases it is compared with.
+        sector = self.sector(symbol)
+        bench, _ = self.benchmarks(symbol, sector)
+        states = trend_engine.state_series(enriched, bench, sector, None)
+        complete = (enriched["bar_complete"].to_numpy(dtype=bool) if "bar_complete" in enriched.columns
+                    else np.ones(len(enriched), dtype=bool))
         try:
             regime_now = self.regime()["regime"]
         except (DataError, ValueError):
@@ -296,16 +310,14 @@ class Analyst:
                          "date": e["date"], "bars_ago": e["bars_ago"], "status": e["status"],
                          "lab": validated.get(e["key"], [])})
         last_date = enriched["date"].iloc[-1].strftime("%Y-%m-%d")
-        recent_dates = {d.strftime("%Y-%m-%d") for d in enriched["date"].tail(10)}
-        for tr in t["transitions"]:
-            if tr["date"] in recent_dates:
-                key = f"trend:{tr['to']}"
+        st = states["trend_state"].to_numpy()
+        for i in range(max(1, len(st) - 10), len(st)):
+            if st[i] != st[i - 1]:
+                key = f"trend:{st[i]}"
                 live.append({"key": key, "label": signalbook.signal_label(key), "direction": signalbook.signal_direction(key),
-                             "date": tr["date"], "status": "CONFIRMED", "lab": []})
-        if t["changed_today"]:
-            key = f"trend:{t['provisional']['state']}"
-            live.append({"key": key, "label": signalbook.signal_label(key), "direction": signalbook.signal_direction(key),
-                         "date": last_date, "status": "PROVISIONAL", "lab": []})
+                             "date": enriched["date"].iloc[i].strftime("%Y-%m-%d"),
+                             "status": "CONFIRMED" if complete[i] else "PROVISIONAL", "lab": []})
+        live.sort(key=lambda x: x["date"], reverse=True)
         for s in live:
             rows = signalbook.load(self.svc.db, source, s["key"]) if meta else []
             s["history"] = {
@@ -318,7 +330,7 @@ class Analyst:
         out = {"symbol": symbol, "as_of": last_date, "regime": regime_now, "signals": live,
                "history_built": bool(meta), "history_run_at": meta["run_at"] if meta else None,
                "history_symbols": len(meta["symbols"]) if meta else 0, "notes": []}
-        out["score"] = self._score_calibration(symbol, enriched, meta, regime_now)
+        out["score"] = self._score_calibration(symbol, enriched, meta, regime_now, states)
         if not meta:
             out["notes"].append("The signal history has not been built, so there are no past cases to compare with. "
                                 "Build it from the Pattern lab screen.")
@@ -330,10 +342,7 @@ class Analyst:
         return out
 
     def _score_calibration(self, symbol: str, enriched: pd.DataFrame, meta: dict[str, Any] | None,
-                           regime_now: str | None) -> dict[str, Any]:
-        sector = self.sector(symbol)
-        bench, _ = self.benchmarks(symbol, sector)
-        states = trend_engine.state_series(enriched, bench, sector, None)
+                           regime_now: str | None, states: pd.DataFrame) -> dict[str, Any]:
         complete = enriched["bar_complete"].to_numpy(dtype=bool) if "bar_complete" in enriched.columns else None
         idx = len(enriched) - 1
         if complete is not None and not complete[-1]:
@@ -487,10 +496,48 @@ class Analyst:
             desk = self.svc.desk = Desk(self.svc)
         return desk.list(status)["positions"]
 
+    def _previous_close(self, view: dict[str, Any], today: Any) -> tuple[float | None, str | None]:
+        """Yesterday's closing value of what a position holds: for stock, the last daily close before
+        today; for an option, the chain's previous close, or else an estimate from today's price, its
+        delta and theta, and the stock's move since yesterday's close."""
+        try:
+            bars = self.market.bars(view["symbol"], 1)
+            before = bars[bars["date"] < pd.Timestamp(today)]
+            stock_prev = float(before["close"].iloc[-1]) if len(before) else None
+        except DataError:
+            stock_prev = None
+        if view["instrument_type"] == "STOCK":
+            return stock_prev, "previous daily close" if stock_prev is not None else None
+        mark = view.get("mark")
+        if not mark or mark.get("price") is None:
+            try:
+                mark = self.svc.desk.mark(view)
+            except (DataError, ValueError, AttributeError):
+                return None, None
+        if mark.get("prev_close") is not None:
+            return float(mark["prev_close"]), "the option's previous close"
+        delta, theta, price, under = (mark.get(k) for k in ("delta", "theta", "price", "underlying"))
+        if None in (delta, price, under) or stock_prev is None:
+            return None, None
+        return max(0.0, price - delta * (under - stock_prev) - (theta or 0.0)), "estimated from delta and theta"
+
     def daily_loss(self, views: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         from . import portfolio
         views = self._views("all") if views is None else views
-        relevant = [v for v in views if v["status"] in ("OPEN", "PARTIALLY_CLOSED", "CLOSED")]
+        today = datetime.now(NY).date()
+        start = datetime.now(NY).replace(hour=0, minute=0, second=0, microsecond=0)
+        relevant = []
+        for v in views:
+            if v["status"] not in ("OPEN", "PARTIALLY_CLOSED", "CLOSED"):
+                continue
+            touched_today = any(datetime.fromisoformat(e["executed_at"]) >= start for e in v["executions"])
+            if v["status"] == "CLOSED" and not touched_today:
+                continue                                  # closed before today: nothing to count
+            held_overnight = any(datetime.fromisoformat(e["executed_at"]) < start for e in v["executions"])
+            if held_overnight:
+                v = {**v}
+                v["prev_close"], v["prev_source"] = self._previous_close(v, today)
+            relevant.append(v)
         s = self.svc.settings
         return portfolio.daily_loss(relevant, s.daily_loss_mode, s.account_size, s.daily_loss_stop_pct)
 
@@ -519,7 +566,7 @@ class Analyst:
         if symbol not in cache:
             years = 1.0
             if since:
-                years = min(5.0, max(1.0, (datetime.now(NY).date() - datetime.fromisoformat(since).date()).days / 365 + 0.2))
+                years = min(10.0, max(1.0, (datetime.now(NY).date() - datetime.fromisoformat(since).date()).days / 365 + 0.2))
             try:
                 cache[symbol] = self.market.bars(symbol, years)
             except DataError:
@@ -540,9 +587,13 @@ class Analyst:
         views = [self._with_overrides(v) for v in self._views("closed")]
         limit = self.svc.settings.account_size * self.svc.settings.max_risk_per_trade_pct / 100.0
         cache: dict[str, Any] = {}
+        earliest: dict[str, str] = {}
+        for v in views:                           # one fetch per stock, long enough for its oldest trade
+            if v.get("opened_at") and (v["symbol"] not in earliest or v["opened_at"] < earliest[v["symbol"]]):
+                earliest[v["symbol"]] = v["opened_at"]
         rows = []
         for v in views:
-            bars = self._history_for(v["symbol"], v.get("opened_at"), cache)
+            bars = self._history_for(v["symbol"], earliest.get(v["symbol"]), cache)
             rows.append(analytics.trade_row(v, analytics.excursions(v, bars), limit))
         out = analytics.journal_stats(rows)
         out["risk_limit_per_trade"] = limit

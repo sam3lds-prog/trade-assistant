@@ -77,7 +77,10 @@ def excursions(pos: dict[str, Any], bars: pd.DataFrame | None, until: str | None
     mfe, mae = max(mfe, 0.0), min(mae, 0.0)
     inv = pos.get("invalidation_price")
     r_unit = abs(entry - inv) / entry if inv else None
-    closes = window["close"].to_numpy(dtype=float)
+    # A close through the invalidation on the exit day itself may come after the exit, so for a closed
+    # trade only the closes of earlier days count.
+    held = window[pd.to_datetime(window["date"]).dt.date < end] if pos.get("closed_at") else window
+    closes = held["close"].to_numpy(dtype=float)
     held_past = bool(inv is not None and len(closes) and np.any(bias * (closes - inv) < 0))
     t1 = pos.get("target_1")
     reached = bool(t1 is not None and (hi >= t1 if bias > 0 else lo <= t1))

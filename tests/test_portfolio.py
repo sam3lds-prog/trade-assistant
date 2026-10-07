@@ -19,8 +19,8 @@ def view(symbol, direction, qty, price, prev, fills, invalidation=None, kind="ST
     return {"id": 1, "symbol": symbol, "direction": direction, "instrument_type": kind, "multiplier": 100 if kind == "OPTION" else 1,
             "description": f"{direction} {qty} {symbol}", "bias": 1 if direction == "LONG" else -1,
             "invalidation_price": invalidation, "thesis_check": {"status": "INTACT"}, "legs": legs or [],
-            "ledger": {"open_quantity": qty}, "status": "OPEN",
-            "mark": mark or {"price": price, "underlying": price, "prev_close": prev},
+            "ledger": {"open_quantity": qty}, "status": "OPEN", "prev_close": prev,
+            "mark": mark or {"price": price, "underlying": price},
             "executions": [{"side": s, "quantity": q, "price": p, "fees": 0.0, "executed_at": t} for s, q, p, t in fills]}
 
 
@@ -40,6 +40,12 @@ def test_daily_loss_counts_open_moves_unless_told_not_to():
     assert d["realized_today"] == pytest.approx(-50.0) and d["unrealized_change_today"] == pytest.approx(50.0)
     short = view("MSFT", "SHORT", 10, 260.0, 250.0, [("SELL_SHORT", 10, 255.0, "2026-09-30T14:00:00+00:00")])
     assert portfolio.daily_loss([short], "REALIZED_PLUS_UNREALIZED", 10_000, 3.0, NOW)["counted"] == pytest.approx(-100.0)
+    # Held overnight and sold today: only the move from yesterday's close counts (+$100, not -$900).
+    sold = view("Y", "LONG", 0, None, 90.0, [("BUY", 100, 100.0, "2026-09-28T14:00:00+00:00"),
+                                             ("SELL", 100, 91.0, "2026-10-06T14:00:00+00:00")])
+    sold["mark"] = None
+    d2 = portfolio.daily_loss([sold], "REALIZED_PLUS_UNREALIZED", 10_000, 3.0, NOW)
+    assert d2["realized_today"] == pytest.approx(-900) and d2["counted"] == pytest.approx(100.0)
     unknown = view("X", "LONG", 1, 10.0, None, [("BUY", 1, 9.0, "2026-09-30T14:00:00+00:00")])
     u = portfolio.daily_loss([unknown], "REALIZED_PLUS_UNREALIZED", 10_000, 3.0, NOW)
     assert u["unknown"] == ["LONG 1 X"] and u["counted"] == 0
@@ -103,3 +109,15 @@ def test_daily_loss_mode_setting(monkeypatch, tmp_path):
     monkeypatch.setenv("DAILY_LOSS_MODE", "sometimes")
     with pytest.raises(ValueError):
         load_settings(tmp_path / "none.env")
+
+
+def test_option_stress_starts_from_zero_and_uses_the_chain_model():
+    opt = view("AAPL", "LONG", 10, 10.0, None, [], invalidation=180.0, kind="OPTION",
+               mark={"price": 10.0, "underlying": 200.0, "delta": 0.55, "theta": -0.05, "vega": 0.4, "gamma": 0.01,
+                     "iv": 0.30, "model_vol": 0.28, "growth": 0.03, "rate": 0.045, "dte": 100},
+               legs=[{"option_type": "CALL", "strike": 200.0, "expiration": "2027-01-15"}])
+    x = portfolio.exposure(opt, 1.0)
+    flat, down = portfolio.stress([x], [{"name": "flat"}, {"name": "down", "market_move_pct": -10}], 100_000)
+    assert flat["pnl"] == pytest.approx(0.0, abs=1e-6)                  # no move, no change: no profit or loss
+    assert -10.0 * 100 * 10 <= down["pnl"] < 0                         # never more than the premium
+    assert 0 < x["risk_to_invalidation"] <= 10.0 * 100 * 10

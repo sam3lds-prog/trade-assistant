@@ -132,9 +132,11 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
         out["dte"] = mark.get("dte")
         out["iv"] = finite(mark.get("iv"))
         out["option"] = {"option_type": leg["option_type"], "strike": leg["strike"], "expiration": leg["expiration"]}
+        out["model_vol"], out["growth"], out["rate"] = finite(mark.get("model_vol")), mark.get("growth"), mark.get("rate")
         if inv:
-            at_inv = reprice_option(out, inv, 0.0, datetime.now(NY))
-            out["risk_to_invalidation"] = max(0.0, (price - at_inv) * mult * qty) if at_inv is not None else price * mult * qty
+            change = option_change(out, inv, 0.0, datetime.now(NY))
+            out["risk_to_invalidation"] = (min(price, max(0.0, -change)) * mult * qty) if change is not None \
+                else price * mult * qty
         else:
             out["risk_to_invalidation"] = price * mult * qty
             out["missing"].append("no invalidation price: the whole premium is counted as at risk")
@@ -143,15 +145,25 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
 
 
 def reprice_option(x: dict[str, Any], underlying: float, iv_shift: float, now: datetime) -> float | None:
-    """Model value per share of a position's option at another stock price and volatility."""
+    """Model value per share of a position's option at another stock price and volatility, with the
+    chain's own forward carry, rate and the volatility its smile gives the strike."""
     o = x.get("option")
-    if not o:
+    vol = x.get("model_vol") or x.get("iv")
+    if not o or vol is None:
         return None
-    vol = x.get("iv")
-    if vol is None:
+    leg = Leg(o["option_type"].lower(), float(o["strike"]), o["expiration"], 1, 1, float(x["price"]), float(vol),
+              float(x.get("growth") or 0.0))
+    return float(leg_value(leg, np.array([underlying]), now, float(x.get("rate") or 0.04), iv_shift)[0])
+
+
+def option_change(x: dict[str, Any], underlying: float, iv_shift: float, now: datetime) -> float | None:
+    """Change in value per share from now to the scenario, both on the model, so the model's own
+    distance from the quoted midpoint does not show up as a profit or loss."""
+    base = reprice_option(x, x["underlying"], 0.0, now)
+    moved = reprice_option(x, underlying, iv_shift, now)
+    if base is None or moved is None:
         return None
-    leg = Leg(o["option_type"].lower(), float(o["strike"]), o["expiration"], 1, 1, float(x["price"]), float(vol), 0.0)
-    return float(leg_value(leg, np.array([underlying]), now, 0.04, iv_shift)[0])
+    return moved - base
 
 
 def stress(exposures: list[dict[str, Any]], scenarios: list[dict[str, Any]], account_size: float,
@@ -177,8 +189,9 @@ def stress(exposures: list[dict[str, Any]], scenarios: list[dict[str, Any]], acc
                 sign = 1 if x["direction"] == "LONG" else -1
                 pnl = sign * (s_new - x["underlying"]) * x["open_quantity"]
             else:
-                v = reprice_option(x, s_new, iv, now)
-                pnl = ((v - x["price"]) * 100 * x["open_quantity"]) if v is not None else x["dollar_delta"] * move
+                ch = option_change(x, s_new, iv, now)
+                # Never worth less than nothing: a bought option loses at most its value.
+                pnl = (max(ch, -x["price"]) * 100 * x["open_quantity"]) if ch is not None else x["dollar_delta"] * move
             rows.append({"id": x["id"], "symbol": x["symbol"], "description": x["description"], "stock_move": move, "pnl": pnl})
             total += pnl
         worst = min(rows, key=lambda r: r["pnl"], default=None)
@@ -189,26 +202,34 @@ def stress(exposures: list[dict[str, Any]], scenarios: list[dict[str, Any]], acc
 
 
 def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
-    """Today's realized and unrealized change for one position, from its fills and marks."""
+    """Today's realized and unrealized change for one position, from its fills, its mark and the
+    previous close of what it holds (`view["prev_close"]`, worked out by the caller).
+
+    Quantity held at midnight is measured from the previous close; quantity opened today from its
+    fill. When the previous close is unknown the position adds nothing and is listed as unknown:
+    counting its whole result since entry as today's would be wrong either way."""
     fills = [Fill(e["side"], e["quantity"], e["price"], e["fees"], e["executed_at"]) for e in view["executions"]]
     before = [f for f in fills if datetime.fromisoformat(f.executed_at) < today_start]
     mult = view["multiplier"]
     now_led = account(view["direction"], mult, fills)
     prev_led = account(view["direction"], mult, before)
+    if len(before) == len(fills) and now_led.open_quantity <= 0:
+        return {"realized": 0.0, "unrealized_change": 0.0, "known": True}        # nothing happened today
     realized = now_led.realized_pnl - prev_led.realized_pnl
     mark = view.get("mark") or {}
-    price, prev = finite(mark.get("price")), finite(mark.get("prev_close"))
-    unreal_now = now_led.unrealized(price) if (price is not None and now_led.open_quantity > 0) else 0.0
+    price = finite(mark.get("price"))
+    prev = finite(view.get("prev_close"))
+    if now_led.open_quantity > 0 and price is None:
+        return {"realized": 0.0, "unrealized_change": 0.0, "known": False}
+    unreal_now = now_led.unrealized(price) if now_led.open_quantity > 0 else 0.0
     if prev_led.open_quantity > 0:
         if prev is None:
-            unreal_prev, known = unreal_now if price is not None else 0.0, False
-        else:
-            unreal_prev, known = prev_led.unrealized(prev), True
+            return {"realized": 0.0, "unrealized_change": 0.0, "known": False}
+        unreal_prev = prev_led.unrealized(prev)
     else:
-        unreal_prev, known = 0.0, True
-    if price is None and now_led.open_quantity > 0:
-        known = False
-    return {"realized": realized, "unrealized_change": (unreal_now - unreal_prev) if known else 0.0, "known": known}
+        unreal_prev = 0.0
+    return {"realized": realized, "unrealized_change": unreal_now - unreal_prev, "known": True,
+            "prev_source": view.get("prev_source")}
 
 
 def daily_loss(views: list[dict[str, Any]], mode: str, account_size: float, stop_pct: float,

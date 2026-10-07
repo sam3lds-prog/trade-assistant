@@ -100,7 +100,11 @@ class Desk:
         return {"price": finite(price), "underlying": analysis.spot, "prev_close": finite(row.get("prevclose")),
                 "as_of": row.get("bid_time"), "source": source, "bid": row.get("bid"), "ask": row.get("ask"),
                 "delta": row.get("delta"), "theta": row.get("theta"), "vega": row.get("vega"), "gamma": row.get("gamma"),
-                "iv": row.get("iv"), "dte": days_to_expiry(leg["expiration"])}
+                "iv": row.get("iv"), "dte": days_to_expiry(leg["expiration"]),
+                # What the model needs to reprice this contract consistently with the chain.
+                "model_vol": finite(row.get("model_vol") or row.get("iv")),
+                "growth": (math.log(analysis.forward / analysis.spot) / analysis.t) if analysis.t > 0 else 0.0,
+                "rate": analysis.rate}
 
     # --- views ------------------------------------------------------------------------
     def view(self, position_id: int, with_mark: bool = True) -> dict[str, Any]:
@@ -219,6 +223,9 @@ class Desk:
             if before.get("legacy_trade_id"):
                 raise PositionError("This position mirrors an entry in the option journal. Record its fills there, "
                                     "so the two stay in step.")
+            if before["instrument_type"] == "STOCK" and before["ledger"]["fills"] == 0:
+                check_levels(before["direction"], float(req["price"]), before.get("invalidation_price"),
+                             before.get("target_1"), before.get("target_2"))
             led = add_execution(cur, position_id, side=req["side"], quantity=float(req["quantity"]),
                                 price=float(req["price"]), fees=float(req.get("fees") or 0),
                                 executed_at=req.get("executed_at"), source=req.get("source") or "MANUAL",

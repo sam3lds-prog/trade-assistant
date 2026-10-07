@@ -55,13 +55,20 @@ def test_calibration_needs_order_and_a_real_gap():
     rng = np.random.default_rng(1)
     n = 6000
     net = rng.uniform(-100, 100, n)
-    good = pd.DataFrame({"net": net, "regime": "BULL_CALM", "fwd_10": rng.normal(0.0004 * net, 0.03), "spy_10": 0.0,
-                         "fwd_20": np.nan, "spy_20": np.nan, "fwd_5": np.nan, "spy_5": np.nan})
+    dates = np.tile(pd.bdate_range("2020-01-01", periods=n // 4).to_numpy(), 4)
+    good = pd.DataFrame({"date": dates, "net": net, "regime": "BULL_CALM", "fwd_10": rng.normal(0.0004 * net, 0.03),
+                         "spy_10": 0.0, "fwd_20": np.nan, "spy_20": np.nan, "fwd_5": np.nan, "spy_5": np.nan})
     c = signalbook.calibrate(good)
     freqs = [b["frequency"] for b in c["buckets"]]
     assert c["calibrated"] and c["ordered"] and freqs[-1] > freqs[0] + 0.2 and c["p_value"] < 0.05
     noise = good.assign(fwd_10=rng.normal(0, 0.03, n))
     assert not signalbook.calibrate(noise)["calibrated"]
+    # Stocks whose scores and outcomes both move with the market on the same dates, with no link
+    # between score and outcome: the block test must not find one.
+    k = n // 4
+    day_score, day_move = rng.uniform(-100, 100, k), rng.normal(0, 0.03, k)
+    herd = good.assign(net=np.tile(day_score, 4) + rng.normal(0, 5, n), fwd_10=np.tile(day_move, 4) + rng.normal(0, 0.003, n))
+    assert not signalbook.calibrate(herd)["calibrated"]
     assert c["buckets"][0]["by_regime"]["BULL_CALM"]["cases"] == c["buckets"][0]["cases"]
     assert signalbook.bucket_for(-45) == (-50.0, -25.0) and signalbook.bucket_for(100) == (50.0, 100.01)
 
