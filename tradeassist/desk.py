@@ -98,19 +98,30 @@ class Desk:
 
     # --- marks ---------------------------------------------------------------------
     def mark(self, pos: dict[str, Any]) -> dict[str, Any]:
-        """The current price of what the position holds, and of the stock underneath."""
+        """The current price of what the position holds, and of the stock underneath.
+
+        `price` is the analytical mark used for unrealized profit: for stock the price options are
+        valued against (market.spot_and_basis: midpoint, last trade or close), for an option the
+        bid/ask midpoint, or the model value when there is no two-sided quote. Beside it are the
+        last trade, bid, ask, midpoint and spread, and `liquidation_price`: what closing now would
+        roughly get, the bid for something held long and the ask for a short to buy back. Neither
+        is a promise of a fill."""
         symbol = pos["symbol"]
+        sign = 1 if pos["direction"] == "LONG" else -1
         if pos["instrument_type"] == "STOCK":
             q = self.market.quote(symbol)
-            price = self.market.spot_from_quote(q, symbol)
-            return {"price": price, "underlying": price, "prev_close": finite(q.get("prevclose")),
-                    "as_of": q.get("trade_time") or q.get("bid_time"), "source": self.market.info.label}
+            price, basis = self.market.spot_and_basis(q, symbol)
+            bid, ask, last = finite(q.get("bid")), finite(q.get("ask")), finite(q.get("last"))
+            return {"price": price, "mark_basis": basis, "underlying": price, "prev_close": finite(q.get("prevclose")),
+                    "as_of": q.get("trade_time") or q.get("bid_time"), "source": self.market.info.label,
+                    "realtime": self.market.info.realtime, **quote_sides(bid, ask, last, sign)}
         leg = pos["legs"][0]
         if leg["expiration"] < datetime.now(NY).date().isoformat():
             q = self.market.quote(symbol)
             spot = self.market.spot_from_quote(q, symbol)
             intrinsic = max((spot - leg["strike"]) if leg["option_type"] == "CALL" else (leg["strike"] - spot), 0.0)
-            return {"price": intrinsic, "underlying": spot, "prev_close": None, "as_of": None, "expired": True,
+            return {"price": intrinsic, "mark_basis": "intrinsic value at expiration", "underlying": spot, "prev_close": None,
+                    "as_of": None, "expired": True, "liquidation_price": None,
                     "source": "intrinsic value: this option has expired, so record how it ended"}
         analysis = self.svc._chain_for(symbol, leg["expiration"])
         row = analysis.find_by_terms(leg["option_type"].lower(), float(leg["strike"]))
@@ -119,8 +130,11 @@ class Desk:
         price, source = row.get("mid"), "midpoint"
         if price is None:
             price, source = row.get("model_value"), "model value (no two-sided quote)"
-        return {"price": finite(price), "underlying": analysis.spot, "prev_close": finite(row.get("prevclose")),
-                "as_of": row.get("bid_time"), "source": source, "bid": row.get("bid"), "ask": row.get("ask"),
+        bid, ask = finite(row.get("bid")), finite(row.get("ask"))
+        return {"price": finite(price), "mark_basis": source, "underlying": analysis.spot,
+                "prev_close": finite(row.get("prevclose")),
+                "as_of": row.get("bid_time"), "source": source, "realtime": self.market.info.realtime,
+                **quote_sides(bid, ask, finite(row.get("last")), sign),
                 "delta": row.get("delta"), "theta": row.get("theta"), "vega": row.get("vega"), "gamma": row.get("gamma"),
                 "iv": row.get("iv"), "dte": days_to_expiry(leg["expiration"]),
                 # What the model needs to reprice this contract consistently with the chain.
@@ -142,17 +156,25 @@ class Desk:
             except (DataError, ValueError) as exc:
                 pos["mark"] = {"price": None, "error": str(exc)}
         price = pos["mark"]["price"] if pos["mark"] else None
+        liq = (pos["mark"] or {}).get("liquidation_price")
         sign = 1 if pos["direction"] == "LONG" else -1
-        unreal = None
-        if led["open_quantity"] > 0 and price is not None and led["cost_basis"] is not None:
-            unreal = sign * (price - led["cost_basis"]) * led["open_quantity"] * pos["multiplier"]
-        elif led["open_quantity"] == 0:
-            unreal = 0.0
+        unreal = liq_unreal = None
+        open_qty, mult = led["open_quantity"], pos["multiplier"]
+        if open_qty > 0 and price is not None and led["cost_basis"] is not None:
+            unreal = sign * (price - led["cost_basis"]) * open_qty * mult
+            if liq is not None:
+                liq_unreal = sign * (liq - led["cost_basis"]) * open_qty * mult
+        elif open_qty == 0:
+            unreal = liq_unreal = 0.0
         total = led["realized_pnl"] + unreal if unreal is not None else None
         risk = led.get("initial_risk")
         pos["pnl"] = {"realized": led["realized_pnl"], "unrealized": unreal, "total": total, "fees": led["fees"],
                       "r_multiple": (total / risk) if (total is not None and risk) else None, "initial_risk": risk,
-                      "market_value": (sign * price * led["open_quantity"] * pos["multiplier"]) if price is not None else None}
+                      "market_value": (sign * price * open_qty * mult) if price is not None else None,
+                      # What closing now at the bid (long) or the ask (short) would roughly realise: an estimate,
+                      # never a promised fill. None when there is no two-sided quote.
+                      "liquidation_value": (sign * liq * open_qty * mult) if liq is not None else (0.0 if open_qty == 0 else None),
+                      "liquidation_unrealized": liq_unreal}
         pos["thesis_check"] = self.thesis_check(pos)
         if pos["opened_at"]:
             end = pos["closed_at"] or now_iso()
@@ -404,6 +426,23 @@ class Desk:
 
     def backfill_snapshots(self, dry_run: bool = False, upgrade_hindsight: bool = True) -> dict[str, Any]:
         return self.snapshots.backfill(upgrade_hindsight=upgrade_hindsight, dry_run=dry_run)
+
+
+def quote_sides(bid: float | None, ask: float | None, last: float | None, sign: int) -> dict[str, Any]:
+    """Bid, ask, midpoint, spread and the price a position could roughly be closed at now."""
+    quoted = bid is not None and ask is not None and ask > 0 and 0 <= bid <= ask
+    mid = 0.5 * (bid + ask) if quoted and bid > 0 else None
+    liquidation = (bid if sign > 0 else ask) if quoted else None
+    if not quoted:
+        basis = None
+    elif sign > 0:
+        basis = "the bid: what selling now would roughly get" if bid > 0 else "no bid: selling now would get nothing"
+    else:
+        basis = "the ask: what buying back now would roughly cost"
+    return {"last": last, "bid": bid, "ask": ask, "mid": mid,
+            "spread": (ask - bid) if quoted else None,
+            "spread_pct": 100.0 * (ask - bid) / mid if mid else None,
+            "liquidation_price": liquidation, "liquidation_basis": basis}
 
 
 INDICATOR_KEYS = (("rsi", "rsi_14"), ("macd", "macd"), ("macd_signal", "macd_signal"), ("macd_hist", "macd_histogram"),

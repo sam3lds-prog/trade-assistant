@@ -76,19 +76,23 @@ class Market:
 
     def spot_from_quote(self, q: dict[str, Any], symbol: str) -> float:
         """The stock price to value options against, from a quote already fetched."""
-        price = q.get("last")
+        return self.spot_and_basis(q, symbol)[0]
+
+    def spot_and_basis(self, q: dict[str, Any], symbol: str) -> tuple[float, str]:
+        """spot_from_quote, and which price it is: the last trade, the bid/ask midpoint or the close."""
+        price, basis = q.get("last"), "last trade"
         bid, ask = q.get("bid"), q.get("ask")
         if self.clock().get("state") == "open":
             # During market hours the bid/ask midpoint is fresher than the last trade.
             if bid and ask and ask > bid > 0 and (ask - bid) / ask < 0.01:
-                price = 0.5 * (bid + ask)
+                price, basis = 0.5 * (bid + ask), "bid/ask midpoint"
         elif q.get("close"):
             # Outside regular hours option quotes are frozen at the close, so price them against
             # the closing stock price, not an after-hours quote.
-            price = q["close"]
-        if not price or price <= 0:
+            price, basis = q["close"], "closing price"
+        if not price or price <= 0 or price != price or price == float("inf"):
             raise DataError(f"No usable price for {symbol}")
-        return float(price)
+        return float(price), basis
 
     # --- daily bars --------------------------------------------------------
     def bars(self, symbol: str, years: float = 3.0, complete: bool = False) -> pd.DataFrame:
