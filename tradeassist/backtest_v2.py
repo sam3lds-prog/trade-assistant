@@ -82,7 +82,7 @@ def validate(strategy: dict[str, Any]) -> dict[str, Any]:
     long_, short = strategy.get("long") or [], strategy.get("short") or []
     if not long_ and not short:
         raise StrategyError("Give at least one condition for going long or short")
-    for side, conds in (("long", long_), ("short", short)):
+    for _side, conds in (("long", long_), ("short", short)):
         if len(conds) > MAX_CONDITIONS:
             raise StrategyError(f"At most {MAX_CONDITIONS} conditions per side")
         for c in conds:

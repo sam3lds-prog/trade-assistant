@@ -1,0 +1,14 @@
+# Lint settings for CI. The rule set is deliberately small: syntax errors, undefined names,
+# unused imports and likely bugs, plus no eval/exec. Formatting is not enforced, so the
+# existing code is not reformatted wholesale.
+target-version = "py311"
+line-length = 130
+
+[lint]
+select = ["E9", "F", "B", "S102", "S307"]
+ignore = [
+    "B905",   # zip() without strict=: the code zips sequences built to the same length
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["B023"]   # test doubles that close over loop variables on purpose

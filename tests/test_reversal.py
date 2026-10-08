@@ -1,6 +1,5 @@
 """Trend reversals: potential bottoms and tops, their stages, causality, option scoring and the API."""
 
-import math
 
 import numpy as np
 import pandas as pd

@@ -1,0 +1,61 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install
+        run: pip install -r requirements-dev.txt
+      - name: Syntax and imports
+        run: |
+          python -m compileall -q tradeassist tests run.py
+          python -c "import tradeassist.api, tradeassist.api_v2, tradeassist.desk, tradeassist.analysis"
+      - name: Lint
+        run: ruff check .
+      - name: Migration tests
+        run: python -m pytest -q tests/test_migrations.py
+      - name: Unit and integration tests with coverage
+        run: >
+          python -m pytest -q
+          --cov=tradeassist --cov-branch
+          --cov-report=term-missing:skip-covered --cov-report=xml
+      - name: Coverage report
+        if: always() && matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  audit:
+    # Known vulnerabilities in the pinned dependencies. Reported, not blocking: a new advisory
+    # in a dependency should not stop an unrelated change from merging.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt

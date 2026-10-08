@@ -5,7 +5,7 @@ import pytest
 from tradeassist import eventstudy as es
 from tradeassist.indicators import enrich
 from tradeassist.patterns import PATTERNS, Pattern, detect_all, recent_events
-from tests.conftest import make_bars, random_walk
+from tests.conftest import make_bars
 
 
 def test_forward_return_enters_next_open_and_exits_h_closes_later():
