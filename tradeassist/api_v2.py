@@ -111,6 +111,20 @@ class OptionsCompare(OptionsEvaluate):
     contracts_to_compare: list[ContractRef] = Field(..., min_length=1, max_length=8)
 
 
+class ReversalOptions(Strict):
+    symbol: str
+    side: Literal["auto", "bottom", "top"] = "auto"
+    target_price: float | None = Field(None, gt=0)
+    target_2: float | None = Field(None, gt=0)
+    invalidation_price: float | None = Field(None, gt=0)
+    horizon_days: int = Field(20, ge=1, le=260)
+    contracts: int = Field(1, ge=1, le=500)
+    budget: float | None = Field(None, gt=0)
+    expirations: list[str] | None = Field(None, max_length=6)
+    earnings_date: str | None = None
+    contracts_to_score: list[ContractRef] | None = Field(None, min_length=1, max_length=8)
+
+
 class Scenario(Strict):
     name: str = ""
     market_move_pct: float = Field(0.0, ge=-90, le=200)
@@ -275,6 +289,32 @@ def build_router(svc: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail=f"A {body['direction'].lower()} thesis compares {kind.lower()}s only")
         try:
             return clean(analyst.evaluate_options(body, only=only))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- reversals: potential bottoms and tops, and options to trade them ---------------------------
+    @router.get("/reversal/scan")
+    def reversal_scan(symbols: str | None = None):
+        need("reversal_analysis")
+        names = [s for s in (symbols or "").split(",") if s.strip()] or None
+        try:
+            return clean(analyst.reversal_scan(names))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/reversal/{symbol}")
+    def reversal(symbol: str):
+        need("reversal_analysis")
+        try:
+            return clean(analyst.reversal(symbol))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/reversal/options")
+    def reversal_options(req: ReversalOptions):
+        need("reversal_analysis")
+        try:
+            return clean(analyst.reversal_options(req.model_dump()))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

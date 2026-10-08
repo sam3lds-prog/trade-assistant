@@ -13,7 +13,9 @@ Version 2 adds position intelligence: stock you are long or short and the calls 
 you hold, in one place with correct accounting; a trend engine that shows its evidence;
 the market regime; signals with their past record; trade grades; an option picker for a
 stock thesis; portfolio risk and stress tests; journal analytics; condition-based
-backtests; and alerts. See "Version 2" below and `docs/V2.md` for the details.
+backtests; and alerts. Version 2.1 adds trend reversals: whether a stock is at a potential
+bottom or top, or has confirmed a reversal, and a score for the calls or puts to trade it,
+with the gain or loss in each case. See "Version 2" below and `docs/V2.md` for the details.
 
 ## Start it
 
@@ -323,6 +325,22 @@ from A to AVOID with suggested invalidation, targets and size; and choosing a ca
 for the thesis, with the best match, cheapest, best risk-adjusted and most conservative
 contract and the ones to avoid.
 
+**Trend reversals (2.1).** On the Analyze screen, a section reads both sides at once: is a
+fall ending in a bottom, or a rise in a top? Exhaustion (a long move, RSI at an extreme, a
+stretch from the 20-day average, divergences, a climax day, reversal candles) and
+confirmation (a higher low, a close above the last lower high, the trend engine turning, the
+averages taken back, volume) are scored out of 100 points, and each side gets a stage: no
+move to reverse, stretched (watch), potential bottom or top, confirmed, or failed. A true
+bottom or top is only known afterwards, so these are signs, not certainties; the screen
+shows where the idea is wrong, the targets, a year of past stages, and how often each
+reading worked before on this stock and across the signal history. Below it, "Score a call
+or put for this reversal" values calls (for a bottom) or puts (for a top) with those levels,
+scores each out of 100 as GOOD, FAIR, POOR or AVOID with the reasons, and for the best one
+(or your own contract) shows the gain or loss at each target, with no move and at the stop,
+a full simulation, and what it would have made after the past cases of the same reading.
+The score is a summary of checks, not a probability. "Reversal scan of the watchlist" at the
+top of the screen lists every stock's reading, strongest first.
+
 **Positions.** Record what you did at your broker: stock long or short, calls and puts,
 with every fill. Average cost, partial exits, fees, realized and unrealized profit and R
 multiples come out of the fills. Each position keeps a snapshot of the market at entry and
@@ -461,10 +479,11 @@ tradeassist/
   positions.py desk.py     unified positions: accounting from fills, marks, snapshots
   dataquality.py           checks on daily bars; finished versus unfinished bars
   trend.py regime.py       trend engine and market regime
+  reversal.py              potential bottoms and tops, and confirmed reversals
   sectors.py               the sector fund for relative strength
   signalbook.py            signal history and score calibration
   evaluator.py             trade grades for stock ideas
-  options/                 the option picker; historical option data (none connected)
+  options/                 the option picker, reversal option scores; historical option data (none connected)
   portfolio.py analytics.py alerts.py   portfolio risk, journal analytics, alerts
   backtest_v2.py           condition strategies, Monte Carlo
   analysis.py api_v2.py    the version 2 operations and the /v2 HTTP API

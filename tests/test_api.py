@@ -15,6 +15,7 @@ V2_WRITES = {
     "/v2/positions/{position_id}/cancel", "/v2/positions/{position_id}/snapshot",
     "/v2/position/evaluate", "/v2/options/evaluate", "/v2/options/compare", "/v2/portfolio/stress",
     "/v2/signals/history/build", "/v2/backtest", "/v2/backtest/walkforward", "/v2/alerts/check",
+    "/v2/reversal/options",
 }
 
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."

@@ -32,6 +32,11 @@ log = logging.getLogger(__name__)
 
 CACHE_SECONDS = 60
 BENCH_YEARS = 3.0
+REVERSAL_YEARS = 5
+REVERSAL_KEYS = ("reversal:bottom_candidate", "reversal:bottom_confirmed", "reversal:top_candidate",
+                 "reversal:top_confirmed")
+REVERSAL_CASES = {"reversal:bottom_candidate": "potential bottoms", "reversal:bottom_confirmed": "confirmed reversals up",
+                  "reversal:top_candidate": "potential tops", "reversal:top_confirmed": "confirmed reversals down"}
 
 
 class Analyst:
@@ -40,6 +45,8 @@ class Analyst:
         self.market = svc.market
         self._cache: dict[tuple, tuple[float, Any]] = {}
         self._sectors: dict[str, str | None] = {}
+        self._reversal_cases: dict[str, dict[str, list[dict[str, Any]]]] = {}   # this stock's past readings
+        self._reversal_pooled: dict[str, list[dict[str, Any]]] = {}            # all stocks', from the history
 
     # --- small helpers ----------------------------------------------------------------
     def _cached(self, key: tuple, build):
@@ -732,6 +739,256 @@ class Analyst:
                "note": "Alerts only: nothing is bought, sold or sent. You decide what to do."}
         self.svc.db.cache_put(f"alerts:last:{self.market.info.mode}", {"checked_at": out["checked_at"], "count": len(found)})
         return out
+
+    # --- reversals: potential bottoms and tops ------------------------------------------------------
+    def reversal(self, symbol: str, history: bool = True) -> dict[str, Any]:
+        """Is `symbol` at a potential bottom or top, or has a reversal been confirmed (reversal.py)?
+        With `history`, also how the same readings turned out before, on this stock over five years
+        and across the stocks in the signal history."""
+        symbol = self.svc._symbol(symbol)
+        enriched = self.market.enriched(symbol, REVERSAL_YEARS)
+        info = self.market.bar_info(symbol)
+        meta = self.history_meta() if history else None
+        key = ("reversal", symbol, info.get("fetched_at"), len(enriched), history, (meta or {}).get("run_at"))
+        return self._cached(key, lambda: self._reversal(symbol, enriched, history, meta))
+
+    def _reversal(self, symbol: str, enriched: pd.DataFrame, history: bool,
+                  meta: dict[str, Any] | None) -> dict[str, Any]:
+        from . import reversal as reversal_engine
+        sector = self.sector(symbol)
+        bench, notes = self.benchmarks(symbol, sector, years=REVERSAL_YEARS)
+        # Without validated-pattern points, as the signal history records them.
+        states = trend_engine.state_series(enriched, bench, sector, None)
+        ev = reversal_engine.evaluate(enriched, states)
+        out = reversal_engine.analyse(enriched, symbol, states, ev=ev)
+        dates = enriched["date"].dt.strftime("%Y-%m-%d").tolist()
+        ci = dates.index(out["confirmed"]["date"])
+        out["trend_state"] = {"state": str(states["trend_state"].iloc[ci]), "date": dates[ci]}
+        out["notes"] = notes
+        if self.market.info.mode == "demo":
+            out["notes"].insert(0, "Demo prices are synthetic: this reading says nothing about the real stock.")
+        out["data_source"] = self.market.info.mode
+        if not history:
+            return out
+        # This stock's own past readings, on finished bars only, with what followed each.
+        complete = (enriched["bar_complete"].to_numpy(dtype=bool) if "bar_complete" in enriched.columns
+                    else np.ones(len(enriched), dtype=bool))
+        n_done = int(np.flatnonzero(complete)[-1]) + 1 if complete.any() else 0
+        done = enriched.iloc[:n_done].reset_index(drop=True)
+        spy = bench.get("SPY") if symbol != "SPY" else enriched
+        outcome = signalbook.outcomes(done, spy) if n_done else pd.DataFrame()
+        cases: dict[str, list[dict[str, Any]]] = {k: [] for k in REVERSAL_KEYS}
+        atr_pct = signalbook.atr_share(done)
+        for i, k in reversal_engine.events(ev):
+            if i >= n_done:
+                continue
+            o = outcome.iloc[i]
+            cases[k].append({"symbol": symbol, "date": dates[i], "close": float(done["close"].iloc[i]),
+                             "atr_pct": float(atr_pct[i]) if np.isfinite(atr_pct[i]) else None,
+                             **{c: (float(o[c]) if np.isfinite(o[c]) else None) for c in outcome.columns}})
+        self._reversal_cases[symbol] = cases
+        pooled: dict[str, list[dict[str, Any]]] = {}
+        source = self.market.info.mode
+        if meta:
+            pooled = {k: signalbook.load(self.svc.db, source, k) for k in REVERSAL_KEYS}
+            self._reversal_pooled = pooled
+        past = []
+        for k in REVERSAL_KEYS:
+            direction = signalbook.signal_direction(k)
+            mine = cases[k]
+            past.append({"key": k, "label": signalbook.signal_label(k), "direction": direction,
+                         "this_stock": [signalbook.summarize(mine, direction, h) for h in signalbook.HORIZONS],
+                         "all_stocks": [signalbook.summarize(pooled[k], direction, h) for h in signalbook.HORIZONS]
+                         if meta else None,
+                         "recent": [{"date": r["date"], "close": r["close"], "fwd_10": r.get("fwd_10"),
+                                     "fwd_20": r.get("fwd_20")} for r in mine[-6:]][::-1]})
+        out["past"] = {"years": REVERSAL_YEARS, "signals": past, "history_built": bool(meta),
+                       "history_run_at": meta["run_at"] if meta else None,
+                       "history_symbols": len(meta["symbols"]) if meta else 0}
+        if not meta:
+            out["notes"].append("The signal history has not been built, so only this stock's own past cases are "
+                                "counted. Build it from the Pattern lab screen to add the other stocks'.")
+        elif meta.get("signal_engine_version") != SIGNAL_ENGINE_VERSION or not any(pooled.values()):
+            out["notes"].append("The signal history was built before reversal signals were recorded; rebuild it on "
+                                "the Pattern lab screen to include them.")
+        return out
+
+    def reversal_scan(self, symbols: list[str] | None = None) -> dict[str, Any]:
+        """The reversal reading for each stock on the watchlist (or `symbols`), strongest first."""
+        from .reversal import STAGE_RANK
+        names = [s.strip().upper() for s in (symbols or self.svc.settings.watchlist) if s.strip()]
+        if not names:
+            raise ValueError("Give at least one symbol")
+        if len(names) > 60:
+            raise ValueError("At most 60 symbols per scan")
+        rows, errors = [], []
+        for sym in dict.fromkeys(names):
+            try:
+                r = self.reversal(sym, history=False)
+            except (DataError, ValueError) as exc:
+                errors.append(f"{sym}: {exc}")
+                continue
+            day = r["confirmed"]
+            lead = day["leading"]
+            pick = day[lead] if lead else max(day["bottom"], day["top"], key=lambda s: s["score"])
+            prov = r["provisional"]
+            rows.append({"symbol": r["symbol"], "date": day["date"], "leading": lead, "stage": pick["stage"],
+                         "side": pick["side"], "score": pick["score"], "exhaustion": pick["exhaustion"],
+                         "confirmation": pick["confirmation"], "since": pick["since"],
+                         "bottom": {"stage": day["bottom"]["stage"], "score": day["bottom"]["score"]},
+                         "top": {"stage": day["top"]["stage"], "score": day["top"]["score"]},
+                         "close": pick["levels"]["close"], "invalidation": pick["levels"]["invalidation"],
+                         "target_1": pick["levels"]["target_1"], "headline": day["headline"],
+                         "trend_state": r["trend_state"]["state"],
+                         "today": ({"stage": prov[pick["side"]]["stage"], "date": prov["date"]}
+                                   if prov and prov[pick["side"]]["stage"] != pick["stage"] else None)})
+        rows.sort(key=lambda x: (STAGE_RANK[x["stage"]] if x["leading"] else 0, x["score"]), reverse=True)
+        return {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "rows": rows, "errors": errors,
+                "data_source": self.market.info.mode,
+                "note": "Stages are read on the last finished bar. A true bottom or top is only known afterwards; "
+                        "points are evidence, not chances."}
+
+    def reversal_options(self, req: dict[str, Any]) -> dict[str, Any]:
+        """Calls for a potential bottom, puts for a potential top: each contract valued by the options
+        evaluator with the reversal's own levels, scored out of 100 (options/reversal_score.py), and
+        the best one simulated, with what it would have made after the past cases of the same reading."""
+        from datetime import date as _date
+        from .options import reversal_score
+        from .versions import OPTIONS_EVALUATOR_VERSION, REVERSAL_ENGINE_VERSION
+        symbol = self.svc._symbol(req["symbol"])
+        rv = self.reversal(symbol)
+        day = rv["confirmed"]
+        notes: list[str] = []
+        own = req.get("contracts_to_score") or None
+        side = str(req.get("side") or "auto").lower()
+        if side not in ("auto", "bottom", "top"):
+            raise ValueError("side must be auto, bottom or top")
+        if own:
+            kinds = {str(c["option_type"]).lower() for c in own}
+            if len(kinds) > 1:
+                raise ValueError("Score calls or puts, not both at once: calls are for a bottom, puts for a top")
+            own_side = "bottom" if kinds == {"call"} else "top"
+            if side == "auto":
+                side = own_side
+            elif side != own_side:
+                raise ValueError(f"{'Calls' if own_side == 'bottom' else 'Puts'} are for a potential {own_side}, "
+                                 f"not a {side}")
+        if side == "auto":
+            side = day["leading"] or ("bottom" if day["bottom"]["score"] >= day["top"]["score"] else "top")
+            if not day["leading"]:
+                notes.append("Neither a potential bottom nor a potential top is in sight, so the contracts were scored "
+                             f"on the stronger side ({side}) and the setup counts for little.")
+        sv = day[side]
+        d = 1 if side == "bottom" else -1
+        lv = sv["levels"]
+        names = {"target_1": lv["target_1_is"], "target_2": lv["target_2_is"]}
+        spot = self.market.spot(symbol)
+        inv = float(req.get("invalidation_price") or lv["invalidation"])
+        t1 = float(req.get("target_price") or lv["target_1"])
+        t2 = float(req.get("target_2") or lv["target_2"])
+        if d * (spot - inv) <= 0:
+            raise ValueError(f"{symbol} at ${spot:,.2f} is already {'below' if d > 0 else 'above'} the invalidation "
+                             f"price ${inv:,.2f}: the potential {side} has failed for now.")
+        if d * (t1 - spot) <= 0:
+            if req.get("target_price") or d * (t2 - spot) <= 0:
+                raise ValueError(f"{symbol} at ${spot:,.2f} is already past the target ${t1:,.2f}: the move this "
+                                 "reversal pointed to has happened. Give a target further out to score contracts.")
+            notes.append(f"{symbol} is already past target 1 (${t1:,.2f}), so target 2 is used as the target.")
+            t1, names["target_1"] = t2, names["target_2"]
+            t2, names["target_2"] = t1 + d * abs(t1 - spot) * 0.5, "half as far again"
+        if d * (t2 - t1) <= 0:
+            t2, names["target_2"] = t1 + d * abs(t1 - spot) * 0.5, "half as far again"
+        if req.get("target_price"):
+            names["target_1"] = "your target"
+        horizon = int(req.get("horizon_days") or 20)
+        contracts = int(req.get("contracts") or 1)
+        ev = self.evaluate_options({"symbol": symbol, "direction": "BULLISH" if d > 0 else "BEARISH",
+                                    "target_price": t1, "target_2": t2, "invalidation_price": inv,
+                                    "horizon_days": horizon, "contracts": contracts, "budget": req.get("budget"),
+                                    "expirations": req.get("expirations"), "earnings_date": req.get("earnings_date")},
+                                   only=own)
+        thesis = ev["thesis"]
+        enriched = self.market.enriched(symbol, 3, complete=True)
+        hv = float(enriched["hv20"].iloc[-1]) if "hv20" in enriched.columns and len(enriched) else float("nan")
+        hv20 = hv if math.isfinite(hv) and hv > 0 else None
+        ivr = self.svc.iv_rank(symbol)
+        iv_rank = ivr["rank"] if ivr.get("days", 0) >= 30 and ivr.get("rank") is not None else None
+        if iv_rank is None:
+            notes.append("Too few days of recorded implied volatility for a rank, so the volatility check compares "
+                         "implied with actual volatility only.")
+        earn = ev.get("earnings") or {}
+        ed = _date.fromisoformat(earn["date"]) if earn.get("date") else None
+        today = datetime.now(NY).date()
+        # Past cases of the same reading, for the analog simulation: across stocks when there are enough.
+        key = f"reversal:{side}_{'confirmed' if sv['stage'] == 'CONFIRMED' else 'candidate'}"
+        h_past = max([h for h in signalbook.HORIZONS if h <= horizon] or [min(signalbook.HORIZONS)])
+        pooled = [r for r in getattr(self, "_reversal_pooled", {}).get(key, [])
+                  if r.get(f"fwd_{h_past}") is not None]
+        mine = [r for r in self._reversal_cases.get(symbol, {}).get(key, []) if r.get(f"fwd_{h_past}") is not None]
+        if len(pooled) >= signalbook.MIN_CASES:
+            cases, where = pooled, f"after {REVERSAL_CASES[key]} across the stocks in the signal history"
+        elif len(mine) >= 8:
+            cases, where = mine, f"after {REVERSAL_CASES[key]} on {symbol} over {REVERSAL_YEARS} years"
+            if len(mine) < signalbook.MIN_CASES:
+                notes.append(f"Only {len(mine)} past cases on {symbol}: treat the simulation of past cases as a rough "
+                             "guide.")
+        else:
+            cases, where = [], ""
+            notes.append("Too few past cases of this reading to simulate the contract on them"
+                         + ("." if rv["past"]["history_built"] else "; building the signal history adds other stocks'."))
+
+        now = datetime.now(NY)
+        rate = self.svc.settings.risk_free_rate
+
+        def past_cases(k: dict[str, Any]) -> dict[str, Any] | None:
+            if not cases or k.get("premium") is None:
+                return None
+            try:
+                a = self.svc._chain_for(symbol, k["expiration"])
+                row = a.find_by_terms(k["option_type"].lower(), k["strike"])
+                return reversal_score.analog_outcomes(k, row, a, cases, direction=d, spot=spot, invalidation=inv,
+                                                      horizon=h_past, rate=rate, contracts=contracts, now=now,
+                                                      source=where, atr_pct=lv["atr"] / lv["close"]) if row else None
+            except (DataError, ValueError) as exc:
+                return {"error": str(exc)}
+
+        for k in ev["contracts"]:
+            before = ed is not None and today <= ed <= _date.fromisoformat(k["expiration"])
+            k["reversal_score"] = reversal_score.score_contract(k, sv, {**thesis, "target_1": t1}, hv20, iv_rank, before)
+            k["past_cases"] = past_cases(k)
+            reversal_score.weigh_past_cases(k["reversal_score"], k["past_cases"], signalbook.MIN_CASES)
+        # Best verdict first, then the highest score: a capped contract ranks below an uncapped one.
+        ranked = sorted(ev["contracts"], key=lambda k: (reversal_score.VERDICT_ORDER.index(k["reversal_score"]["verdict"]),
+                                                        k["reversal_score"]["score"]), reverse=True)
+
+        def detail(k: dict[str, Any]) -> dict[str, Any]:
+            return {**k, "outcomes": reversal_score.outcome_table(k, {**thesis, "target_1": t1, "target_2": t2}, names)}
+
+        best = detail(ranked[0]) if ranked else None
+        if best and best.get("premium") is not None:
+            h_day = min(_date.fromisoformat(thesis["horizon_date"]), _date.fromisoformat(best["expiration"]))
+            try:
+                best["simulation"] = self.svc.simulate(symbol=symbol, eval_date=h_day.isoformat(), legs=[{
+                    "expiration": best["expiration"], "option_type": best["option_type"].lower(), "strike": best["strike"],
+                    "side": "buy", "contracts": contracts, "entry_price": best["mid"]}])
+            except (DataError, ValueError) as exc:
+                best["simulation"] = {"error": str(exc)}
+        compact = [{k: v for k, v in c.items() if k != "scenarios"} for c in ranked]
+        prov = rv["provisional"]
+        return {"version": REVERSAL_ENGINE_VERSION, "options_evaluator_version": OPTIONS_EVALUATOR_VERSION,
+                "symbol": symbol, "side": side, "contract_type": "CALL" if d > 0 else "PUT",
+                "setup": {"date": day["date"], "stage": sv["stage"], "score": sv["score"], "exhaustion": sv["exhaustion"],
+                          "confirmation": sv["confirmation"], "text": sv["text"], "levels": lv,
+                          "today": prov[side]["stage"] if prov and prov[side]["stage"] != sv["stage"] else None},
+                "thesis": {**thesis, "target_1_is": names["target_1"], "target_2_is": names["target_2"]},
+                "verdict_counts": {v: sum(1 for c in ranked if c["reversal_score"]["verdict"] == v)
+                                   for v in ("GOOD", "FAIR", "POOR", "AVOID")},
+                "best": best, "own": [detail(c) for c in ranked] if own else None, "contracts": compact,
+                "market": ev["market"], "earnings": ev.get("earnings"), "stock_grade": ev.get("stock_grade"),
+                "exit_rule": ev["exit_rule"], "weights": reversal_score.WEIGHTS,
+                "notes": notes + ev["notes"] + ["The score summarises the checks; it is not a probability. GOOD is 70 or "
+                                                "more, FAIR 50 to 69, POOR below 50, AVOID when a check rules it out."],
+                "data_source": self.market.info.mode}
 
     # --- everything about one stock --------------------------------------------------------------
     def analysis(self, symbol: str) -> dict[str, Any]:

@@ -306,3 +306,20 @@ select:disabled, input:disabled { opacity: 0.6; }
 /* Alert badge on the rail */
 .rail .badge { display: inline-block; min-width: 1.4em; padding: 0 6px; margin-left: 8px; border-radius: 999px; background: var(--fail);
   color: #fff; font-size: 0.75rem; font-weight: 600; text-align: center; line-height: 1.5; }
+
+/* Trend reversals */
+.rev-sides { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 12px 0; }
+.rev-side { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--sunk); min-width: 0; }
+.rev-side.lead { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.rev-side h4 { margin: 0 0 6px; }
+.rev-side .metrics { margin-top: 8px; }
+.rev-options { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 12px; }
+.rev-options .inline-form input[type="date"] { width: 150px; }
+.grade-letter.word { font-size: 1.2rem; min-width: 4.4em; }
+.grade-letter.g-GOOD { color: var(--pass); background: var(--pass-bg); }
+.grade-letter.g-FAIR { color: var(--warn); background: var(--warn-bg); }
+.grade-letter.g-POOR, .grade-letter.g-AVOID { color: var(--fail); background: var(--fail-bg); }
+.pos-text { color: var(--pass); }
+.neg-text { color: var(--fail); }
+.chart text.small-label { fill: var(--muted); font-size: 10.5px; }
+.nowrap { white-space: nowrap; }

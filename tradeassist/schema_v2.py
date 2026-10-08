@@ -124,3 +124,11 @@ def signal_occurrences(cur: sqlite3.Cursor) -> None:
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_key ON signal_occurrences (data_source, signal_key)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signal_occurrences (data_source, symbol)")
+
+
+@migration(4, "signal occurrences: the stock's daily range as a share of its price on the day")
+def signal_atr_pct(cur: sqlite3.Cursor) -> None:
+    # Lets past cases from a calm stock be compared with a volatile one (options/reversal_score.py).
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(signal_occurrences)").fetchall()}
+    if "atr_pct" not in columns:
+        cur.execute("ALTER TABLE signal_occurrences ADD COLUMN atr_pct REAL")

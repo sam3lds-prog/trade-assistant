@@ -1039,4 +1039,313 @@ function updateAlertBadge(n) {
   setInterval(() => { if (featureOn("unified_positions")) api("/v2/alerts").then(a => updateAlertBadge(a.alerts.filter(x => x.level !== "info").length)).catch(() => {}); }, 600000);
 }
 
-Object.assign(BUILDERS, { analyze: buildAnalyze, portfolio: buildPortfolio });
+/* ---------- trend reversals: potential bottoms and tops, and options to trade them ---------- */
+const REV_LEVEL = { CONFIRMED: "pass", CANDIDATE: "warn", WATCH: "info", FAILED: "fail", NONE: "info" };
+const revWord = (side, stage) => ({
+  CONFIRMED: side === "bottom" ? "Reversal up confirmed" : "Reversal down confirmed", CANDIDATE: `Potential ${side}`,
+  WATCH: "Stretched, no sign yet", FAILED: `Failed ${side}`, NONE: `No ${side} in sight` })[stage] || stage;
+const revTag = (side, stage) => statusTag(REV_LEVEL[stage] || "info", revWord(side, stage));
+const REV_STRIP = { NONE: "var(--sunk)", FAILED: "color-mix(in oklab, var(--ink) 28%, var(--div-mid))" };
+const revFill = (side, stage) => REV_STRIP[stage] ||
+  `color-mix(in oklab, var(${side === "bottom" ? "--div-pos" : "--div-neg"}) ${({ WATCH: 18, CANDIDATE: 45, CONFIRMED: 80 })[stage]}%, var(--div-mid))`;
+const monthDay = iso => iso ? new Date(iso + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+const VERDICT_TAG = { GOOD: "pass", FAIR: "warn", POOR: "fail", AVOID: "fail" };
+const verdictTag = v => statusTag(VERDICT_TAG[v] || "info", v === "GOOD" ? "Good" : v === "FAIR" ? "Fair" : v === "POOR" ? "Poor" : "Avoid");
+
+function reversalSection(d) {
+  if (!featureOn("reversal_analysis")) return null;
+  const head = () => el("h3", { text: "Trend reversal: a potential bottom or top?" });
+  const box = el("div", { class: "panel" }, head(), el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Looking for exhaustion and confirmation…" })));
+  const load = () => api(`/v2/reversal/${encodeURIComponent(d.symbol)}`).then(r => box.replaceChildren(head(), renderReversal(r, load)))
+    .catch(e => box.replaceChildren(head(), el("p", { class: "small error", text: e.message })));
+  load();
+  return box;
+}
+
+function renderReversal(r, reload) {
+  const frag = el("div"), day = r.confirmed, prov = r.provisional;
+  for (const n of r.notes || []) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
+  frag.append(el("p", {}, el("strong", { text: day.headline })));
+  if (prov) {
+    const moved = ["bottom", "top"].filter(s => prov[s].stage !== day[s].stage);
+    frag.append(el("p", { class: "small muted" }, moved.length
+      ? ["Read on the last finished bar (", shortDate(day.date), "). Today's bar so far would make it ", ...moved.flatMap((s, i) => [i ? " and " : "", revTag(s, prov[s].stage)]), "; that is provisional until the close."]
+      : `Read on the last finished bar (${shortDate(day.date)}); today's bar so far does not change it.`));
+  }
+  const sides = el("div", { class: "rev-sides" });
+  for (const s of ["bottom", "top"]) {
+    const v = day[s], lv = v.levels, conf = s === "bottom" ? lv.confirms_above : lv.confirms_below;
+    sides.append(el("div", { class: `rev-side${day.leading === s ? " lead" : ""}` },
+      el("h4", { text: s === "bottom" ? "Bottom: the end of a fall?" : "Top: the end of a rise?" }),
+      el("div", { class: "trend-state" }, revTag(s, v.stage), el("span", { class: "small muted", text: `since ${shortDate(v.since)}` })),
+      el("div", { class: "scores", style: "margin-top:8px" },
+        el("div", { class: "score-row" }, el("span", { class: "score-k", text: "Exhaustion" }), el("div", { class: "score-track" }, el("i", { class: s === "bottom" ? "pos" : "neg", style: `width:${Math.min(100, 100 * v.exhaustion / 60)}%` })), el("strong", { class: "score-v", text: num(v.exhaustion, 0) })),
+        el("div", { class: "score-row" }, el("span", { class: "score-k", text: "Confirmation" }), el("div", { class: "score-track" }, el("i", { class: s === "bottom" ? "pos" : "neg", style: `width:${Math.min(100, 100 * v.confirmation / 40)}%` })), el("strong", { class: "score-v", text: num(v.confirmation, 0) }))),
+      el("p", { class: "small muted", text: `${num(v.score, 0)} of 100 evidence points: exhaustion out of 60, confirmation out of 40.` }),
+      el("p", { class: "small", text: v.text }),
+      STAGE_ACTIVE(v.stage) ? el("div", { class: "metrics" },
+        metric(money(lv.invalidation), `Wrong on a close ${s === "bottom" ? "below" : "above"}`),
+        metric(money(lv.target_1), `Target 1: ${lv.target_1_is}`), metric(money(lv.target_2), `Target 2: ${lv.target_2_is}`),
+        conf && v.stage !== "CONFIRMED" ? metric(money(conf), `Confirms on a close ${s === "bottom" ? "above" : "below"}`) : null) : null));
+  }
+  frag.append(sides, reversalChart(r));
+  const ev = el("div");
+  for (const s of ["bottom", "top"]) {
+    const v = day[s];
+    ev.append(el("details", { open: day.leading === s || (!day.leading && s === "bottom") ? true : null }, el("summary", { text: `The evidence for a ${s} on ${shortDate(day.date)}` }), table([
+      { label: "Kind", cell: e => e.kind === "exhaustion" ? "Exhaustion" : "Confirmation" },
+      { label: "Evidence", cell: e => e.name },
+      { label: "Seen", cell: e => e.met ? statusTag("pass", "Yes") : el("span", { class: "muted", text: "No" }) },
+      { label: "Points", num: true, cell: e => `${num(e.points, 0)} / ${e.weight}` },
+      { label: "What it means", cell: e => e.text }], v.evidence)));
+  }
+  frag.append(ev);
+  if (r.past) frag.append(reversalPast(r, reload));
+  frag.append(reversalOptionsPanel(r));
+  frag.append(el("p", { class: "small muted", text: `${r.note} ${r.version}.` }));
+  return frag;
+}
+const STAGE_ACTIVE = stage => stage === "CANDIDATE" || stage === "CONFIRMED" || stage === "WATCH";
+
+function reversalChart(r) {
+  const rows = r.daily, n = rows.length;
+  const wrap = el("div", {}, el("h4", { text: "Stages over the last year" }));
+  if (n < 2) return wrap;
+  const W = 760, H = 270, pad = { l: 58, r: 16, t: 10, b: 74 }, L = pad.l, R = W - pad.r;
+  const stripTop = H - pad.b + 8, stripH = 11, gap = 4;
+  const X = i => L + (R - L) * i / (n - 1);
+  const ys = niceScale(Math.min(...rows.map(x => x.close)), Math.max(...rows.map(x => x.close)), 5);
+  const Y = v => pad.t + (H - pad.b - pad.t) * (1 - (v - ys.lo) / (ys.hi - ys.lo));
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${r.symbol} closing price with its bottom and top stages on each day` });
+  for (const v of ys.ticks) root.append(svg("line", { class: "grid", x1: L, x2: R, y1: Y(v), y2: Y(v) }),
+    svg("text", { x: L - 8, y: Y(v) + 4, "text-anchor": "end", text: money(v, ys.step < 1 ? 2 : 0) }));
+  ["bottom", "top"].forEach((side, k) => {
+    const y0 = stripTop + k * (stripH + gap);
+    root.append(svg("text", { x: L - 8, y: y0 + stripH - 1, "text-anchor": "end", class: "small-label", text: side === "bottom" ? "Bottom" : "Top" }));
+    let start = 0;
+    for (let i = 1; i <= n; i++) {
+      if (i === n || rows[i][side] !== rows[start][side]) {
+        const x0 = start === 0 ? L : (X(start - 1) + X(start)) / 2, x1 = i === n ? R : (X(i - 1) + X(i)) / 2;
+        root.append(svg("rect", { x: x0, y: y0, width: Math.max(0.5, x1 - x0), height: stripH, fill: revFill(side, rows[start][side]) }));
+        start = i;
+      }
+    }
+  });
+  const monthsY = stripTop + 2 * (stripH + gap) + 12;
+  rows.forEach((x, i) => { if (i > 0 && x.date.slice(5, 7) !== rows[i - 1].date.slice(5, 7) && X(i) < R - 24) root.append(svg("text", { x: X(i), y: monthsY, "text-anchor": "middle", text: monthLabel(x.date) })); });
+  root.append(svg("path", { d: rows.map((x, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(x.close).toFixed(1)}`).join(" "), fill: "none", stroke: "var(--ink)", "stroke-width": 1.6 }));
+  // A marker on the day each potential bottom or top appeared, and each confirmation.
+  const active = s => s === "CANDIDATE" || s === "CONFIRMED";
+  rows.forEach((x, i) => {
+    if (!i) return;
+    for (const side of ["bottom", "top"]) {
+      const now = x[side], was = rows[i - 1][side];
+      if (!(active(now) && (now !== was) && !(was === "CONFIRMED"))) continue;
+      const cx = X(i), cy = Y(x.close) + (side === "bottom" ? 9 : -9), up = side === "bottom";
+      const s2 = now === "CONFIRMED" ? 6 : 4.5;
+      root.append(svg("path", { d: up ? `M${cx} ${cy - s2} L${cx + s2} ${cy + s2} L${cx - s2} ${cy + s2} Z` : `M${cx} ${cy + s2} L${cx + s2} ${cy - s2} L${cx - s2} ${cy - s2} Z`,
+        fill: now === "CONFIRMED" ? `var(${up ? "--div-pos" : "--div-neg"})` : "var(--panel)", stroke: `var(${up ? "--div-pos" : "--div-neg"})`, "stroke-width": 1.5 }));
+    }
+  });
+  const hover = svg("line", { class: "hover-line", y1: pad.t, y2: stripTop + 2 * stripH + gap, visibility: "hidden" });
+  root.append(hover);
+  const tip = el("div", { class: "tip" });
+  root.addEventListener("pointermove", evt => {
+    const box = root.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1, Math.round(((evt.clientX - box.left) * W / box.width - L) / (R - L) * (n - 1))));
+    hover.setAttribute("x1", X(i)); hover.setAttribute("x2", X(i)); hover.setAttribute("visibility", "visible");
+    tip.replaceChildren(el("div", { class: "tip-head", text: shortDate(rows[i].date) }), el("div", { text: money(rows[i].close) }),
+      el("div", { class: "tip-sub", text: `Bottom: ${revWord("bottom", rows[i].bottom).toLowerCase()} (${num(rows[i].bottom_score, 0)} pts)` }),
+      el("div", { class: "tip-sub", text: `Top: ${revWord("top", rows[i].top).toLowerCase()} (${num(rows[i].top_score, 0)} pts)` }));
+    tooltipAt(tip, box, X(i), W);
+  });
+  root.addEventListener("pointerleave", () => { hover.setAttribute("visibility", "hidden"); tip.style.display = "none"; });
+  const key = (fill, text) => el("span", {}, el("b", { class: "key-box", style: `background:${fill}` }), text);
+  wrap.append(el("div", { class: "chart" }, root, tip), el("div", { class: "legend" },
+    key(revFill("bottom", "CANDIDATE"), "Potential bottom"), key(revFill("bottom", "CONFIRMED"), "Reversal up confirmed"),
+    key(revFill("top", "CANDIDATE"), "Potential top"), key(revFill("top", "CONFIRMED"), "Reversal down confirmed"),
+    key(revFill("bottom", "WATCH"), "Stretched (watch)"), key(REV_STRIP.FAILED, "Failed"),
+    el("span", { class: "small muted", text: "Triangles mark the day each one appeared; filled when confirmed." })));
+  return wrap;
+}
+
+function reversalPast(r, reload) {
+  const p = r.past, box = el("div", {}, el("h4", { text: "How the same readings turned out before" }));
+  if (!p.history_built) box.append(buildHistoryButton(reload));
+  const cols = [{ label: "Reading", cell: x => el("span", {}, el("strong", { text: x.label }), el("span", { class: "small muted", text: x.direction > 0 ? " · expects a rise" : " · expects a fall" })) }];
+  [5, 10, 20].forEach((h, i) => cols.push({ label: `${r.symbol}, ${h} days`, cell: x => freqText(x.this_stock[i]) }));
+  cols.push({ label: "All stocks, 10 days", cell: x => x.all_stocks ? freqText(x.all_stocks[1]) : el("span", { class: "muted", text: "build the history" }) });
+  box.append(table(cols, p.signals));
+  box.append(el("p", { class: "small muted", text: `How often the stock moved the expected way after each new reading, entering at the next day's open, on ${r.symbol} over ${p.years} years${p.history_built ? ` and on the ${p.history_symbols} stocks in the signal history (${shortDate(p.history_run_at)})` : ""}, with the 95% range. Counts from the past, not forecasts.` }));
+  const recent = p.signals.flatMap(x => x.recent.map(c => ({ ...c, label: x.label, direction: x.direction }))).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
+  if (recent.length) box.append(el("details", {}, el("summary", { text: `The latest readings on ${r.symbol} and what followed` }), table([
+    { label: "Date", cell: c => shortDate(c.date) }, { label: "Reading", cell: c => c.label }, { label: "Close", num: true, cell: c => money(c.close) },
+    { label: "10 days later", num: true, cell: c => isNum(c.fwd_10) ? signedPct(100 * c.fwd_10, 1) : "not yet" },
+    { label: "20 days later", num: true, cell: c => isNum(c.fwd_20) ? signedPct(100 * c.fwd_20, 1) : "not yet" }], recent)));
+  return box;
+}
+
+function reversalOptionsPanel(r) {
+  const day = r.confirmed;
+  const pick = day.leading || (day.bottom.score >= day.top.score ? "bottom" : "top");
+  const side = segmented(`rvside${++uid}`, [["auto", "Auto"], ["bottom", "Bottom: calls"], ["top", "Top: puts"]], "auto");
+  const horizon = el("input", { type: "number", min: 1, max: 260, step: 1, value: 20 });
+  const qty = el("input", { type: "number", min: 1, max: 500, step: 1, value: 1 });
+  const budget = numInput({ placeholder: "none", step: "1" });
+  const target = numInput({ placeholder: "reversal's" }), inv = numInput({ placeholder: "reversal's" });
+  const myType = el("select", {}, el("option", { value: "", text: "none" }), el("option", { value: "call", text: "Call" }), el("option", { value: "put", text: "Put" }));
+  const myExp = el("input", { type: "date" }), myStrike = numInput({ placeholder: "strike" });
+  const go = el("button", { class: "primary", text: "Score options" });
+  const err = el("div", { class: "error", role: "alert" });
+  const out = el("div");
+  go.addEventListener("click", () => withBusy(go, err, async () => {
+    const body = { symbol: r.symbol, side: side.value(), horizon_days: Math.round(Number(horizon.value) || 20), contracts: Math.max(1, Math.round(Number(qty.value) || 1)) };
+    for (const [k, input] of [["target_price", target], ["invalidation_price", inv], ["budget", budget]]) { const v = optNum(input); if (v !== null) body[k] = v; }
+    if (myType.value || myExp.value || myStrike.value) {
+      if (!(myType.value && myExp.value && optNum(myStrike) !== null)) throw new Error("To score your own contract, give its type, expiration and strike.");
+      body.contracts_to_score = [{ option_type: myType.value, expiration: myExp.value, strike: optNum(myStrike) }];
+    }
+    out.replaceChildren(el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Valuing, scoring and simulating contracts…" })));
+    try { out.replaceChildren(renderReversalOptions(await api("/v2/reversal/options", body))); }
+    catch (e) { out.replaceChildren(); throw e; }
+  }));
+  return el("div", { class: "rev-options" }, el("h4", { text: "Score a call or put for this reversal" }),
+    el("p", { class: "small muted", text: `Calls for a potential bottom, puts for a potential top. Each contract is valued with the reversal's own levels (target and invalidation), scored out of 100 and given a verdict, and the best one is simulated. Auto uses the ${day.leading ? "leading" : "stronger"} side, now the ${pick}.` }),
+    el("div", { class: "inline-form" }, field("Side", side), field("Stock target", target), field("Invalidation (stock)", inv), field("By (trading days)", horizon), field("Contracts", qty), field("Budget ($)", budget), go),
+    el("div", { class: "inline-form" }, el("span", { class: "small muted", text: "Or score your own contract:" }), field("Type", myType), field("Expiration", myExp), field("Strike", myStrike)),
+    err, out);
+}
+
+function renderReversalOptions(o) {
+  const th = o.thesis, frag = el("div"), su = o.setup;
+  if (o.data_source === "demo") frag.append(banner("warn", "Demo data: these option prices are made up."));
+  frag.append(el("p", { class: "small" }, revTag(o.side, su.stage), " ",
+    el("strong", { text: `${o.contract_type === "CALL" ? "Calls" : "Puts"} on ${o.symbol} at ${money(th.spot)}: ` }),
+    `target ${money(th.target_1)} (${th.target_1_is}) by ${shortDate(th.horizon_date)}, wrong on a close ${o.contract_type === "CALL" ? "below" : "above"} ${money(th.invalidation)} (${su.levels.invalidation_is}).`,
+    su.today ? el("span", { class: "muted", text: ` Today's bar so far reads ${revWord(o.side, su.today).toLowerCase()}; the stage used is from the last finished bar.` }) : null));
+  const vc = o.verdict_counts;
+  frag.append(el("div", { class: "metrics" }, metric(String(vc.GOOD), "Good (70 or more)"), metric(String(vc.FAIR), "Fair (50 to 69)"),
+    metric(String(vc.POOR), "Poor (under 50)"), metric(String(vc.AVOID), "Avoid"),
+    o.market ? metric(pct(100 * o.market.reach_target_1_by_horizon, 0), `Market-implied chance past the target on ${shortDate(th.horizon_date)}`) : null));
+  frag.append(banner("info", `Exit rule: ${o.exit_rule}`));
+  if (o.own && o.own.length) {
+    frag.append(el("h4", { text: o.own.length === 1 ? "Your contract" : "Your contracts" }));
+    for (const k of o.own) frag.append(scoredContractCard(k, o, k === o.own[0] && o.best && k.option_symbol === o.best.option_symbol));
+  } else if (o.best) {
+    frag.append(el("h4", { text: "The best-scoring contract" }), scoredContractCard(o.best, o, true));
+  } else frag.append(banner("warn", "No contracts to score for this thesis."));
+  const detail = el("div");
+  if (o.contracts.length > 1) {
+    frag.append(el("details", {}, el("summary", { text: `All ${o.contracts.length} contracts, best score first` }),
+      el("p", { class: "small muted", text: "Select a row to see how it was scored." }),
+      table([
+        { label: "Contract", cell: k => contractName(k) }, { label: "Verdict", cell: k => verdictTag(k.reversal_score.verdict) },
+        { label: "Score", num: true, cell: k => num(k.reversal_score.score, 0) }, { label: "Cost", num: true, cell: k => money(k.premium, 0) },
+        { label: "At target", num: true, cell: k => signedMoney(k.at_target) }, { label: "If invalidated", num: true, cell: k => signedMoney(k.if_invalidated) },
+        { label: "Flat stock", num: true, cell: k => signedMoney(k.if_unchanged) }, { label: "Delta", num: true, cell: k => num(k.delta, 2) },
+        { label: "Spread", num: true, cell: k => pct(k.spread_pct, 0) }], o.contracts,
+        { onRow: k => detail.replaceChildren(scoredContractCard(k, o, false)) }), detail));
+  }
+  frag.append(el("ul", { class: "plain small muted" }, o.notes.map(n => el("li", { text: n }))));
+  return frag;
+}
+
+function scoredContractCard(k, o, full) {
+  const th = o.thesis, sc = k.reversal_score, box = el("div", { class: "grade-card" });
+  box.append(el("div", { class: "grade-head" }, el("div", { class: `grade-letter word g-${sc.verdict}`, text: sc.verdict }),
+    el("div", {}, el("div", { class: "grade-title", text: `${contractName(k)} on ${o.symbol}` }),
+      el("div", { class: "small muted", text: `Score ${num(sc.score, 0)} of 100 · ${money(k.mid)} midpoint, ${money(k.premium, 0)} for ${th.contracts} · delta ${num(k.delta, 2)} · ${k.dte} days to expiration` }))));
+  for (const t of sc.reasons || []) box.append(banner("fail", `Avoid: ${t}`));
+  for (const t of sc.caps || []) box.append(banner("warn", t));
+  for (const t of sc.cautions || []) box.append(banner("info", t));
+  if (sc.earnings_note) box.append(banner("warn", sc.earnings_note));
+  for (const f of k.flags || []) box.append(banner("warn", f));
+  if (sc.components.length) box.append(el("h4", { text: "How it was scored" }), table([
+    { label: "Check", cell: c => c.name }, { label: "Points", num: true, cell: c => `${num(c.points, 1)} / ${c.weight}` },
+    { label: "", cell: c => el("div", { class: "score-track mini" }, el("i", { class: c.points >= c.weight / 2 ? "pos" : "neg", style: `width:${Math.max(2, 100 * c.points / c.weight)}%` })) },
+    { label: "Why", cell: c => c.why }], sc.components));
+  if (k.outcomes && k.outcomes.length) box.append(el("h4", { text: "Potential gain or loss" }), table([
+    { label: "If the stock…", cell: x => x.case }, { label: "Stock at", num: true, cell: x => money(x.stock_price) },
+    { label: "Gain or loss", num: true, cell: x => el("strong", { class: x.pnl >= 0 ? "pos-text" : "neg-text", text: signedMoney(x.pnl) }) },
+    { label: "Of the premium", num: true, cell: x => isNum(x.share_of_premium) ? signedPct(100 * x.share_of_premium, 0) : "n/a" }], k.outcomes),
+    el("p", { class: "small muted", text: "Black-76 values with each strike's own implied volatility, at the midpoint; the cost of crossing the spread is extra. A loss on invalidation assumes you exit when the stock closes there." }));
+  const pc = k.past_cases;
+  if (pc && !pc.error) box.append(pastCasesBox(pc));
+  else if (pc && pc.error) box.append(el("p", { class: "small error", text: pc.error }));
+  const buttons = el("div", { class: "row" });
+  const simBtn = el("button", { class: "plain small-btn", text: "Open in the simulator" });
+  simBtn.addEventListener("click", () => state.openSimulation(o.symbol, [{ side: "buy", contracts: th.contracts, option_type: k.option_type.toLowerCase(), expiration: k.expiration, strike: k.strike, entry_price: k.mid }]));
+  const track = el("button", { class: "plain small-btn", text: "Save as a plan" });
+  const note = el("span", { class: "small muted" });
+  track.addEventListener("click", () => withBusy(track, note, async () => {
+    const p = await api("/v2/positions", { symbol: o.symbol, instrument_type: "OPTION", quantity: th.contracts, setup_type: "reversal",
+      option: { option_type: k.option_type, strike: k.strike, expiration: k.expiration }, invalidation_price: th.invalidation, target_1: th.target_1, target_2: th.target_2,
+      thesis: `${revWord(o.side, o.setup.stage)} on ${o.symbol}: to ${money(th.target_1)} (${th.target_1_is}) by ${shortDate(th.horizon_date)}. Scored ${num(sc.score, 0)} (${sc.verdict}). ${o.exit_rule}` });
+    note.textContent = `Saved as planned position ${p.id}.`;
+  }));
+  buttons.append(simBtn, track);
+  box.append(buttons, note);
+  if (full && k.simulation && !k.simulation.error) {
+    box.append(el("h4", { text: `Simulation to ${shortDate(k.simulation.eval_date)} and at expiration` }), renderSimulation(k.simulation));
+  } else if (full && k.simulation && k.simulation.error) box.append(el("p", { class: "small error", text: k.simulation.error }));
+  return box;
+}
+
+function pastCasesBox(pc) {
+  const box = el("div", {}, el("h4", { text: `If the stock moved as it did ${pc.source.replace(/^after /, "after past ")}` }));
+  box.append(el("div", { class: "metrics" }, metric(num(pc.cases, 0), "Past cases"), metric(pct(100 * pc.profitable, 0), "Would have been profitable"),
+    metric(pct(100 * pc.stopped_out, 0), "Reached the invalidation (exit)"), metric(signedMoney(pc.median), "Median result"),
+    metric(`${signedMoney(pc.p10)} to ${signedMoney(pc.p90)}`, "8 in 10 cases between")));
+  const h = pc.histogram, n = h.counts.length, max = Math.max(1, ...h.counts);
+  const W = 760, H = 160, pad = { l: 40, r: 12, t: 18, b: 30 }, bw = (W - pad.l - pad.r) / n;
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "How many past cases ended in each range of gain or loss" });
+  h.counts.forEach((c, i) => {
+    const mid = (h.edges[i] + h.edges[i + 1]) / 2, bh = (H - pad.t - pad.b) * c / max;
+    root.append(svg("rect", { x: pad.l + i * bw + 1, y: H - pad.b - bh, width: Math.max(1, bw - 2), height: bh, fill: `var(${mid >= 0 ? "--div-pos" : "--div-neg"})`, opacity: 0.8 },
+      svg("title", { text: `${money(h.edges[i], 0)} to ${money(h.edges[i + 1], 0)}: ${c} case${c === 1 ? "" : "s"}` })));
+    if (c) root.append(svg("text", { x: pad.l + (i + 0.5) * bw, y: H - pad.b - bh - 3, "text-anchor": "middle", text: String(c) }));
+  });
+  for (const i of [0, Math.floor(n / 2), n]) root.append(svg("text", { x: pad.l + i * bw, y: H - 10, "text-anchor": i === 0 ? "start" : i === n ? "end" : "middle", text: money(h.edges[i], 0) }));
+  root.append(svg("line", { class: "zero", x1: pad.l, x2: W - pad.r, y1: H - pad.b, y2: H - pad.b }));
+  box.append(el("div", { class: "chart" }, root), el("p", { class: "small muted", text: pc.note }));
+  return box;
+}
+ANALYSIS_SECTIONS.splice(ANALYSIS_SECTIONS.indexOf(signalsSection) + 1, 0, reversalSection);
+
+function reversalScanPanel(view) {
+  const box = el("div", { class: "panel" }, el("h3", { text: "Reversal scan of the watchlist" }),
+    el("p", { class: "small muted", text: "Which stocks show a potential bottom or top, or a confirmed reversal, on the last finished bar. Select a row to analyze the stock." }));
+  const go = el("button", { class: "plain", text: "Scan the watchlist" });
+  const err = el("div", { class: "error", role: "alert" });
+  const out = el("div");
+  go.addEventListener("click", () => withBusy(go, err, async () => {
+    const s = await api("/v2/reversal/scan");
+    const rows = s.rows;
+    out.replaceChildren(
+      s.data_source === "demo" ? banner("warn", "Demo prices are synthetic.") : "",
+      table([
+        { label: "Stock", cell: x => el("strong", { text: x.symbol }) },
+        { label: "Reading", cell: x => x.leading ? revTag(x.side, x.stage) : el("span", { class: "muted", text: "Nothing in sight" }) },
+        { label: "Points", num: true, cell: x => num(x.score, 0) },
+        { label: "Since", cell: x => x.leading ? el("span", { class: "nowrap", text: monthDay(x.since) }) : "" },
+        { label: "Close", num: true, cell: x => money(x.close) },
+        { label: "Wrong beyond", num: true, cell: x => x.leading ? money(x.invalidation) : "" },
+        { label: "Target 1", num: true, cell: x => x.leading ? money(x.target_1) : "" },
+        { label: "Trend", cell: x => trendTag(x.trend_state) },
+        { label: "Today so far", cell: x => x.today ? revTag(x.side, x.today.stage) : "" }], rows, { onRow: x => view.analyze(x.symbol) }),
+      s.errors.length ? el("p", { class: "small muted", text: `Not scanned: ${s.errors.join("; ")}` }) : "",
+      el("p", { class: "small muted", text: s.note }));
+  }));
+  box.append(el("div", { class: "row" }, go), err, out);
+  return box;
+}
+{
+  const classicAnalyze = buildAnalyze;
+  BUILDERS.analyze = () => {
+    const view = classicAnalyze();
+    if (featureOn("reversal_analysis")) view.insertBefore(reversalScanPanel(view), view.children[3] || null);
+    return view;
+  };
+}
+
+Object.assign(BUILDERS, { portfolio: buildPortfolio });

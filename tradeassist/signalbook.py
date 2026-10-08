@@ -46,12 +46,18 @@ TRANSITION_DIRECTION = {"STRONG_UP": 1, "UP": 1, "UP_WEAKENING": -1, "NEUTRAL": 
                         "STRONG_DOWN": -1}
 
 
+REVERSAL_WORDS = {"bottom_candidate": "Potential bottom", "bottom_confirmed": "Reversal up confirmed",
+                  "top_candidate": "Potential top", "top_confirmed": "Reversal down confirmed"}
+
+
 def signal_label(key: str) -> str:
     kind, _, name = key.partition(":")
     if kind == "pattern" and name in PATTERNS:
         return PATTERNS[name].label
     if kind == "trend":
         return f"Trend turns to {trend_engine.STATE_WORDS.get(name, name).lower()}"
+    if kind == "reversal":
+        return REVERSAL_WORDS.get(name, name)
     return key
 
 
@@ -61,6 +67,8 @@ def signal_direction(key: str) -> int:
         return int(PATTERNS[name].direction)
     if kind == "trend":
         return TRANSITION_DIRECTION.get(name, 0)
+    if kind == "reversal":
+        return 1 if name.startswith("bottom") else -1
     return 0
 
 
@@ -111,6 +119,15 @@ def outcomes(df: pd.DataFrame, spy: pd.DataFrame | None) -> pd.DataFrame:
     return out
 
 
+def atr_share(df: pd.DataFrame) -> np.ndarray:
+    """The average daily range as a share of the close, bar by bar (NaN where unknown)."""
+    if "atr" not in df.columns:
+        return np.full(len(df), np.nan)
+    close = df["close"].to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(close > 0, df["atr"].to_numpy(dtype=float) / close, np.nan)
+
+
 def collect(symbol: str, df: pd.DataFrame, spy: pd.DataFrame | None, regimes: pd.Series | None,
             states: pd.DataFrame) -> list[dict[str, Any]]:
     """Every pattern event and trend change on `symbol` (finished bars only), with what followed."""
@@ -124,11 +141,13 @@ def collect(symbol: str, df: pd.DataFrame, spy: pd.DataFrame | None, regimes: pd
     reg = (regimes.reindex(dates, method="ffill").to_numpy() if regimes is not None
            else np.full(len(df), None, dtype=object))
     rows: list[dict[str, Any]] = []
+    atr_pct = atr_share(df)
 
     def add(i: int, key: str) -> None:
         o = out_frame.iloc[i]
         rows.append({"symbol": symbol, "signal_key": key, "direction": signal_direction(key),
                      "date": dates.iloc[i].strftime("%Y-%m-%d"), "close": float(df["close"].iloc[i]),
+                     "atr_pct": float(atr_pct[i]) if np.isfinite(atr_pct[i]) else None,
                      "trend_state": st[i], "net_score": float(net[i]) if np.isfinite(net[i]) else None,
                      "regime": reg[i] if isinstance(reg[i], str) else None,
                      **{k: (float(o[k]) if np.isfinite(o[k]) else None) for k in out_frame.columns}})
@@ -139,6 +158,10 @@ def collect(symbol: str, df: pd.DataFrame, spy: pd.DataFrame | None, regimes: pd
     for i in range(1, len(st)):
         if st[i] != st[i - 1]:
             add(i, f"trend:{st[i]}")
+    # Potential bottoms and tops, and confirmed reversals (reversal.py), on the same finished bars.
+    from . import reversal as reversal_engine
+    for i, key in reversal_engine.events(reversal_engine.evaluate(df, states)):
+        add(i, key)
     return rows
 
 
@@ -261,7 +284,7 @@ def bucket_for(net: float | None) -> tuple[float, float] | None:
 # --- storage ---------------------------------------------------------------------------------------
 
 COLUMNS = ("symbol", "signal_key", "direction", "date", "close", "trend_state", "net_score", "regime",
-           "fwd_5", "fwd_10", "fwd_20", "spy_5", "spy_10", "spy_20", "high_20", "low_20")
+           "fwd_5", "fwd_10", "fwd_20", "spy_5", "spy_10", "spy_20", "high_20", "low_20", "atr_pct")
 
 
 def store(db: Any, source: str, symbol: str, rows: list[dict[str, Any]]) -> None:

@@ -18,6 +18,7 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "trend_engine_v2": True,
     "portfolio_risk": True,
     "signal_calibration": True,
+    "reversal_analysis": True,
     "options_backtest": False,
 }
 

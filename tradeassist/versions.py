@@ -5,8 +5,9 @@ each stored result records which logic produced it. Raise the matching number wh
 change would alter the output for the same data.
 """
 
-SIGNAL_ENGINE_VERSION = "signals-2.0"        # patterns, structure, provisional/confirmed status
+SIGNAL_ENGINE_VERSION = "signals-2.1"        # patterns, structure, provisional/confirmed status; 2.1 adds reversals
 TREND_ENGINE_VERSION = "trend_engine_v2.0"
 REGIME_ENGINE_VERSION = "regime_v1.0"
 EVALUATOR_VERSION = "evaluator_v1.0"
 OPTIONS_EVALUATOR_VERSION = "options_evaluator_v1.0"
+REVERSAL_ENGINE_VERSION = "reversal_v1.0"
