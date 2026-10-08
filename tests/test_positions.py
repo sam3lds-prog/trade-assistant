@@ -83,6 +83,8 @@ def test_a_closed_position_realises_exactly_its_cash_flows():
             price, fee = round(rng.uniform(1, 300), 2), round(rng.uniform(0, 2), 2)
             rows.append((side, q, price, fee))
             cash += (q * price * mult if side in ("SELL", "SELL_SHORT") else -q * price * mult) - fee
+            if not held:
+                break                            # closed completely: a position takes no fills after that
         if held:
             rows.append((closing, held, round(rng.uniform(1, 300), 2), 0.0))
             cash += held * rows[-1][2] * mult * (1 if closing == "SELL" else -1)

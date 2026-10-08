@@ -115,6 +115,7 @@ function positionDetail(p, onChange) {
   if (leg && isNum(mk.delta)) box.append(el("p", { class: "small muted", text: `Option now: bid ${money(mk.bid)}, ask ${money(mk.ask)}, delta ${num(mk.delta, 2)}, theta ${money(mk.theta)} a day, implied volatility ${pct(100 * mk.iv, 1)}, ${mk.dte} days to expiration. Stock ${money(mk.underlying)}.` }));
   const tc = p.thesis_check;
   if (tc.text) box.append(banner(tc.status === "INVALIDATED" ? "fail" : tc.status === "INTACT" || tc.status.startsWith("TARGET") ? "pass" : "warn", tc.text));
+  if (led.lifecycle_issues && led.lifecycle_issues.length) box.append(banner("warn", `This position was opened again after it had closed (${led.lifecycle_issues.map(i => timeText(i.executed_at)).join(", ")}), which versions before 2.1.1 allowed. Its fills are kept exactly as recorded and its figures still add them up, but it mixes two trades. New fills after a close now go on a new position.`));
 
   // The plan: why, where it is wrong, where it pays.
   const thesis = el("textarea", { "aria-label": "Thesis", rows: 2 }); thesis.value = p.thesis || "";
@@ -148,7 +149,9 @@ function positionDetail(p, onChange) {
     { label: "Note", cell: x => x.note || "" }], p.executions) : el("p", { class: "small muted", text: "No fills yet: this is a plan." }));
   if (p.legacy_trade_id) {
     box.append(el("p", { class: "small muted", text: "This position mirrors an entry in the option journal. Log its fills there and they appear here." }));
-  } else if (p.status !== "CANCELLED" && p.status !== "CLOSED") {
+  } else if (p.status === "CLOSED") {
+    box.append(el("p", { class: "small muted", text: "This position is closed and takes no more fills. A new trade in the same stock is a new position." }));
+  } else if (p.status !== "CANCELLED") {
     const sides = p.direction === "LONG" ? [["BUY", "Buy"], ["SELL", "Sell"]] : [["SELL_SHORT", "Sell short"], ["BUY_TO_COVER", "Buy to cover"]];
     const side = el("select", { "aria-label": "Action" }, sides.map(([v, t]) => el("option", { value: v, text: t })));
     if (led.open_quantity > 0) side.value = sides[1][0];
@@ -697,29 +700,58 @@ function buildPortfolio() {
   return view;
 }
 
+// A figure that could not be measured is shown as unknown, never as $0.
+const unknownText = (title = "") => el("span", { class: "muted", title, text: "unknown" });
+const knownMoney = (v, d = 0, title = "") => isNum(v) ? money(v, d) : unknownText(title);
+const knownSigned = (v, d = 0, title = "") => isNum(v) ? signedMoney(v, d) : unknownText(title);
+// "of 4" after a total that leaves positions out, so a partial sum never reads as the whole.
+const partialNote = (unknown, total) => unknown ? ` (${unknown} of ${total} not measured)` : "";
+// Keyed by the combined status: an OK that could not cover every position is INCOMPLETE, never green.
+const LOSS_TAG = { OK: ["pass", "Within the stop"], INCOMPLETE: ["warn", "Not known if within the stop"], WARN: ["warn", "Near the stop"], STOP: ["fail", "Stop reached"] };
+const COVERAGE_TAG = { COMPLETE: ["pass", "Complete"], PARTIAL: ["warn", "Partial"], UNAVAILABLE: ["fail", "Not measured"] };
+
+function dailyLossPanel(dl) {
+  const loss = dl.loss_status || dl.status, cov = dl.coverage_status || "COMPLETE";
+  const parts = [el("h3", {}, "Today against the daily stop ", tagOf(LOSS_TAG, dl.status), " ", tagOf(COVERAGE_TAG, cov)),
+    el("div", { class: "metrics" },
+      metric(signedMoney(dl.known_total ?? dl.counted), `${cov === "COMPLETE" ? "Today" : "Measured so far today"}, ${dl.mode === "REALIZED_PLUS_UNREALIZED" ? "closed and open" : "closed trades only"}`),
+      metric(signedMoney(dl.realized_today), "Realized today"),
+      metric(dl.unrealized_complete === false ? el("span", {}, signedMoney(dl.unrealized_change_today), el("span", { class: "small muted", text: " + unknown" })) : signedMoney(dl.unrealized_change_today), "Change in open positions"),
+      metric(money(dl.stop, 0), `Daily stop (${dl.stop_pct}% of the account)`),
+      isNum(dl.positions_evaluated_pct) ? metric(`${dl.positions_evaluated} of ${dl.positions}`, "Positions measured") : null,
+      isNum(dl.capital_evaluated_pct) && cov !== "COMPLETE" ? metric(pct(dl.capital_evaluated_pct, 0), "Of capital at cost measured") : null),
+    banner(loss === "STOP" ? "fail" : loss === "WARN" || cov !== "COMPLETE" ? "warn" : "pass", dl.text)];
+  if (dl.missing && dl.missing.length) parts.push(el("ul", { class: "small" }, dl.missing.map(m => el("li", { text: `${m.description}: ${m.reason}` }))));
+  parts.push(el("p", { class: "small muted", text: `${dl.note} Set DAILY_LOSS_MODE in .env to change this.` }));
+  return el("div", { class: "panel" }, ...parts);
+}
+
 function renderPortfolio(r) {
-  const frag = el("div"), t = r.totals, dl = r.daily_loss;
+  const frag = el("div"), t = r.totals, dl = r.daily_loss, u = t.unknown_counts || {}, n = r.count;
   if (r.data_source === "demo") frag.append(banner("warn", "Demo data: the prices are made up."));
-  for (const w of r.warnings) frag.append(banner(w.level === "fail" ? "fail" : w.level === "warn" ? "warn" : "info", w.text));
+  // The daily-stop panel below explains an incomplete day itself; a reached or near stop still leads the page.
+  for (const w of r.warnings) if (w.code !== "DAILY_LOSS_INCOMPLETE") frag.append(banner(w.level === "fail" ? "fail" : w.level === "warn" ? "warn" : "info", w.text));
   if (!r.count) { frag.append(el("div", { class: "panel" }, el("p", { class: "muted", text: "No open positions. Add them on the Positions screen (option-journal trades appear there automatically)." }))); }
   const acct = r.account_size, share = v => acct ? ` (${pct(100 * v / acct, 0)} of the account)` : "";
-  frag.append(el("div", { class: "panel" }, el("h3", { text: "Totals" }), el("div", { class: "metrics" },
-    metric(signedMoney(t.net_exposure), `Net exposure in stock dollars${share(Math.abs(t.net_exposure))}`),
-    metric(money(t.gross_exposure, 0), "Gross exposure"),
-    metric(signedMoney(t.spy_equivalent), "SPY-equivalent dollars (beta-weighted)"),
-    metric(money(t.open_risk, 0), `Risk to invalidation, limit ${money(t.open_risk_limit, 0)}${t.open_risk_unknown ? `; ${t.open_risk_unknown} unknown` : ""}`),
-    metric(isNum(t.one_day_move_95) ? money(t.one_day_move_95, 0) : "n/a", "A bad day (1 in 20), from the last six months"),
-    metric(signedMoney(t.theta_per_day), "Time decay per day (options)"),
-    metric(signedMoney(t.vega_per_point), "Per point of implied volatility"),
-    metric(signedMoney(dl.counted), `Today, ${dl.mode === "REALIZED_PLUS_UNREALIZED" ? "closed and open" : "closed trades only"}; stop at ${money(-dl.stop, 0)}`)),
-    el("p", { class: "small muted", text: `${dl.note}${dl.unknown.length ? ` No previous close for: ${dl.unknown.join("; ")}, so their change today is not counted.` : ""} Set DAILY_LOSS_MODE in .env to change this.` })));
+  const cov = r.coverage || { status: "COMPLETE" };
+  frag.append(el("div", { class: "panel" }, el("h3", {}, "Totals ", cov.status !== "COMPLETE" ? tagOf(COVERAGE_TAG, cov.status) : ""), el("div", { class: "metrics" },
+    metric(signedMoney(t.net_exposure), `Net exposure in stock dollars${share(Math.abs(t.net_exposure))}${partialNote(u.exposure, n)}`),
+    metric(money(t.gross_exposure, 0), `Gross exposure${partialNote(u.exposure, n)}`),
+    metric(signedMoney(t.spy_equivalent), `SPY-equivalent dollars (beta-weighted)${partialNote(u.exposure, n)}`),
+    metric(money(t.open_risk, 0), `Risk to invalidation, limit ${money(t.open_risk_limit, 0)}${t.open_risk_unknown ? `; ${t.open_risk_unknown} of ${n} unknown, so the total is at least this` : ""}`),
+    metric(isNum(t.one_day_move_95) ? money(t.one_day_move_95, 0) : "n/a", `A bad day (1 in 20), from the last six months${partialNote(u.exposure, n)}`),
+    metric(signedMoney(t.theta_per_day), `Time decay per day (options)${partialNote(u.theta, n)}`),
+    metric(signedMoney(t.vega_per_point), `Per point of implied volatility${partialNote(u.vega, n)}`)),
+    cov.status !== "COMPLETE" ? el("p", { class: "small muted", text: "Totals add up the positions that could be measured; see the note at the top of the page." }) : null));
+  if (dl) frag.append(dailyLossPanel(dl));
 
   if (r.positions.length) frag.append(el("div", { class: "panel" }, el("h3", { text: "By position" }), table([
-    { label: "Position", cell: x => x.description }, { label: "Sector", cell: x => x.sector || "" },
-    { label: "Exposure", num: true, cell: x => signedMoney(x.dollar_delta) }, { label: "Beta", num: true, cell: x => isNum(x.beta) ? num(x.beta, 2) : "n/a" },
-    { label: "SPY-equivalent", num: true, cell: x => signedMoney(x.beta_dollars) },
-    { label: "Risk to invalidation", num: true, cell: x => isNum(x.risk_to_invalidation) ? money(x.risk_to_invalidation, 0) : "unknown" },
-    { label: "Theta / day", num: true, cell: x => x.instrument_type === "OPTION" ? signedMoney(x.theta) : "" },
+    { label: "Position", cell: x => el("span", {}, x.description, x.priced === false ? el("span", { class: "small error", text: " · no current price" }) : null) },
+    { label: "Sector", cell: x => x.sector || "" },
+    { label: "Exposure", num: true, cell: x => knownSigned(x.dollar_delta, 0, (x.missing || []).join("; ")) }, { label: "Beta", num: true, cell: x => isNum(x.beta) ? num(x.beta, 2) : "n/a" },
+    { label: "SPY-equivalent", num: true, cell: x => knownSigned(x.beta_dollars, 0, (x.missing || []).join("; ")) },
+    { label: "Risk to invalidation", num: true, cell: x => knownMoney(x.risk_to_invalidation, 0, (x.missing || []).join("; ")) },
+    { label: "Theta / day", num: true, cell: x => x.instrument_type === "OPTION" ? knownSigned(x.theta) : "" },
     { label: "Plan", cell: x => tagOf(THESIS, x.thesis_status) }], r.positions),
     el("p", { class: "small muted", text: "Exposure is in stock dollars: shares times price, or delta times 100 times contracts times the stock price for options. Beta to SPY from six months of daily moves." })));
 
@@ -746,7 +778,8 @@ function stressPanel(r) {
   const box = el("div", { class: "panel" }, el("h3", { text: "Stress tests" }));
   const rows = el("div");
   const show = list => rows.replaceChildren(table([
-    { label: "Scenario", cell: x => x.name }, { label: "Profit or loss", num: true, cell: x => signedMoney(x.pnl) },
+    { label: "Scenario", cell: x => x.name },
+    { label: "Profit or loss", num: true, cell: x => x.complete === false ? el("span", { title: `Not repriced: ${x.excluded.join("; ")}` }, signedMoney(x.pnl), el("span", { class: "small muted", text: ` (${x.excluded.length} left out)` })) : signedMoney(x.pnl) },
     { label: "Of the account", num: true, cell: x => isNum(x.share_of_account) ? signedPct(100 * x.share_of_account, 1) : "n/a" },
     { label: "Hit hardest", cell: x => x.worst && x.worst.pnl < 0 ? `${x.worst.description} (${signedMoney(x.worst.pnl)})` : "" }], list));
   show(r.stress);

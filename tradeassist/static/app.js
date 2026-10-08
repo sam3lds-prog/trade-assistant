@@ -593,6 +593,9 @@ function ticketPanel(data, request) {
           v.overridable ? el("label", { class: "small", style: "display:block;margin-top:6px" }, box, " I am breaking this rule on purpose. Record it in the journal.")
             : el("div", { class: "small", style: "margin-top:6px", text: "This one cannot be overridden. Change the ticket, or change the limit in your .env file." })));
       }
+    } else if (t.risk_notes && t.risk_notes.length) {
+      parts.push(banner("warn", "No limit is broken by what could be measured, but not everything could be checked:"));
+      for (const n of t.risk_notes) parts.push(el("div", { class: "banner warn" }, el("strong", { text: `${n.label}: ${n.value}. ` }), n.text));
     } else parts.push(banner("pass", "This ticket is inside all of your limits."));
     if (t.saved_id) parts.push(banner("pass", `Saved to the journal as trade ${t.saved_id}. Enter the order in Robinhood yourself, then log each limit price you try.`));
     result.replaceChildren(...parts);
@@ -611,7 +614,7 @@ function ticketPanel(data, request) {
     el("div", { class: "row", style: "margin-top:12px" }, check, save), error, result);
 }
 
-function metric(value, label) { return el("div", { class: "metric" }, el("div", { class: "v", text: value }), el("div", { class: "k", text: label })); }
+function metric(value, label) { return el("div", { class: "metric" }, el("div", { class: "v" }, value), el("div", { class: "k", text: label })); }
 
 /* ---------- view: research ---------- */
 function buildResearch() {
@@ -1468,7 +1471,8 @@ function renderWalkForward(w) {
 
 /* ---------- view: journal ---------- */
 const RULE_WORDS = { earnings: "bought through earnings", earnings_estimate: "relied on an earnings date that disagrees with past filings", spread: "wide spread", dte: "too close to expiration",
-  daily_loss: "traded past the daily loss stop", paid_above_plan: "paid more than the plan allowed" };
+  daily_loss: "traded past the daily loss stop", paid_above_plan: "paid more than the plan allowed",
+  daily_loss_incomplete: "traded while today's loss could not be fully measured" };
 function buildJournal() {
   const out = el("div");
   const error = el("div", { class: "error", role: "alert" });

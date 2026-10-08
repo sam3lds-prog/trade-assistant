@@ -90,3 +90,31 @@ No change to how the app behaves, except that an existing database file is now c
   migration tests, the full suite with branch coverage, and a non-blocking `pip-audit`.
   `requirements-dev.txt` adds pytest-cov, hypothesis and ruff.
 - Lint fixes: four unused imports in tests, one unused loop variable.
+
+### Sprint 1: P0 accounting and risk defects (2.1.1)
+
+| Requirement | Done | Where | Tests |
+| --- | --- | --- | --- |
+| 1.1 Portfolio risk with unpriced positions | Same fields for every position; unknown figures are `None`; `priced`, `missing`, `missing_fields`; totals over known figures with `coverage` and `unknown_counts`; incomplete-prices warning; stress tests list `excluded` | `portfolio.py` | `test_p0_defects.py::test_1_1_*` (6) |
+| $0 totals for unpriced positions | Fixed with 1.1: no unknown figure enters a total | `portfolio.py` | same |
+| Stress multiplier | Options scaled by their own multiplier | `portfolio.stress` | `test_1_1_stress_uses_the_position_multiplier_not_always_100` |
+| 1.2 Closed positions terminal | `account()` refuses any fill after a full close; `add_execution` refuses closed positions and back-dated fills that would split a trade; `recompute` refuses status changes outside `TRANSITIONS`; positions reopened by older versions stay readable, are flagged in `lifecycle_issues`, and can still be closed | `positions.py`, `v2.js` | `test_1_2_*` (7), property tests |
+| 1.3 Daily-loss completeness | `loss_status` and `coverage_status` separate; `known_total`, `missing` with reasons, `positions_evaluated_pct`, `capital_evaluated_pct`; `status` is INCOMPLETE rather than OK when anything is unmeasured; realized losses now count in REALIZED_ONLY mode without a previous close (a further defect found while fixing this); `INCOMPLETE_RISK_POLICY` WARN/BLOCK for the ticket; ticket never says "inside all of your limits" when it could not check; alerts DAILY_LOSS_UNKNOWN and OPEN_RISK_UNKNOWN | `portfolio.py`, `service.py`, `alerts.py`, `config.py`, `app.js`, `v2.js` | `test_1_3_*` (8) |
+| 1.4 Finite numbers | `positions.number()`; fills, plans, strikes, multipliers, ledger results, journal prices and settings checked at the domain layer; minimum quantity 1e-6; zero prices allowed | `positions.py`, `journal.py`, `config.py` | `test_1_4_*` (14), `test_ledger_properties.py` (4 properties, 300 examples each) |
+
+API changes (backward compatible): exposure figures for an unpriced position are `null`
+instead of `0`; `daily_loss.status` can be `INCOMPLETE`; new fields `coverage`,
+`totals.complete`, `totals.unknown_counts`, `totals.open_risk_complete`,
+`stress[].excluded`, `stress[].complete`, `daily_loss.loss_status`, `coverage_status`,
+`known_total`, `missing`, `positions_evaluated_pct`, `capital_evaluated_pct`,
+`unrealized_complete`, ticket `risk_notes`, `within_limits`, `incomplete_risk_policy`.
+The front end was updated for all of them.
+
+Behaviour that needs your attention: a stock position without an invalidation price now
+raises an OPEN_RISK_UNKNOWN alert, because its risk cannot be measured.
+
+Checked on screen (demo data, 1280 px and 390 px): portfolio with an unpriced option shows
+"unknown" in its row, "Partial" on the totals, "Not known if within the stop" on the daily
+stop, and "(1 left out)" on each stress test; no horizontal scrolling.
+
+Tests: 390 passed, 2 skipped before the property tests; 394 passed, 2 skipped with them.

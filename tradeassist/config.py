@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,9 +34,12 @@ def _float(name: str, default: float) -> float:
     if raw is None or raw.strip() == "":
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {raw!r}")
+    return value
 
 
 def _int(name: str, default: int) -> int:
@@ -57,6 +61,10 @@ class Settings:
     # REALIZED_PLUS_UNREALIZED counts today's change in open positions toward the daily stop;
     # REALIZED_ONLY counts closed trades only.
     daily_loss_mode: str = "REALIZED_PLUS_UNREALIZED"
+    # What the trade ticket does when today's loss or the portfolio's risk cannot be fully measured:
+    # WARN (default) says so beside the result and never calls the ticket "inside all of your
+    # limits"; BLOCK also makes it a limit the ticket breaks, which you can override on purpose.
+    incomplete_risk_policy: str = "WARN"
     max_spread_pct: float = 10.0
     min_dte: int = 7
 
@@ -116,7 +124,10 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
     if loss_mode not in ("REALIZED_PLUS_UNREALIZED", "REALIZED_ONLY"):
         raise ValueError(f"DAILY_LOSS_MODE must be REALIZED_PLUS_UNREALIZED or REALIZED_ONLY, got {loss_mode!r}")
 
-    return Settings(
+    policy = (os.getenv("INCOMPLETE_RISK_POLICY") or "WARN").strip().upper()
+    if policy not in ("WARN", "BLOCK"):
+        raise ValueError(f"INCOMPLETE_RISK_POLICY must be WARN or BLOCK, got {policy!r}")
+    settings = Settings(
         live_token=_clean_token(os.getenv("TRADIER_LIVE_TOKEN")),
         sandbox_token=_clean_token(os.getenv("TRADIER_SANDBOX_TOKEN")),
         data_mode=os.getenv("DATA_MODE", "auto").strip() or "auto",
@@ -126,6 +137,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         max_open_risk_pct=_float("MAX_OPEN_RISK_PCT", 10.0),
         daily_loss_stop_pct=_float("DAILY_LOSS_STOP_PCT", 3.0),
         daily_loss_mode=loss_mode,
+        incomplete_risk_policy=policy,
         max_spread_pct=_float("MAX_SPREAD_PCT", 10.0),
         min_dte=_int("MIN_DTE", 7),
         risk_free_rate=_float("RISK_FREE_RATE", 0.04),
@@ -137,3 +149,9 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         robinhood_url=(os.getenv("ROBINHOOD_MCP_URL") or "").strip() or "https://agent.robinhood.com/mcp/trading",
         features=load_features(),
     )
+    for name, value in (("ACCOUNT_SIZE", settings.account_size), ("MAX_RISK_PER_TRADE_PCT", settings.max_risk_per_trade_pct),
+                        ("MAX_OPEN_RISK_PCT", settings.max_open_risk_pct),
+                        ("DAILY_LOSS_STOP_PCT", settings.daily_loss_stop_pct)):
+        if value <= 0:
+            raise ValueError(f"{name} must be above zero, got {value:g}")
+    return settings
