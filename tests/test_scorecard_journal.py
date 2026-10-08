@@ -8,11 +8,9 @@ from tradeassist.config import Settings
 from tradeassist.db import Database
 from tradeassist.indicators import enrich
 from tradeassist.journal import Journal, JournalError
-from tradeassist.optionmath import black76_price
 from tradeassist.pricer import build_ladder, infer_tick_rule
 from tradeassist.providers.demo import DemoData
 from tradeassist.scorecard import build_scorecard
-from tests.conftest import random_walk
 
 TODAY = date(2026, 10, 5)
 

@@ -100,26 +100,61 @@ class Database:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        existed = self.path != ":memory:" and Path(self.path).is_file() and Path(self.path).stat().st_size > 0
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
-        with self.tx() as cur:
-            cur.executescript(SCHEMA)
-        from .migrations import migrate
-        with self._lock:
-            # Autocommit while migrating, so each migration can manage its own transaction.
-            previous, self._conn.isolation_level = self._conn.isolation_level, None
-            try:
-                self.migrated = migrate(self._conn)
-            finally:
-                self._conn.isolation_level = previous
+        self.backup_before_migration: Path | None = None
+        try:
+            if existed:
+                self.backup_before_migration = self._backup_if_migrations_pending()
+            with self.tx() as cur:
+                cur.executescript(SCHEMA)
+            from .migrations import migrate
+            with self._lock:
+                # Autocommit while migrating, so each migration can manage its own transaction.
+                previous, self._conn.isolation_level = self._conn.isolation_level, None
+                try:
+                    self.migrated = migrate(self._conn)
+                finally:
+                    self._conn.isolation_level = previous
+        except BaseException:
+            self._conn.close()               # a failed open must not leave the file held open
+            raise
 
     def schema_version(self) -> int:
         row = self.one("SELECT MAX(version) AS v FROM schema_migrations")
         return int(row["v"] or 0)
+
+    def _backup_if_migrations_pending(self) -> Path | None:
+        """Copy an existing database file before migrations change it (backup.py)."""
+        from . import schema_v2  # noqa: F401 - registers the migrations
+        from .backup import backup_connection, backup_path, prune
+        from .migrations import MIGRATIONS
+        has_table = self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+                                       ).fetchone() is not None
+        done = {r[0] for r in self._conn.execute("SELECT version FROM schema_migrations")} if has_table else set()
+        pending = [m.version for m in MIGRATIONS if m.version not in done]
+        if not pending:
+            return None
+        label = f"before-migration-{pending[0]}"
+        dest = backup_path(Path(self.path), label)
+        backup_connection(self._conn, dest)
+        prune(dest.parent, Path(self.path).stem, "before-migration")
+        return dest
+
+    def backup(self, label: str = "manual", folder: str | Path | None = None) -> Path:
+        """A consistent copy of the whole database, written to `folder` (default: backups/ beside it)."""
+        from .backup import backup_connection, backup_path
+        if self.path == ":memory:" and folder is None:
+            raise ValueError("An in-memory database needs a folder to back up to")
+        base = Path(self.path) if self.path != ":memory:" else Path(folder) / "memory.db"
+        with self._lock:
+            self._conn.commit()
+            return backup_connection(self._conn, backup_path(base, label, Path(folder) if folder else None))
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Cursor]:
