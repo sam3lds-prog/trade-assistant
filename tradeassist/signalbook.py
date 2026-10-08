@@ -116,6 +116,17 @@ def outcomes(df: pd.DataFrame, spy: pd.DataFrame | None) -> pd.DataFrame:
             mae[i] = window_lo / e[i] - 1.0
     out["high_20"] = mfe     # best price reached, as a return from entry (long side)
     out["low_20"] = mae      # worst price reached
+    # Lowest and highest close over each horizon, as returns from entry: the exit rule is on the close.
+    c = df["close"].to_numpy(dtype=float)
+    for h in HORIZONS:
+        lo_c, hi_c = np.full(n, np.nan), np.full(n, np.nan)
+        for i in range(n - h):
+            if np.isfinite(e[i]) and e[i] > 0:
+                window = c[i + 1: i + 1 + h]
+                lo_c[i] = np.nanmin(window) / e[i] - 1.0
+                hi_c[i] = np.nanmax(window) / e[i] - 1.0
+        out[f"close_low_{h}"] = lo_c
+        out[f"close_high_{h}"] = hi_c
     return out
 
 
@@ -284,7 +295,8 @@ def bucket_for(net: float | None) -> tuple[float, float] | None:
 # --- storage ---------------------------------------------------------------------------------------
 
 COLUMNS = ("symbol", "signal_key", "direction", "date", "close", "trend_state", "net_score", "regime",
-           "fwd_5", "fwd_10", "fwd_20", "spy_5", "spy_10", "spy_20", "high_20", "low_20", "atr_pct")
+           "fwd_5", "fwd_10", "fwd_20", "spy_5", "spy_10", "spy_20", "high_20", "low_20", "atr_pct",
+           "close_low_5", "close_low_10", "close_low_20", "close_high_5", "close_high_10", "close_high_20")
 
 
 def store(db: Any, source: str, symbol: str, rows: list[dict[str, Any]]) -> None:

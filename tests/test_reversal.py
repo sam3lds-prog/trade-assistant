@@ -95,6 +95,7 @@ def test_an_unfinished_bar_is_provisional_and_the_stage_comes_from_the_last_fini
     assert out["provisional"] is not None and out["provisional"]["status"] == "PROVISIONAL"
     assert out["confirmed"]["date"] == df["date"].iloc[-2].strftime("%Y-%m-%d")
     assert out["status"] == "PROVISIONAL" and "not chances" in out["note"]
+    assert out["daily"][-1]["provisional"] is True and out["daily"][-2]["provisional"] is False
     assert {e["kind"] for e in out["confirmed"]["bottom"]["evidence"]} == {"exhaustion", "confirmation"}
     with pytest.raises(ValueError):
         reversal.analyse(df.iloc[:60], "TEST")
@@ -229,3 +230,52 @@ def test_the_scan_and_the_feature_flag(client, tmp_path):
     c = TestClient(create_app(off, TradeAssistant(off, provider=DemoData(), db=Database(":memory:"))))
     assert c.get("/v2/reversal/AAPL").status_code == 404
     assert c.get("/v2/trend/AAPL").status_code == 200
+
+
+def test_past_cases_exit_on_a_close_within_the_horizon_and_scale_with_volatility():
+    from datetime import date, datetime, timedelta
+
+    from tradeassist.optionmath import NY
+
+    class Chain:
+        spot = forward = 100.0
+        t = 70 / 365
+        expiration = (date.today() + timedelta(days=70)).isoformat()
+
+    row = {"option_type": "call", "strike": 100.0, "mid": 5.0, "iv": 0.30}
+    k = {"premium": 500.0, "if_invalidated": -300.0, "expiration": Chain.expiration}
+    cases = [
+        {"fwd_10": 0.06, "close_low_10": -0.01, "low_20": -0.08, "atr_pct": 0.02},   # dipped intraday only: kept
+        {"fwd_10": 0.05, "close_low_10": -0.06, "low_20": -0.07, "atr_pct": 0.02},   # closed through the stop: exit
+        {"fwd_10": 0.02, "close_low_10": -0.025, "low_20": -0.03, "atr_pct": 0.02},
+        {"fwd_10": None, "close_low_10": None, "atr_pct": 0.02},                      # not finished: left out
+    ]
+    pc = reversal_score.analog_outcomes(k, row, Chain(), cases, direction=1, spot=100.0, invalidation=96.0, horizon=10,
+                                        rate=0.04, contracts=1, now=datetime.now(NY), source="after tests")
+    assert pc["cases"] == 3 and pc["stopped_out"] == pytest.approx(1 / 3) and pc["worst"] == -300.0
+    # Twice as volatile now as then: the same cases are twice the move, so the second dip stops out too.
+    wild = reversal_score.analog_outcomes(k, row, Chain(), cases, direction=1, spot=100.0, invalidation=96.0,
+                                          horizon=10, rate=0.04, contracts=1, now=datetime.now(NY),
+                                          source="after tests", atr_pct=0.04)
+    assert wild["volatility_scaled"] and wild["stopped_out"] == pytest.approx(2 / 3)
+
+
+def test_the_confirming_level_is_only_ever_the_last_lower_high():
+    df = v_shape()
+    ev = reversal.evaluate(df, trend.state_series(df))
+    for t in range(240, len(df)):
+        lv = reversal.levels(df, ev, "bottom", t)
+        if lv["confirms_above"] is not None:
+            assert ev["sd"]["hi_label"].iloc[t] in ("LH", "EH") and lv["confirms_above"] > lv["close"]
+
+
+def test_your_contract_is_simulated_and_short_horizons_skip_past_cases(client):
+    o = client.post("/v2/reversal/options", json={"symbol": "AMZN"}).json()
+    k = o["contracts"][0]
+    mine = client.post("/v2/reversal/options", json={"symbol": "AMZN", "contracts_to_score": [
+        {"option_type": k["option_type"], "strike": k["strike"], "expiration": k["expiration"]}]}).json()
+    assert mine["own"][0]["simulation"]["curve"]["prices"]
+    quick = client.post("/v2/reversal/options", json={"symbol": "AMZN", "horizon_days": 3}).json()
+    assert quick["best"]["past_cases"] is None and any("longer than" in n for n in quick["notes"])
+    mine_inv = client.post("/v2/reversal/options", json={"symbol": "AMZN", "invalidation_price": 1.0}).json()
+    assert mine_inv["thesis"]["invalidation_is"] == "your price"

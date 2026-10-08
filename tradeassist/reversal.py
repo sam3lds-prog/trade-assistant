@@ -116,8 +116,12 @@ def evaluate(df: pd.DataFrame, trend_states: pd.DataFrame | None = None,
             # the price is still near that extreme: once it has retraced most of the move, the turn is old.
             w0 = max(0, t - 40)
             seg_ext = ext[w0:t + 1]
+            if not np.isfinite(seg_ext).any():
+                continue
             i_ext = w0 + int(np.nanargmin(seg_ext) if d > 0 else np.nanargmax(seg_ext))
             base_seg = (high if d > 0 else low)[max(0, i_ext - MOVE_WINDOW):i_ext + 1]
+            if not np.isfinite(base_seg).any():
+                continue
             base = float(np.nanmax(base_seg) if d > 0 else np.nanmin(base_seg))
             size = d * (base - ext[i_ext])
             mv = size / a
@@ -125,7 +129,8 @@ def evaluate(df: pd.DataFrame, trend_states: pd.DataFrame | None = None,
             retraced = (d * (close[t] - ext[i_ext]) / size) if size > 0 else 1.0
             context = mv >= MIN_MOVE_ATR and retraced <= 0.6
             context_recent = context
-            points["move"][t] = WEIGHTS["move"] * float(np.clip((mv - 2.0) / 4.0, 0, 1)) * (retraced <= 0.6)
+            points["move"][t] = WEIGHTS["move"] * float(np.clip((mv - MIN_MOVE_ATR) / 2.0, 0, 1)) * (retraced <= 0.6) \
+                if mv >= MIN_MOVE_ATR else 0.0
 
             # --- exhaustion -----------------------------------------------------------------------
             r5 = rsi[max(0, t - 4):t + 1]
@@ -139,7 +144,7 @@ def evaluate(df: pd.DataFrame, trend_states: pd.DataFrame | None = None,
             # The extreme of the current leg: since the last swing the other way, at most 40 bars back.
             start = min(t, max(t - 40, (last_opp.index + 1) if last_opp is not None else 0))
             seg = ext[start:t + 1]
-            cur_i = start + int(np.nanargmin(seg) if d > 0 else np.nanargmax(seg))
+            cur_i = (start + int(np.nanargmin(seg) if d > 0 else np.nanargmax(seg))) if np.isfinite(seg).any() else i_ext
             extreme_price[t] = ext[cur_i]
             div_r = div_m = False
             ref = last_same if (last_same is not None and last_same.index < start) else prev_same
@@ -175,8 +180,9 @@ def evaluate(df: pd.DataFrame, trend_states: pd.DataFrame | None = None,
             if states is not None and t >= 1:
                 window = states[max(0, t - 20):t + 1]
                 was = ("DOWN", "STRONG_DOWN") if d > 0 else ("UP", "STRONG_UP")
-                now_ok = ("NEUTRAL", "UP", "STRONG_UP", "UP_WEAKENING") if d > 0 else \
-                         ("NEUTRAL", "DOWN", "STRONG_DOWN", "DOWN_DEVELOPING", "UP_WEAKENING")
+                # Out of the downtrend (uptrend) altogether: neutral or the other side, mirrored exactly.
+                now_ok = ("NEUTRAL", "UP_WEAKENING", "UP", "STRONG_UP") if d > 0 else \
+                         ("NEUTRAL", "DOWN_DEVELOPING", "DOWN", "STRONG_DOWN")
                 engine_turn = bool(any(s in was for s in window[:-1]) and states[t] in now_ok)
             structure_break = t - last_break <= 20
             points["structure_break"][t] = WEIGHTS["structure_break"] if structure_break else (10.0 if engine_turn else 0.0)
@@ -205,8 +211,7 @@ def evaluate(df: pd.DataFrame, trend_states: pd.DataFrame | None = None,
             confirm = context_recent and (structure_break or ((swing_turn or engine_turn) and above20))
             if confirm and t - conf_bar > CONFIRMED_DAYS:
                 conf_bar = t
-                leg = ext[max(0, t - 40):t + 1]
-                conf_anchor = float(np.nanmin(leg) if d > 0 else np.nanmax(leg))
+                conf_anchor = float(ext[i_ext])
                 if swing_turn:                     # after a higher low, being wrong means losing that low
                     conf_anchor = last_same.price
             # A close through what the confirmation rests on fails it.
@@ -285,7 +290,9 @@ def levels(df: pd.DataFrame, ev: dict[str, Any], side: str, t: int) -> dict[str,
     t1 = ahead[0] if ahead else (close + d * 2 * risk, "two times the risk")
     later = [x for x in ahead[1:] if d * (x[0] - t1[0]) >= 0.5 * risk]
     t2 = later[0] if later else (t1[0] + d * risk, "one more time the risk beyond target 1")
-    confirm_price = float(key_price) if (np.isfinite(key_price) and d * (key_price - close) > 0) else None
+    # Only the last lower high (higher low) confirms: a close above a higher high says nothing new.
+    key_ok = np.isfinite(key_price) and key_label in (("LH", "EH") if d > 0 else ("HL", "EL"))
+    confirm_price = float(key_price) if (key_ok and d * (key_price - close) > 0) else None
     return {"close": close, "atr": atr, "anchor": float(anchor), "invalidation": invalidation,
             "invalidation_is": f"a quarter of a daily range beyond {anchor_is}",
             "target_1": float(t1[0]), "target_1_is": t1[1], "target_2": float(t2[0]), "target_2_is": t2[1],
@@ -390,6 +397,7 @@ def analyse(df: pd.DataFrame, symbol: str, trend_states: pd.DataFrame | None = N
     provisional = day(last, "PROVISIONAL") if not complete[last] else None
     start = max(0, len(df) - 252)
     daily = [{"date": pd.Timestamp(df["date"].iloc[t]).strftime("%Y-%m-%d"), "close": float(df["close"].iloc[t]),
+              "provisional": not bool(complete[t]),
                 "bottom": str(ev["bottom"]["stage"][t]), "top": str(ev["top"]["stage"][t]),
                 "bottom_score": round(float(ev["bottom"]["score"][t]), 1), "top_score": round(float(ev["top"]["score"][t]), 1)}
                for t in range(start, len(df))]

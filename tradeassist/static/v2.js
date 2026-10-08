@@ -1143,8 +1143,10 @@ function reversalChart(r) {
       if (!(active(now) && (now !== was) && !(was === "CONFIRMED"))) continue;
       const cx = X(i), cy = Y(x.close) + (side === "bottom" ? 9 : -9), up = side === "bottom";
       const s2 = now === "CONFIRMED" ? 6 : 4.5;
+      // Today's unfinished bar: hollow and dashed, never drawn as a confirmed event.
       root.append(svg("path", { d: up ? `M${cx} ${cy - s2} L${cx + s2} ${cy + s2} L${cx - s2} ${cy + s2} Z` : `M${cx} ${cy + s2} L${cx + s2} ${cy - s2} L${cx - s2} ${cy - s2} Z`,
-        fill: now === "CONFIRMED" ? `var(${up ? "--div-pos" : "--div-neg"})` : "var(--panel)", stroke: `var(${up ? "--div-pos" : "--div-neg"})`, "stroke-width": 1.5 }));
+        fill: now === "CONFIRMED" && !x.provisional ? `var(${up ? "--div-pos" : "--div-neg"})` : "var(--panel)", stroke: `var(${up ? "--div-pos" : "--div-neg"})`,
+        "stroke-width": 1.5, "stroke-dasharray": x.provisional ? "2 1.5" : null }));
     }
   });
   const hover = svg("line", { class: "hover-line", y1: pad.t, y2: stripTop + 2 * stripH + gap, visibility: "hidden" });
@@ -1154,7 +1156,7 @@ function reversalChart(r) {
     const box = root.getBoundingClientRect();
     const i = Math.max(0, Math.min(n - 1, Math.round(((evt.clientX - box.left) * W / box.width - L) / (R - L) * (n - 1))));
     hover.setAttribute("x1", X(i)); hover.setAttribute("x2", X(i)); hover.setAttribute("visibility", "visible");
-    tip.replaceChildren(el("div", { class: "tip-head", text: shortDate(rows[i].date) }), el("div", { text: money(rows[i].close) }),
+    tip.replaceChildren(el("div", { class: "tip-head", text: shortDate(rows[i].date) + (rows[i].provisional ? " (so far, provisional)" : "") }), el("div", { text: money(rows[i].close) }),
       el("div", { class: "tip-sub", text: `Bottom: ${revWord("bottom", rows[i].bottom).toLowerCase()} (${num(rows[i].bottom_score, 0)} pts)` }),
       el("div", { class: "tip-sub", text: `Top: ${revWord("top", rows[i].top).toLowerCase()} (${num(rows[i].top_score, 0)} pts)` }));
     tooltipAt(tip, box, X(i), W);
@@ -1165,7 +1167,7 @@ function reversalChart(r) {
     key(revFill("bottom", "CANDIDATE"), "Potential bottom"), key(revFill("bottom", "CONFIRMED"), "Reversal up confirmed"),
     key(revFill("top", "CANDIDATE"), "Potential top"), key(revFill("top", "CONFIRMED"), "Reversal down confirmed"),
     key(revFill("bottom", "WATCH"), "Stretched (watch)"), key(REV_STRIP.FAILED, "Failed"),
-    el("span", { class: "small muted", text: "Triangles mark the day each one appeared; filled when confirmed." })));
+    el("span", { class: "small muted", text: "Triangles mark the day each one appeared; filled when confirmed; dashed on today's unfinished bar." })));
   return wrap;
 }
 
@@ -1221,7 +1223,7 @@ function renderReversalOptions(o) {
   if (o.data_source === "demo") frag.append(banner("warn", "Demo data: these option prices are made up."));
   frag.append(el("p", { class: "small" }, revTag(o.side, su.stage), " ",
     el("strong", { text: `${o.contract_type === "CALL" ? "Calls" : "Puts"} on ${o.symbol} at ${money(th.spot)}: ` }),
-    `target ${money(th.target_1)} (${th.target_1_is}) by ${shortDate(th.horizon_date)}, wrong on a close ${o.contract_type === "CALL" ? "below" : "above"} ${money(th.invalidation)} (${su.levels.invalidation_is}).`,
+    `target ${money(th.target_1)} (${th.target_1_is}) by ${shortDate(th.horizon_date)}, wrong on a close ${o.contract_type === "CALL" ? "below" : "above"} ${money(th.invalidation)} (${th.invalidation_is}).`,
     su.today ? el("span", { class: "muted", text: ` Today's bar so far reads ${revWord(o.side, su.today).toLowerCase()}; the stage used is from the last finished bar.` }) : null));
   const vc = o.verdict_counts;
   frag.append(el("div", { class: "metrics" }, metric(String(vc.GOOD), "Good (70 or more)"), metric(String(vc.FAIR), "Fair (50 to 69)"),
@@ -1230,7 +1232,7 @@ function renderReversalOptions(o) {
   frag.append(banner("info", `Exit rule: ${o.exit_rule}`));
   if (o.own && o.own.length) {
     frag.append(el("h4", { text: o.own.length === 1 ? "Your contract" : "Your contracts" }));
-    for (const k of o.own) frag.append(scoredContractCard(k, o, k === o.own[0] && o.best && k.option_symbol === o.best.option_symbol));
+    for (const k of o.own) frag.append(scoredContractCard(k, o, true));
   } else if (o.best) {
     frag.append(el("h4", { text: "The best-scoring contract" }), scoredContractCard(o.best, o, true));
   } else frag.append(banner("warn", "No contracts to score for this thesis."));

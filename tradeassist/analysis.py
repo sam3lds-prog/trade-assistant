@@ -921,11 +921,16 @@ class Analyst:
         today = datetime.now(NY).date()
         # Past cases of the same reading, for the analog simulation: across stocks when there are enough.
         key = f"reversal:{side}_{'confirmed' if sv['stage'] == 'CONFIRMED' else 'candidate'}"
-        h_past = max([h for h in signalbook.HORIZONS if h <= horizon] or [min(signalbook.HORIZONS)])
+        short = [h for h in signalbook.HORIZONS if h <= horizon]
+        h_past = max(short) if short else min(signalbook.HORIZONS)
         pooled = [r for r in getattr(self, "_reversal_pooled", {}).get(key, [])
                   if r.get(f"fwd_{h_past}") is not None]
         mine = [r for r in self._reversal_cases.get(symbol, {}).get(key, []) if r.get(f"fwd_{h_past}") is not None]
-        if len(pooled) >= signalbook.MIN_CASES:
+        if not short:
+            cases, where = [], ""
+            notes.append(f"Past cases are measured over {min(signalbook.HORIZONS)} trading days or more, longer than "
+                         f"this {horizon}-day horizon, so the contract is not simulated on them.")
+        elif len(pooled) >= signalbook.MIN_CASES:
             cases, where = pooled, f"after {REVERSAL_CASES[key]} across the stocks in the signal history"
         elif len(mine) >= 8:
             cases, where = mine, f"after {REVERSAL_CASES[key]} on {symbol} over {REVERSAL_YEARS} years"
@@ -964,15 +969,21 @@ class Analyst:
         def detail(k: dict[str, Any]) -> dict[str, Any]:
             return {**k, "outcomes": reversal_score.outcome_table(k, {**thesis, "target_1": t1, "target_2": t2}, names)}
 
-        best = detail(ranked[0]) if ranked else None
-        if best and best.get("premium") is not None:
-            h_day = min(_date.fromisoformat(thesis["horizon_date"]), _date.fromisoformat(best["expiration"]))
-            try:
-                best["simulation"] = self.svc.simulate(symbol=symbol, eval_date=h_day.isoformat(), legs=[{
-                    "expiration": best["expiration"], "option_type": best["option_type"].lower(), "strike": best["strike"],
-                    "side": "buy", "contracts": contracts, "entry_price": best["mid"]}])
-            except (DataError, ValueError) as exc:
-                best["simulation"] = {"error": str(exc)}
+        def simulated(k: dict[str, Any]) -> dict[str, Any]:
+            out = detail(k)
+            if k.get("premium") is not None:
+                h_day = min(_date.fromisoformat(thesis["horizon_date"]), _date.fromisoformat(k["expiration"]))
+                try:
+                    out["simulation"] = self.svc.simulate(symbol=symbol, eval_date=h_day.isoformat(), legs=[{
+                        "expiration": k["expiration"], "option_type": k["option_type"].lower(), "strike": k["strike"],
+                        "side": "buy", "contracts": contracts, "entry_price": k["mid"]}])
+                except (DataError, ValueError) as exc:
+                    out["simulation"] = {"error": str(exc)}
+            return out
+
+        # With your own contracts, each is shown in full; otherwise the best-ranked one.
+        mine_full = [simulated(c) for c in ranked] if own else None
+        best = (mine_full[0] if mine_full else simulated(ranked[0])) if ranked else None
         compact = [{k: v for k, v in c.items() if k != "scenarios"} for c in ranked]
         prov = rv["provisional"]
         return {"version": REVERSAL_ENGINE_VERSION, "options_evaluator_version": OPTIONS_EVALUATOR_VERSION,
@@ -980,10 +991,11 @@ class Analyst:
                 "setup": {"date": day["date"], "stage": sv["stage"], "score": sv["score"], "exhaustion": sv["exhaustion"],
                           "confirmation": sv["confirmation"], "text": sv["text"], "levels": lv,
                           "today": prov[side]["stage"] if prov and prov[side]["stage"] != sv["stage"] else None},
-                "thesis": {**thesis, "target_1_is": names["target_1"], "target_2_is": names["target_2"]},
+                "thesis": {**thesis, "target_1_is": names["target_1"], "target_2_is": names["target_2"],
+                           "invalidation_is": "your price" if req.get("invalidation_price") else lv["invalidation_is"]},
                 "verdict_counts": {v: sum(1 for c in ranked if c["reversal_score"]["verdict"] == v)
                                    for v in ("GOOD", "FAIR", "POOR", "AVOID")},
-                "best": best, "own": [detail(c) for c in ranked] if own else None, "contracts": compact,
+                "best": best, "own": mine_full, "contracts": compact,
                 "market": ev["market"], "earnings": ev.get("earnings"), "stock_grade": ev.get("stock_grade"),
                 "exit_rule": ev["exit_rule"], "weights": reversal_score.WEIGHTS,
                 "notes": notes + ev["notes"] + ["The score summarises the checks; it is not a probability. GOOD is 70 or "

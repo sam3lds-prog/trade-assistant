@@ -170,16 +170,18 @@ def analog_outcomes(k: dict[str, Any], row: dict[str, Any], analysis: Any, cases
     """What the contract would make if the stock moved as it did after past reversals of this kind.
 
     Each past case gives the stock's return over `horizon` trading days from the next day's open and
-    the worst price reached in the next 20 days. With `atr_pct` (this stock's daily range as a share
+    the worst close over the same days. With `atr_pct` (this stock's daily range as a share
     of its price now) and the case's own, the case's moves are rescaled to this stock's volatility,
     so a calm stock's past cases are not read as small moves for a volatile one (the scale is kept
-    between a quarter and four times). A case whose worst price crossed the invalidation counts as
+    between a quarter and four times). A case whose worst close crossed the invalidation counts as
     stopped out at the evaluator's invalidation value (the exit rule is on the stock); otherwise the
     contract is valued at the case's price on the horizon date with today's implied volatility.
     Path, volatility changes and gaps through the stop are not modelled."""
     col = f"fwd_{horizon}"
     stop_ret = invalidation / spot - 1.0
-    usable = [c for c in cases if c.get(col) is not None and math.isfinite(c[col])]
+    worst_col = f"close_low_{horizon}" if direction > 0 else f"close_high_{horizon}"
+    usable = [c for c in cases if c.get(col) is not None and math.isfinite(c[col])
+              and c.get(worst_col) is not None and math.isfinite(c[worst_col])]
     if not usable or k.get("premium") is None:
         return None
     today = now.date()
@@ -195,7 +197,8 @@ def analog_outcomes(k: dict[str, Any], row: dict[str, Any], analysis: Any, cases
         return float(np.clip(atr_pct / theirs, 0.25, 4.0))
 
     def hit(c: dict[str, Any], f: float) -> bool:
-        worst = c.get("low_20") if direction > 0 else c.get("high_20")      # the worst price for this side
+        # The worst close for this side within the horizon: the exit rule is a close at the invalidation.
+        worst = c.get(f"close_low_{horizon}") if direction > 0 else c.get(f"close_high_{horizon}")
         return worst is not None and math.isfinite(worst) and direction * (worst * f - stop_ret) <= 0
 
     scales = [scale(c) for c in usable]
@@ -215,9 +218,9 @@ def analog_outcomes(k: dict[str, Any], row: dict[str, Any], analysis: Any, cases
             "histogram": {"edges": [float(e) for e in edges], "counts": [int(c) for c in counts]},
             "note": f"{len(pnl)} past cases {source}: the stock's move over {horizon} trading days after each"
                     + (", rescaled to this stock's daily range," if scaled else ",")
-                    + " applied to today's price; cases that reached the invalidation within 20 days count as "
-                      "stopped out. Today's implied volatility is kept, and the path between is ignored. Past "
-                      "cases, not a forecast."}
+                    + f" applied to today's price; cases that closed at or beyond the invalidation within those "
+                      f"{horizon} days count as an exit there. Today's implied volatility is kept, and gaps and "
+                      "changes in volatility are ignored. Past cases, not a forecast."}
 
 
 def outcome_table(k: dict[str, Any], thesis: dict[str, Any], names: dict[str, str]) -> list[dict[str, Any]]:
