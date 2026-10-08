@@ -18,6 +18,10 @@ V2_WRITES = {
     "/v2/reversal/options",
     # 2.1.1: correcting a recorded fill (audited) and rebuilding snapshots. Records only; no orders.
     "/v2/positions/{position_id}/executions/{execution_id}/correct", "/v2/snapshots/backfill",
+    # 2.2: borrow fees, dividends and splits; how a bought option ended. Records only; no orders.
+    "/v2/positions/{position_id}/adjustments", "/v2/positions/{position_id}/adjustments/{adjustment_id}/void",
+    "/v2/positions/{position_id}/option/expire", "/v2/positions/{position_id}/option/exercise",
+    "/v2/positions/{position_id}/option/adjust",
 }
 
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."

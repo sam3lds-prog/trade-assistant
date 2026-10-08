@@ -18,8 +18,9 @@ import pandas as pd
 
 from .optionmath import NY, days_to_expiry
 from .market import complete_only
-from .positions import (DIRECTIONS, OptionLeg, PositionError, add_execution, cancel, correct_execution, create,
-                        list_ids, now_iso, read, update_plan)
+from .positions import (DIRECTIONS, OptionLeg, PositionError, add_adjustment, add_execution, adjust_contract, cancel,
+                        correct_execution, create, exercise, expiration_close, expire_worthless, list_ids, now_iso, parse_time,
+                        read, update_plan, void_adjustment)
 from .providers.base import DataError
 from .snapshots import LIVE_WINDOW, SnapshotService, close_of, cutoff_session, when
 from .structure import STATE_WORDS
@@ -167,6 +168,7 @@ class Desk:
         elif open_qty == 0:
             unreal = liq_unreal = 0.0
         total = led["realized_pnl"] + unreal if unreal is not None else None
+        fin = pos.get("financing") or {}
         risk = led.get("initial_risk")
         pos["pnl"] = {"realized": led["realized_pnl"], "unrealized": unreal, "total": total, "fees": led["fees"],
                       "r_multiple": (total / risk) if (total is not None and risk) else None, "initial_risk": risk,
@@ -174,7 +176,11 @@ class Desk:
                       # What closing now at the bid (long) or the ask (short) would roughly realise: an estimate,
                       # never a promised fill. None when there is no two-sided quote.
                       "liquidation_value": (sign * liq * open_qty * mult) if liq is not None else (0.0 if open_qty == 0 else None),
-                      "liquidation_unrealized": liq_unreal}
+                      "liquidation_unrealized": liq_unreal,
+                      # Trading profit (the fills) and money outside them (borrow fees, dividends, cash
+                      # adjustments) are kept apart; net economic profit is the two together.
+                      "trading_total": total, "financing": fin.get("financing_total", 0.0),
+                      "net_economic": (total + fin.get("financing_total", 0.0)) if total is not None else None}
         pos["thesis_check"] = self.thesis_check(pos)
         if pos["opened_at"]:
             end = pos["closed_at"] or now_iso()
@@ -283,6 +289,91 @@ class Desk:
         self._reconcile(position_id)
         out = self.view(position_id)
         out["correction"] = done
+        return out
+
+    # --- money outside the fills, and how options end ---------------------------------------------
+    def add_adjustment(self, position_id: int, req: dict[str, Any]) -> dict[str, Any]:
+        with self.db.tx() as cur:
+            add_adjustment(cur, position_id, req["kind"], amount=req.get("amount"), effective_at=req.get("effective_at"),
+                           rate_pct=req.get("rate_pct"), quantity=req.get("quantity"), per_share=req.get("per_share"),
+                           ratio=req.get("ratio"), period_start=req.get("period_start"), period_end=req.get("period_end"),
+                           note=req.get("note") or "", source=req.get("source") or "MANUAL",
+                           external_id=req.get("external_id"))
+        self._reconcile(position_id)
+        return self.view(position_id)
+
+    def void_adjustment(self, position_id: int, adjustment_id: int, reason: str) -> dict[str, Any]:
+        with self.db.tx() as cur:
+            void_adjustment(cur, position_id, adjustment_id, reason)
+        return self.view(position_id)
+
+    def _stock_close(self, symbol: str, day: date) -> float | None:
+        """The stock's finished daily close on `day`, if the history has it."""
+        try:
+            bars = complete_only(self.market.bars(symbol, max(1.0, (datetime.now(NY).date() - day).days / 365 + 0.2)))
+        except DataError:
+            return None
+        hit = bars[bars["date"] == pd.Timestamp(day)]
+        return finite(hit["close"].iloc[-1]) if len(hit) else None
+
+    def _price_at(self, pos: dict[str, Any], req: dict[str, Any], when: datetime) -> tuple[float | None, str | None]:
+        """The stock price an option event is settled against: the one you entered, else the
+        finished daily close on the event's date, else (for an event now) the current quote."""
+        if req.get("underlying_price") is not None:
+            return float(req["underlying_price"]), "entered"
+        day = when.astimezone(NY).date()
+        close = self._stock_close(pos["symbol"], day)
+        if close is not None:
+            return close, f"daily close on {day.isoformat()}"
+        if datetime.now(timezone.utc) - when <= LIVE_WINDOW:
+            try:
+                return self.market.spot(pos["symbol"]), "quote when recorded"
+            except (DataError, ValueError):
+                return None, None
+        return None, None
+
+    def expire_option(self, position_id: int, req: dict[str, Any]) -> dict[str, Any]:
+        with self.db.tx() as cur:
+            pos = read(cur, position_id)
+        if pos["instrument_type"] != "OPTION" or not pos["legs"]:
+            raise PositionError("That is not an option position")
+        price, source = self._price_at(pos, req, expiration_close(pos["legs"][0]["expiration"]))
+        with self.db.tx() as cur:
+            done = expire_worthless(cur, position_id, underlying_price=price, underlying_price_source=source,
+                                    reason=req.get("reason") or "")
+        self._reconcile(position_id)
+        out = self.view(position_id)
+        out["event"] = done
+        return out
+
+    def exercise_option(self, position_id: int, req: dict[str, Any]) -> dict[str, Any]:
+        with self.db.tx() as cur:
+            pos = read(cur, position_id)
+        if pos["instrument_type"] != "OPTION" or not pos["legs"]:
+            raise PositionError("That is not an option position")
+        close = expiration_close(pos["legs"][0]["expiration"])
+        when = datetime.fromisoformat(parse_time(req.get("executed_at"))) if req.get("executed_at") else \
+            min(datetime.now(timezone.utc), close)
+        price, source = self._price_at(pos, req, when)
+        if price is None:
+            raise PositionError("Enter the stock price at exercise: no daily close is available for that date.")
+        with self.db.tx() as cur:
+            done = exercise(cur, position_id, underlying_price=price, underlying_price_source=source,
+                            quantity=req.get("quantity"), event_at=req.get("executed_at"),
+                            apply_to_position_id=req.get("apply_to_position_id"), reason=req.get("reason") or "")
+        self._reconcile(position_id)
+        self._reconcile(done["stock_position_id"])
+        out = self.view(position_id)
+        out["event"] = done
+        return out
+
+    def adjust_option(self, position_id: int, req: dict[str, Any]) -> dict[str, Any]:
+        with self.db.tx() as cur:
+            done = adjust_contract(cur, position_id, effective_at=req["effective_at"], new_strike=req["new_strike"],
+                                   new_multiplier=req["new_multiplier"], quantity_factor=req.get("quantity_factor") or 1.0,
+                                   new_option_symbol=req.get("new_option_symbol"), reason=req.get("reason") or "")
+        out = self.view(position_id)
+        out["event"] = done
         return out
 
     def cancel(self, position_id: int, note: str = "") -> dict[str, Any]:

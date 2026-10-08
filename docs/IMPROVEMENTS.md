@@ -156,3 +156,19 @@ price counted as zero open risk; a beta of 3 in a 50% crash took a stock below z
 stress tests.
 
 Tests: 429 passed, 2 skipped.
+
+### Sprint 4: short-sale financing and the option lifecycle (2.2)
+
+Migration 6 adds `position_adjustments` and `option_events`. It changes no fill.
+
+| Requirement | Done | Where | Tests (`test_short_and_options.py`) |
+| --- | --- | --- | --- |
+| 3.3 Short accounting | Borrow fees (several, with periods and rates), borrow-rate entries, dividends owed and received, cash adjustments, voiding with a reason, import ids; trading profit, financing and net economic profit kept apart; borrow status UNKNOWN / PARTIAL / RECORDED with a labelled estimate that is never added; partial covers covered; BORROW_UNKNOWN alert | `positions.py`, `desk.py`, `api_v2.py`, `alerts.py`, `v2.js` | `test_3_3_*` (5) |
+| Corporate actions | Stock splits replay earlier fills in post-split units and rescale the plan (voidable); daily loss uses the adjusted fills | `positions.py`, `portfolio.py` | split and daily-loss tests |
+| 3.4 Option lifecycle | Expired worthless (refused before expiry; reason required if in the money), exercised (intrinsic close plus shares at the same price, new or existing stock position, linked both ways), contract adjustments (original terms kept, value preserved), UNRESOLVED state with alert and unknown risk; journal mirrors refused; assignment refused by the schema | `positions.py`, `desk.py`, `portfolio.py`, `alerts.py`, `v2.js` | `test_3_4_*` (9) |
+
+Tests: 443 passed, 2 skipped.
+
+Known limitations: no broker feed for borrow fees or dividends, so they are entered by hand
+(or posted with an import id). Mergers, spin-offs and cash-settled adjustments are not
+modelled. Exercised shares are contracts x multiplier.

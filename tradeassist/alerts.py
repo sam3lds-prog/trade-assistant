@@ -13,6 +13,8 @@ any way; the app lists the alerts and you decide.
     OPEN_RISK_UNKNOWN  some positions' risk could not be measured, so the limit check is incomplete
     DAILY_LOSS_UNKNOWN some positions' change today could not be measured
     PROVISIONAL        a trend alert that rests on today's unfinished bar (shown, marked so)
+    UNRESOLVED_EXPIRATION an option past expiration with contracts open and no recorded outcome
+    BORROW_UNKNOWN     a short whose borrow fees are not recorded (or not for every day)
 """
 
 from __future__ import annotations
@@ -54,6 +56,14 @@ def position_alerts(view: dict[str, Any], trend: dict[str, Any] | None, earnings
                 out.append(_alert("TREND_AGAINST", "warn", f"{d}: {when} {STATE_WORDS[day['state']].lower()}, against the "
                                                             "position.", position_id=view["id"], status=status))
                 break
+    if (view.get("lifecycle") or {}).get("state") == "UNRESOLVED":
+        out.append(_alert("UNRESOLVED_EXPIRATION", "warn", f"{d} is past its expiration with contracts still open. Record "
+                                                           "whether it expired worthless or was exercised; it is not "
+                                                           "assumed either way.", position_id=view["id"]))
+    fin = view.get("financing") or {}
+    if fin.get("borrow_status") in ("UNKNOWN", "PARTIAL") and view.get("status") in ("OPEN", "PARTIALLY_CLOSED"):
+        out.append(_alert("BORROW_UNKNOWN", "info", f"{d}: {fin['borrow_text']} Record the fees your broker charged to see "
+                                                    "the short's net result.", position_id=view["id"]))
     if view["instrument_type"] == "OPTION" and view.get("legs"):
         exp = date.fromisoformat(view["legs"][0]["expiration"])
         days = (exp - today).days
