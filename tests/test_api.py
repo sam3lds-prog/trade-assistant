@@ -16,6 +16,8 @@ V2_WRITES = {
     "/v2/position/evaluate", "/v2/options/evaluate", "/v2/options/compare", "/v2/portfolio/stress",
     "/v2/signals/history/build", "/v2/backtest", "/v2/backtest/walkforward", "/v2/alerts/check",
     "/v2/reversal/options",
+    # 2.1.1: correcting a recorded fill (audited) and rebuilding snapshots. Records only; no orders.
+    "/v2/positions/{position_id}/executions/{execution_id}/correct", "/v2/snapshots/backfill",
 }
 
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."

@@ -17,6 +17,13 @@ backtests; and alerts. Version 2.1 adds trend reversals: whether a stock is at a
 bottom or top, or has confirmed a reversal, and a score for the calls or puts to trade it,
 with the gain or loss in each case. See "Version 2" below and `docs/V2.md` for the details.
 
+Version 2.1.1 makes the records and risk figures trustworthy before adding anything new: a
+closed position stays closed, portfolio risk and the daily loss stop say plainly what they
+could not measure instead of counting it as zero, wrong fills are corrected with a recorded
+reason, every trade (option-journal ones too) gets entry and exit snapshots that use only
+data available at the time, and no NaN or infinite number can enter the accounts. The
+engineering record is `docs/IMPROVEMENTS.md`.
+
 ## Start it
 
 Needs Python 3.11 or newer (built and tested on 3.13 with pandas 3 and numpy 2).
@@ -369,8 +376,9 @@ market regime, with shorts that pay a borrow fee, walk-forward testing and a Mon
 range. Option strategies are not backtested, because no connected source has past option
 prices and faking them would only look precise.
 
-The database is upgraded in place the first time version 2 starts. Back up
-`data/tradeassist.db` first if you want a way back.
+The database is upgraded in place the first time a new version starts. Since 2.1.1 the app
+copies it to `data/backups/` before any upgrade (the newest ten copies are kept), so there is
+always a way back.
 
 ## Implied-volatility rank
 

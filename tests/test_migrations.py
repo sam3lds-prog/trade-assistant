@@ -120,6 +120,7 @@ def test_foreign_keys_are_enforced_on_every_connection(tmp_path):
 def test_a_failed_migration_leaves_the_file_as_it_was(tmp_path, monkeypatch):
     from tradeassist import migrations
     path = load("db_2_1_0", tmp_path)
+    Database(path).close()                      # every real migration applied
     before = table_rows(path)
 
     def broken(cur):
@@ -130,7 +131,10 @@ def test_a_failed_migration_leaves_the_file_as_it_was(tmp_path, monkeypatch):
                                                    migrations.Migration(latest() + 1, "broken", broken)])
     with pytest.raises(RuntimeError):
         Database(path)
-    assert table_rows(path) == before
+    assert table_rows(path) == before           # the broken migration's change was rolled back
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == latest()
+    conn.close()
 
 
 def test_manual_backups_and_pruning(tmp_path):

@@ -45,8 +45,21 @@ def _date(iso: str | None):
 
 
 def snapshot(pos: dict[str, Any], kind: str) -> dict[str, Any] | None:
-    snaps = [s for s in pos.get("snapshots", []) if s["snapshot_type"] == kind]
+    """The effective snapshot of this kind (snapshots.py): superseded ones are history, not context."""
+    snaps = [s for s in pos.get("snapshots", []) if s["snapshot_type"] == kind and s.get("superseded_at") is None]
     return snaps[0] if snaps else None
+
+
+def entry_context(pos: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """The ENTRY snapshot when it shows what could have been known at entry, else None and why.
+    A snapshot built from data after the fill (uses_later_data) is hindsight: it is shown on the
+    position, but never counted as the trend or regime at entry."""
+    s = snapshot(pos, "ENTRY")
+    if s is None:
+        return None, "not recorded"
+    if s.get("uses_later_data"):
+        return None, "recorded with hindsight"
+    return s, None
 
 
 def excursions(pos: dict[str, Any], bars: pd.DataFrame | None, until: str | None = None) -> dict[str, Any]:
@@ -57,14 +70,15 @@ def excursions(pos: dict[str, Any], bars: pd.DataFrame | None, until: str | None
     end = _date(until or pos.get("closed_at")) or datetime.now(NY).date()
     d = pd.to_datetime(bars["date"]).dt.date
     window = bars[(d > start) & (d <= end)]
-    entry_snap = snapshot(pos, "ENTRY") or {}
+    entry_snap = entry_context(pos)[0] or {}
     if pos["instrument_type"] == "STOCK":
-        entry = pos["ledger"]["average_entry_price"]
+        entry, basis = pos["ledger"]["average_entry_price"], "average entry price"
     else:
-        entry = entry_snap.get("underlying_price")
+        entry, basis = entry_snap.get("underlying_price"), "stock price in the entry snapshot"
         if entry is None:
             on = bars[d <= start]
             entry = float(on["close"].iloc[-1]) if len(on) else None
+            basis = "stock's close on the entry day (approximate)"
     if not entry or window.empty:
         return {"available": False, "reason": "no daily bars after the entry yet" if entry else "no entry price for the stock"}
     hi, lo = float(window["high"].max()), float(window["low"].min())
@@ -84,7 +98,7 @@ def excursions(pos: dict[str, Any], bars: pd.DataFrame | None, until: str | None
     held_past = bool(inv is not None and len(closes) and np.any(bias * (closes - inv) < 0))
     t1 = pos.get("target_1")
     reached = bool(t1 is not None and (hi >= t1 if bias > 0 else lo <= t1))
-    return {"available": True, "underlying_entry": entry, "mfe_pct": 100 * mfe, "mae_pct": 100 * mae,
+    return {"available": True, "underlying_entry": entry, "entry_basis": basis, "mfe_pct": 100 * mfe, "mae_pct": 100 * mae,
             "mfe_r": mfe / r_unit if r_unit else None, "mae_r": mae / r_unit if r_unit else None,
             "closed_beyond_invalidation": held_past, "reached_target_1": reached, "days": int(len(window))}
 
@@ -109,7 +123,7 @@ def behaviour(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> li
     risk = pos["ledger"].get("initial_risk")
     if risk and risk_limit and risk > risk_limit * 1.001:
         flags.append("oversized")
-    entry = snapshot(pos, "ENTRY") or {}
+    entry = entry_context(pos)[0] or {}
     state = entry.get("trend_state")
     bias = pos.get("bias") or (1 if pos["direction"] == "LONG" else -1)
     if state and ((bias > 0 and state in DOWN_STATES) or (bias < 0 and state in UP_STATES)):
@@ -130,7 +144,8 @@ BEHAVIOUR_WORDS = {
 
 
 def trade_row(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> dict[str, Any]:
-    entry = snapshot(pos, "ENTRY") or {}
+    context, missing_context = entry_context(pos)
+    entry = context or {}
     led = pos["ledger"]
     risk = led.get("initial_risk")
     pnl = led["realized_pnl"]
@@ -144,6 +159,7 @@ def trade_row(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> di
             "pnl": pnl, "fees": led["fees"], "r_multiple": pnl / risk if risk else None, "initial_risk": risk,
             "trend_at_entry": entry.get("trend_state") or "not recorded",
             "regime_at_entry": entry.get("market_regime") or "not recorded",
+            "entry_context": "available" if context is not None else missing_context,
             "excursions": exc, "behaviour": behaviour(pos, exc, risk_limit), "data_source": pos.get("data_source")}
 
 
@@ -218,7 +234,16 @@ def journal_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
                      "figures.")
     if any(r["data_source"] == "demo" for r in rows):
         notes.append("Some trades were recorded on demo data.")
+    without = [r for r in rows if r.get("entry_context", "available") != "available"]
+    if without:
+        hind = sum(1 for r in without if r["entry_context"] == "recorded with hindsight")
+        notes.append(f"{len(without)} of {len(rows)} trades have no entry-time market context"
+                     + (f" ({hind} only have a snapshot built from data after the fill, which is not used)" if hind else "")
+                     + ": they count under 'not recorded' for trend and regime at entry and in the against-the-trend "
+                       "habit. Rebuilding snapshots can add it where the price history allows.")
     return {"overall": overall, "max_drawdown": dd, "equity_curve": curve,
+            "coverage": {"trades": len(rows), "entry_context": len(rows) - len(without),
+                         "excursions": sum(1 for r in rows if r["excursions"].get("available"))},
             "by_setup": _group(rows, lambda r: r["setup_type"]),
             "by_direction": _group(rows, lambda r: "bet on a rise" if (r["bias"] or 0) > 0 else "bet on a fall"),
             "by_instrument": _group(rows, lambda r: {"STOCK": "stock", "OPTION": "calls and puts"}.get(r["instrument_type"], r["instrument_type"])),

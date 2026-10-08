@@ -135,3 +135,121 @@ def signal_atr_and_closes(cur: sqlite3.Cursor) -> None:
                  "close_high_20"):
         if name not in columns:
             cur.execute(f"ALTER TABLE signal_occurrences ADD COLUMN {name} REAL")
+
+
+SNAPSHOT_PROVENANCE_COLUMNS = (
+    ("execution_id", "INTEGER REFERENCES executions (id) ON DELETE SET NULL"),   # the fill an ENTRY or EXIT is about
+    ("executed_at", "TEXT"),            # when that fill happened (UTC)
+    ("observation_cutoff", "TEXT"),     # the latest moment of market data the snapshot uses
+    ("captured_at", "TEXT"),            # when the snapshot was taken
+    ("method", "TEXT"),                 # LIVE, PRIOR_BAR, END_OF_DAY or JOURNAL_QUOTE (snapshots.py)
+    ("capture_timing", "TEXT"),         # CONTEMPORANEOUS or RETROSPECTIVE
+    ("uses_later_data", "INTEGER"),     # 1 when the data is from after the fill: hindsight
+    ("provenance_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("superseded_at", "TEXT"),          # set when a later snapshot replaces this one; never deleted
+    ("superseded_reason", "TEXT"),
+)
+
+
+@migration(5, "snapshot provenance and timing, one effective lifecycle snapshot, audited corrections, import ids")
+def history_integrity(cur: sqlite3.Cursor) -> None:
+    """2.1.1: what each snapshot is about and when its data is from; a record of every correction
+    to a fill; broker execution ids for idempotent imports.
+
+    Existing snapshots get their provenance inferred from what 2.0 and 2.1 stored (marked
+    `inferred` in provenance_json). Where an older version stored two ENTRY or two EXIT snapshots
+    for one position, the extra ones are marked superseded (the first ENTRY and the last EXIT
+    stay effective); nothing is deleted. Fills are not changed."""
+    import json
+    from datetime import datetime, timezone
+
+    have = {row[1] for row in cur.execute("PRAGMA table_info(position_snapshots)").fetchall()}
+    for name, kind in SNAPSHOT_PROVENANCE_COLUMNS:
+        if name not in have:
+            cur.execute(f"ALTER TABLE position_snapshots ADD COLUMN {name} {kind}")
+    have = {row[1] for row in cur.execute("PRAGMA table_info(executions)").fetchall()}
+    if "external_id" not in have:
+        cur.execute("ALTER TABLE executions ADD COLUMN external_id TEXT")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_executions_external ON executions (source, external_id) "
+                "WHERE external_id IS NOT NULL")
+    cur.execute("""CREATE TABLE IF NOT EXISTS execution_corrections (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        position_id    INTEGER NOT NULL REFERENCES positions (id) ON DELETE CASCADE,
+        execution_id   INTEGER,                 -- kept even if the fill is later removed
+        action         TEXT NOT NULL CHECK (action IN ('UPDATE', 'DELETE', 'INSERT')),
+        previous_json  TEXT NOT NULL,           -- the fill's values before
+        new_json       TEXT NOT NULL,           -- and after
+        reason         TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+        source         TEXT NOT NULL,           -- USER, JOURNAL_SYNC or REPAIR
+        ledger_before  TEXT NOT NULL,
+        ledger_after   TEXT NOT NULL,
+        changed_at     TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_corrections_position ON execution_corrections (position_id, changed_at)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS snapshot_reconstruction (
+        position_id   INTEGER NOT NULL REFERENCES positions (id) ON DELETE CASCADE,
+        snapshot_type TEXT NOT NULL,
+        execution_id  INTEGER NOT NULL DEFAULT 0,     -- 0 for a PLAN, which has no fill
+        status        TEXT NOT NULL CHECK (status IN ('CREATED', 'UNAVAILABLE')),
+        snapshot_id   INTEGER,
+        reason        TEXT NOT NULL DEFAULT '',
+        attempts      INTEGER NOT NULL DEFAULT 1,
+        updated_at    TEXT NOT NULL,
+        PRIMARY KEY (position_id, snapshot_type, execution_id)
+    )""")
+
+    def when(text: str | None) -> datetime | None:
+        if not text:
+            return None
+        try:
+            moment = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    opening = {"LONG": ("BUY",), "SHORT": ("SELL_SHORT", "SELL")}
+    snaps = cur.execute("SELECT s.id, s.position_id, s.snapshot_type, s.timestamp, s.raw_json, p.direction, p.status "
+                        "FROM position_snapshots s JOIN positions p ON p.id = s.position_id "
+                        "WHERE s.method IS NULL ORDER BY s.position_id, s.id").fetchall()
+    for sid, pid, kind, stamp, raw_json, direction, _status in snaps:
+        try:
+            raw = json.loads(raw_json or "{}")
+        except ValueError:
+            raw = {}
+        fills = cur.execute("SELECT id, side, executed_at FROM executions WHERE position_id = ? ORDER BY executed_at, id",
+                            (pid,)).fetchall()
+        anchor = None
+        if kind == "ENTRY":
+            anchor = next((f for f in fills if f[1] in opening[direction]), None)
+        elif kind == "EXIT":
+            closes = [f for f in fills if f[1] not in opening[direction]]
+            anchor = closes[-1] if closes else None
+        method = "END_OF_DAY" if raw.get("as_of") else "LIVE"
+        captured = raw.get("taken_at") or stamp
+        cutoff = stamp if method == "END_OF_DAY" else captured
+        executed = anchor[2] if anchor else None
+        later = bool(executed and when(cutoff) and when(executed) and when(cutoff) > when(executed))
+        if kind in ("PLAN", "REVIEW"):
+            timing = "CONTEMPORANEOUS"
+        elif method == "LIVE" and when(captured) and when(executed) and \
+                abs((when(captured) - when(executed)).total_seconds()) <= 15 * 60:
+            timing = "CONTEMPORANEOUS"
+        else:
+            timing = "RETROSPECTIVE"
+        provenance = {"origin": "before 2.1.1", "inferred": True}
+        if method == "END_OF_DAY":
+            provenance["note"] = "Reconstructed at the fill date's close, which may be after the fill."
+        cur.execute("UPDATE position_snapshots SET execution_id = ?, executed_at = ?, observation_cutoff = ?, "
+                    "captured_at = ?, method = ?, capture_timing = ?, uses_later_data = ?, provenance_json = ? WHERE id = ?",
+                    (anchor[0] if anchor else None, executed, cutoff, captured, method, timing, int(later),
+                     json.dumps(provenance), sid))
+    # One effective PLAN, ENTRY and EXIT per position: the first PLAN and ENTRY, the last EXIT.
+    for kind, keep in (("PLAN", "MIN"), ("ENTRY", "MIN"), ("EXIT", "MAX")):
+        cur.execute(f"UPDATE position_snapshots SET superseded_at = ?, superseded_reason = ? "
+                    f"WHERE snapshot_type = ? AND superseded_at IS NULL AND id NOT IN ("
+                    f"SELECT {keep}(id) FROM position_snapshots WHERE snapshot_type = ? AND superseded_at IS NULL "
+                    f"GROUP BY position_id)",
+                    (now, "a second snapshot of this kind from before 2.1.1", kind, kind))
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_effective ON position_snapshots (position_id, snapshot_type) "
+                "WHERE superseded_at IS NULL AND snapshot_type IN ('PLAN', 'ENTRY', 'EXIT')")

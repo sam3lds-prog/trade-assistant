@@ -11,15 +11,17 @@ from __future__ import annotations
 import inspect
 import logging
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 import pandas as pd
 
 from .optionmath import NY, days_to_expiry
-from .positions import (DIRECTIONS, OptionLeg, PositionError, add_execution, add_snapshot, cancel, create,
+from .market import complete_only
+from .positions import (DIRECTIONS, OptionLeg, PositionError, add_execution, cancel, correct_execution, create,
                         list_ids, now_iso, read, update_plan)
 from .providers.base import DataError
+from .snapshots import LIVE_WINDOW, SnapshotService, close_of, cutoff_session, when
 from .structure import STATE_WORDS
 from .versions import SIGNAL_ENGINE_VERSION
 
@@ -73,6 +75,26 @@ class Desk:
         self.market = svc.market
         # Later parts of V2 add to the entry snapshot (trend state, regime, scores) through these.
         self.snapshot_extras: list[Callable[[str, dict[str, Any]], dict[str, Any]]] = []
+        self.snapshots = SnapshotService(self.db, self.capture)
+        journal = getattr(svc, "journal", None)
+        if journal is not None and hasattr(journal, "listeners"):
+            journal.listeners[:] = [f for f in journal.listeners if getattr(f, "__name__", "") != "_journal_changed"]
+            journal.listeners.append(self._journal_changed)
+
+    def _journal_changed(self, trade_id: int) -> None:
+        """A classic journal entry changed: bring its mirror's snapshots up to date (snapshots.py)."""
+        row = self.db.one("SELECT id FROM positions WHERE legacy_trade_id = ?", (trade_id,))
+        if row is not None:
+            self._reconcile(row["id"])
+
+    def _reconcile(self, position_id: int) -> dict[str, Any] | None:
+        """Snapshots never decide whether a fill is recorded: a failure here is logged and shows
+        up in the data health view, and the fill stands."""
+        try:
+            return self.snapshots.reconcile(position_id)
+        except Exception as exc:          # noqa: BLE001 - market data can fail in many ways
+            log.warning("Snapshots for position %s could not be brought up to date: %s", position_id, exc)
+            return None
 
     # --- marks ---------------------------------------------------------------------
     def mark(self, pos: dict[str, Any]) -> dict[str, Any]:
@@ -206,16 +228,14 @@ class Desk:
                 add_execution(cur, pid, side=side, quantity=float(entry.get("quantity") or req["quantity"]),
                               price=float(entry["price"]), fees=float(entry.get("fees") or 0),
                               executed_at=entry.get("executed_at"), source="MANUAL", note=entry.get("note") or "")
-        self.take_snapshot(pid, "ENTRY" if entry else "PLAN", self._fill_day(pid, 0) if entry else None)
+        if entry:
+            self._reconcile(pid)
+        else:
+            try:
+                self.snapshots.take(pid, "PLAN")
+            except Exception as exc:      # noqa: BLE001
+                log.warning("Plan snapshot for position %s failed: %s", pid, exc)
         return self.view(pid)
-
-    def _fill_day(self, position_id: int, which: int) -> date | None:
-        """New York date of a position's fill (0 the first, -1 the last)."""
-        with self.db.tx() as cur:
-            pos = read(cur, position_id)
-        if not pos["executions"]:
-            return None
-        return datetime.fromisoformat(pos["executions"][which]["executed_at"]).astimezone(NY).date()
 
     def add_execution(self, position_id: int, req: dict[str, Any]) -> dict[str, Any]:
         with self.db.tx() as cur:
@@ -226,15 +246,22 @@ class Desk:
             if before["instrument_type"] == "STOCK" and before["ledger"]["fills"] == 0:
                 check_levels(before["direction"], float(req["price"]), before.get("invalidation_price"),
                              before.get("target_1"), before.get("target_2"))
-            led = add_execution(cur, position_id, side=req["side"], quantity=float(req["quantity"]),
-                                price=float(req["price"]), fees=float(req.get("fees") or 0),
-                                executed_at=req.get("executed_at"), source=req.get("source") or "MANUAL",
-                                note=req.get("note") or "")
-        if before["ledger"]["fills"] == 0:
-            self.take_snapshot(position_id, "ENTRY", self._fill_day(position_id, 0))
-        elif led.open_quantity == 0 and before["ledger"]["open_quantity"] > 0:
-            self.take_snapshot(position_id, "EXIT", self._fill_day(position_id, -1))
+            add_execution(cur, position_id, side=req["side"], quantity=req["quantity"], price=req["price"],
+                          fees=req.get("fees") or 0, executed_at=req.get("executed_at"),
+                          source=req.get("source") or "MANUAL", note=req.get("note") or "",
+                          external_id=req.get("external_id"))
+        self._reconcile(position_id)
         return self.view(position_id)
+
+    def correct(self, position_id: int, execution_id: int, changes: dict[str, Any], reason: str) -> dict[str, Any]:
+        """An audited correction of one fill (positions.correct_execution), then the snapshots that
+        depended on it (snapshots.py)."""
+        with self.db.tx() as cur:
+            done = correct_execution(cur, position_id, execution_id, changes, reason, "USER")
+        self._reconcile(position_id)
+        out = self.view(position_id)
+        out["correction"] = done
+        return out
 
     def cancel(self, position_id: int, note: str = "") -> dict[str, Any]:
         with self.db.tx() as cur:
@@ -255,13 +282,34 @@ class Desk:
         return self.view(position_id)
 
     # --- snapshots ---------------------------------------------------------------------------
-    def snapshot_values(self, symbol: str, leg: dict[str, Any] | None = None,
-                        as_of: date | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-        """What the market looked like now, or, for a fill recorded after the fact (`as_of` a past
-        date), at that day's close: indicators, trend and regime from the bars up to that day.
-        Option quotes and Greeks have no history here, so a past snapshot leaves them out."""
-        if as_of is not None and as_of < datetime.now(NY).date():
-            return self._past_snapshot_values(symbol, as_of)
+    def capture(self, pos: dict[str, Any], execution: dict[str, Any] | None) -> tuple[dict, dict, dict]:
+        """Values, raw details and provenance for a snapshot (snapshots.py). With no fill, or a fill
+        recorded within LIVE_WINDOW of when it happened, the market now; for a fill recorded later,
+        the market as of the last daily bar that had finished before it."""
+        leg = pos["legs"][0] if pos.get("legs") else None
+        now = datetime.now(timezone.utc)
+        executed = when(execution["executed_at"]) if execution else None
+        if executed is None or now - executed <= LIVE_WINDOW:
+            values, raw = self._live_values(pos["symbol"], leg)
+            stamp = now.isoformat(timespec="seconds")
+            return values, raw, {"method": "LIVE", "capture_timing": "CONTEMPORANEOUS", "uses_later_data": False,
+                                 "observation_cutoff": stamp, "captured_at": stamp, "origin": "desk"}
+        session = cutoff_session(executed)
+        values, raw = self._point_in_time_values(pos["symbol"], session)
+        if execution is not None and pos["instrument_type"] == "STOCK":
+            values["underlying_price"] = float(execution["price"])          # observed at the fill itself
+            raw["underlying_price_basis"] = "the fill price"
+        elif "underlying_price" in values:
+            raw["underlying_price_basis"] = "the last close before the fill"
+        used = values.get("data_timestamp")
+        cutoff = close_of(date.fromisoformat(used)) if used else close_of(session)
+        return values, raw, {"method": "PRIOR_BAR", "capture_timing": "RETROSPECTIVE",
+                             "uses_later_data": bool(when(cutoff) and when(cutoff) > executed),
+                             "observation_cutoff": cutoff, "captured_at": now.isoformat(timespec="seconds"),
+                             "origin": "desk", "session_cutoff": session.isoformat()}
+
+    def _live_values(self, symbol: str, leg: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """What the market looks like now."""
         values: dict[str, Any] = {"signal_engine_version": SIGNAL_ENGINE_VERSION, "data_source": self.market.info.mode}
         raw: dict[str, Any] = {"errors": [], "taken_at": now_iso()}
         try:
@@ -272,17 +320,13 @@ class Desk:
         try:
             df = self.market.enriched(symbol, 3)
             last = df.iloc[-1]
-            for col, key in (("rsi", "rsi_14"), ("macd", "macd"), ("macd_signal", "macd_signal"),
-                             ("macd_hist", "macd_histogram"), ("sma20", "sma_20"), ("sma50", "sma_50"),
-                             ("sma200", "sma_200"), ("ema20", "ema_20"), ("adx", "adx"), ("atr", "atr"),
-                             ("vol_ratio", "volume_ratio")):
+            for col, key in INDICATOR_KEYS:
                 values[key] = finite(last.get(col))
             values["structure_state"] = STATE_WORDS.get(int(last.get("struct_state", 0)), "range")
             values["data_timestamp"] = last["date"].strftime("%Y-%m-%d")
             if "bar_complete" in df.columns:
                 values["bar_status"] = "COMPLETE" if bool(last["bar_complete"]) else "PARTIAL"
-            raw["indicators"] = {k: values.get(k) for k in ("rsi_14", "macd", "macd_signal", "macd_histogram", "sma_20",
-                                                            "sma_50", "sma_200", "ema_20", "adx", "atr", "volume_ratio")}
+            raw["indicators"] = {k: values.get(k) for _, k in INDICATOR_KEYS}
         except (DataError, ValueError, KeyError, IndexError) as exc:
             raw["errors"].append(f"history: {exc}")
         for etf, key in (("SPY", "spy_price"), ("QQQ", "qqq_price")):
@@ -314,50 +358,54 @@ class Desk:
                 raw["errors"].append(f"{getattr(extra, '__name__', 'extra')}: {exc}")
         return values, raw
 
-    def _past_snapshot_values(self, symbol: str, as_of: date) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _point_in_time_values(self, symbol: str, session: date) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The market as of the close of `session` (or the last trading day before it), from
+        finished daily bars only: indicators, swing structure, SPY and QQQ, and the trend and
+        regime as the engines would have read them then. Option quotes and Greeks have no
+        history here and are left out."""
         values: dict[str, Any] = {"signal_engine_version": SIGNAL_ENGINE_VERSION, "data_source": self.market.info.mode,
                                   "bar_status": "COMPLETE"}
-        raw: dict[str, Any] = {"errors": [], "taken_at": now_iso(), "as_of": as_of.isoformat(),
-                               "note": "Recorded after the fact: the market as of the fill date's close."}
-        years = min(10.0, max(3.0, (datetime.now(NY).date() - as_of).days / 365 + 1.5))
+        raw: dict[str, Any] = {"errors": [], "taken_at": now_iso(), "as_of": session.isoformat(),
+                               "note": "Rebuilt after the fact from the last daily bar that had finished before the fill."}
+        years = min(10.0, max(3.0, (datetime.now(NY).date() - session).days / 365 + 1.5))
         try:
-            df = self.market.enriched(symbol, years)
-            df = df[df["date"] <= pd.Timestamp(as_of)]
+            df = complete_only(self.market.enriched(symbol, years))
+            df = df[df["date"] <= pd.Timestamp(session)]
             last = df.iloc[-1]
             values["underlying_price"] = finite(last["close"])
-            for col, key in (("rsi", "rsi_14"), ("macd", "macd"), ("macd_signal", "macd_signal"),
-                             ("macd_hist", "macd_histogram"), ("sma20", "sma_20"), ("sma50", "sma_50"),
-                             ("sma200", "sma_200"), ("ema20", "ema_20"), ("adx", "adx"), ("atr", "atr"),
-                             ("vol_ratio", "volume_ratio")):
+            for col, key in INDICATOR_KEYS:
                 values[key] = finite(last.get(col))
             values["structure_state"] = STATE_WORDS.get(int(last.get("struct_state", 0)), "range")
             values["data_timestamp"] = last["date"].strftime("%Y-%m-%d")
         except (DataError, ValueError, KeyError, IndexError) as exc:
             raw["errors"].append(f"history: {exc}")
+        as_of = date.fromisoformat(values["data_timestamp"]) if values.get("data_timestamp") else session
         for etf, key in (("SPY", "spy_price"), ("QQQ", "qqq_price")):
             try:
-                b = self.market.bars(etf, years)
+                b = complete_only(self.market.bars(etf, years))
                 b = b[b["date"] <= pd.Timestamp(as_of)]
                 values[key] = finite(b["close"].iloc[-1])
             except (DataError, IndexError) as exc:
                 raw["errors"].append(f"{etf}: {exc}")
-        for extra in self.snapshot_extras:
-            if len(inspect.signature(extra).parameters) < 3:
-                continue                          # an extra that only knows about now
-            try:
-                more = extra(symbol, values, as_of)
-                raw.setdefault("analysis", {}).update(more.pop("_raw", {}))
-                values.update(more)
-            except (DataError, ValueError, KeyError) as exc:
-                raw["errors"].append(f"{getattr(extra, '__name__', 'extra')}: {exc}")
+        if values.get("data_timestamp"):
+            for extra in self.snapshot_extras:
+                if len(inspect.signature(extra).parameters) < 3:
+                    continue                          # an extra that only knows about now
+                try:
+                    more = extra(symbol, values, as_of)
+                    raw.setdefault("analysis", {}).update(more.pop("_raw", {}))
+                    values.update(more)
+                except (DataError, ValueError, KeyError) as exc:
+                    raw["errors"].append(f"{getattr(extra, '__name__', 'extra')}: {exc}")
         return values, raw
 
-    def take_snapshot(self, position_id: int, snapshot_type: str = "REVIEW", as_of: date | None = None) -> dict[str, Any]:
-        with self.db.tx() as cur:
-            pos = read(cur, position_id)
-        values, raw = self.snapshot_values(pos["symbol"], pos["legs"][0] if pos["legs"] else None, as_of)
-        with self.db.tx() as cur:
-            sid = add_snapshot(cur, position_id, snapshot_type, values, raw,
-                               datetime.combine(as_of, datetime.min.time().replace(hour=16), tzinfo=NY).isoformat()
-                               if as_of is not None and as_of < datetime.now(NY).date() else None)
-        return {"id": sid, "snapshot_type": snapshot_type, **values, "errors": raw["errors"]}
+    def take_snapshot(self, position_id: int, snapshot_type: str = "REVIEW") -> dict[str, Any]:
+        return self.snapshots.take(position_id, snapshot_type)
+
+    def backfill_snapshots(self, dry_run: bool = False, upgrade_hindsight: bool = True) -> dict[str, Any]:
+        return self.snapshots.backfill(upgrade_hindsight=upgrade_hindsight, dry_run=dry_run)
+
+
+INDICATOR_KEYS = (("rsi", "rsi_14"), ("macd", "macd"), ("macd_signal", "macd_signal"), ("macd_hist", "macd_histogram"),
+                  ("sma20", "sma_20"), ("sma50", "sma_50"), ("sma200", "sma_200"), ("ema20", "ema_20"), ("adx", "adx"),
+                  ("atr", "atr"), ("vol_ratio", "volume_ratio"))
