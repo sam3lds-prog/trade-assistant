@@ -733,7 +733,8 @@ class Analyst:
         risks = [exposure(v, None)["risk_to_invalidation"] for v in open_views]
         open_risk = float(sum(r for r in risks if r is not None)) if open_views else None
         daily = self.daily_loss(views) if self.svc.settings.features.get("portfolio_risk") else None
-        found.extend(alert_rules.account_alerts(daily, open_risk, s.account_size * s.max_open_risk_pct / 100.0))
+        found.extend(alert_rules.account_alerts(daily, open_risk, s.account_size * s.max_open_risk_pct / 100.0,
+                                                sum(1 for r in risks if r is None)))
         out = {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "alerts": alert_rules.sort_alerts(found),
                "open_positions": len(open_views), "errors": errors,
                "note": "Alerts only: nothing is bought, sold or sent. You decide what to do."}

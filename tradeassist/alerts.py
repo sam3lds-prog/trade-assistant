@@ -10,6 +10,8 @@ any way; the app lists the alerts and you decide.
     EARNINGS_SOON      earnings within three trading days for a stock held
     DAILY_LOSS         today's loss has reached three quarters of the daily stop, or the stop
     OPEN_RISK          risk to invalidation across positions is above the limit
+    OPEN_RISK_UNKNOWN  some positions' risk could not be measured, so the limit check is incomplete
+    DAILY_LOSS_UNKNOWN some positions' change today could not be measured
     PROVISIONAL        a trend alert that rests on today's unfinished bar (shown, marked so)
 """
 
@@ -69,16 +71,26 @@ def position_alerts(view: dict[str, Any], trend: dict[str, Any] | None, earnings
     return out
 
 
-def account_alerts(daily: dict[str, Any], open_risk: float | None, risk_limit: float | None) -> list[dict[str, Any]]:
+def account_alerts(daily: dict[str, Any], open_risk: float | None, risk_limit: float | None,
+                   open_risk_unknown: int = 0) -> list[dict[str, Any]]:
     out = []
-    if daily and daily["status"] != "OK":
-        out.append(_alert("DAILY_LOSS", "fail" if daily["status"] == "STOP" else "warn", daily["text"]))
-    if daily and daily.get("unknown"):
+    loss = daily.get("loss_status", daily.get("status")) if daily else None
+    if loss in ("STOP", "WARN"):
+        out.append(_alert("DAILY_LOSS", "fail" if loss == "STOP" else "warn", daily["text"]))
+    if daily and daily.get("coverage_status", "COMPLETE") != "COMPLETE":
+        missing = daily.get("missing") or [{"description": d, "reason": "unknown"} for d in daily.get("unknown", [])]
         out.append(_alert("DAILY_LOSS_UNKNOWN", "warn", "Today's change is not counted toward the daily stop for "
-                                                        + "; ".join(daily["unknown"]) + ": no previous close was found."))
+                                                        + "; ".join(f"{m['description']} ({m['reason']})" for m in missing)
+                                                        + ", so it is not known whether the account is within the stop."))
     if open_risk is not None and risk_limit and open_risk > risk_limit:
         out.append(_alert("OPEN_RISK", "fail", f"Risk to invalidation across open positions is ${open_risk:,.0f}, above the "
                                                f"${risk_limit:,.0f} limit."))
+    elif open_risk_unknown:
+        n = open_risk_unknown
+        out.append(_alert("OPEN_RISK_UNKNOWN", "warn", f"Risk to invalidation could not be measured for {n} open "
+                                                       f"position{'s' if n != 1 else ''} (no current price, or a stock "
+                                                       "position without an invalidation price), so it is not known "
+                                                       "whether open risk is inside the limit."))
     return out
 
 

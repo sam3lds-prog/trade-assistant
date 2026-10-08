@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
@@ -36,10 +36,40 @@ OPENING = {"LONG": ("BUY",), "SHORT": ("SELL_SHORT", "SELL")}
 CLOSING = {"LONG": ("SELL",), "SHORT": ("BUY_TO_COVER", "BUY")}
 OPTION_MULTIPLIER = 100
 EPS = 1e-9
+MIN_QUANTITY = 1e-6                    # smallest fill recorded: well above EPS, below any broker's fractional share
+CLOSED_MESSAGE = "This position is already closed. Create a new position for a new trade."
+# How a position's status may change when fills are added. A closed or cancelled position is finished:
+# a new trade in the same stock is a new position with its own id. Fixing a mistake in a finished
+# position's history goes through the audited correction workflow (positions.correct_execution).
+TRANSITIONS = {
+    "PLANNED": ("OPEN", "CLOSED", "CANCELLED"),
+    "OPEN": ("PARTIALLY_CLOSED", "CLOSED"),
+    "PARTIALLY_CLOSED": ("CLOSED",),
+    "CLOSED": (),
+    "CANCELLED": (),
+}
 
 
 class PositionError(ValueError):
     """A request about a position that cannot be carried out; the message is shown to the user."""
+
+
+def number(name: str, value: Any, *, above: float | None = None, minimum: float | None = None) -> float:
+    """`value` as a finite float, or a PositionError naming the field. NaN and infinity are never
+    accepted: a single one would turn every total it touches into nonsense."""
+    if isinstance(value, bool):
+        raise PositionError(f"{name} must be a number")
+    try:
+        f = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PositionError(f"{name} must be a number") from exc
+    if not math.isfinite(f):
+        raise PositionError(f"{name} must be a finite number")
+    if above is not None and not f > above:
+        raise PositionError(f"{name} must be above {above:g}")
+    if minimum is not None and f < minimum:
+        raise PositionError(f"{name} cannot be below {minimum:g}")
+    return f
 
 
 def now_iso() -> str:
@@ -99,6 +129,9 @@ class Ledger:
     opened_at: str | None = None
     closed_at: str | None = None
     fills: int = 0
+    # Fills that came after the position had closed completely. Only older databases can hold these
+    # (versions before 2.1.1 allowed it); they are reported, never created now.
+    lifecycle_issues: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def sign(self) -> int:
@@ -136,20 +169,38 @@ def classify(direction: str, side: str) -> str:
     raise PositionError(f"A {direction.lower()} position takes {want}, not {side}")
 
 
-def account(direction: str, multiplier: float, fills: Iterable[Fill]) -> Ledger:
-    """Replay fills in order and return the position's accounts. Raises PositionError if a fill
-    would close more than is open."""
+def account(direction: str, multiplier: float, fills: Iterable[Fill], allow_reopen: bool = False) -> Ledger:
+    """Replay fills in order and return the position's accounts.
+
+    Raises PositionError if a fill would close more than is open, if any number is not finite,
+    or if a fill comes after the position has closed completely. With `allow_reopen` (reading
+    an older database that already holds such fills) those fills are accounted as before and
+    listed in `lifecycle_issues` instead."""
     if direction not in DIRECTIONS:
         raise PositionError("direction must be LONG or SHORT")
+    multiplier = number("multiplier", multiplier, above=0)
     led = Ledger(direction=direction, multiplier=multiplier)
     open_cost = 0.0                       # sum of price x quantity for the open quantity, at average cost
     entry_value = exit_value = 0.0
     for f in fills:
-        if not (f.quantity > 0 and math.isfinite(f.quantity)):
+        if not (isinstance(f.quantity, (int, float)) and math.isfinite(f.quantity) and f.quantity > 0):
             raise PositionError("Every execution needs a quantity above zero")
-        if not (f.price >= 0 and math.isfinite(f.price)) or f.fees < 0:
+        if f.quantity < MIN_QUANTITY:
+            raise PositionError(f"Quantities below {MIN_QUANTITY:g} are too small to record")
+        if not (isinstance(f.price, (int, float)) and math.isfinite(f.price)):
+            raise PositionError("Every execution needs a finite price")
+        if not (isinstance(f.fees, (int, float)) and math.isfinite(f.fees)):
+            raise PositionError("Fees must be a finite number")
+        if f.price < 0 or f.fees < 0:
             raise PositionError("Prices cannot be negative, and nor can fees")
         kind = classify(direction, f.side)
+        if led.opened_quantity > EPS and led.open_quantity <= EPS:
+            # The position had closed completely before this fill.
+            if not allow_reopen:
+                raise PositionError(CLOSED_MESSAGE)
+            if kind == "OPEN":
+                led.lifecycle_issues.append({"problem": "REOPENED_AFTER_CLOSE", "execution_id": f.id,
+                                             "executed_at": f.executed_at, "closed_at": led.closed_at})
         led.fills += 1
         led.fees += f.fees
         if kind == "OPEN":
@@ -181,6 +232,10 @@ def account(direction: str, multiplier: float, fills: Iterable[Fill]) -> Ledger:
     led.average_exit_price = exit_value / led.closed_quantity if led.closed_quantity > EPS else None
     if led.open_quantity <= EPS:
         led.cost_basis = None if led.fills == 0 else led.cost_basis
+    figures = (led.realized_pnl, led.gross_realized, led.fees, led.open_quantity, led.cost_basis,
+               led.average_entry_price, led.average_exit_price)
+    if any(v is not None and not math.isfinite(v) for v in figures):
+        raise PositionError("These numbers are too large to account for accurately")
     return led
 
 
@@ -223,11 +278,18 @@ def _row(cur: sqlite3.Cursor, position_id: int) -> dict[str, Any]:
     return dict(zip(names, row))
 
 
-def recompute(cur: sqlite3.Cursor, position_id: int) -> Ledger:
-    """Recalculate a position's stored figures from its executions."""
+def recompute(cur: sqlite3.Cursor, position_id: int, correction: bool = False) -> Ledger:
+    """Recalculate a position's stored figures from its executions. A change of status that
+    TRANSITIONS does not allow (a closed position opening again, say) is refused unless this is
+    an audited correction."""
     pos = _row(cur, position_id)
-    led = account(pos["direction"], pos["multiplier"], _fills(cur, position_id))
+    led = account(pos["direction"], pos["multiplier"], _fills(cur, position_id), allow_reopen=True)
     status = led.status(cancelled=pos["status"] == "CANCELLED")
+    if not correction and status != pos["status"] and status not in TRANSITIONS.get(pos["status"], ()):
+        if pos["status"] == "CLOSED":
+            raise PositionError(CLOSED_MESSAGE)
+        raise PositionError(f"A position that is {pos['status'].lower().replace('_', ' ')} cannot become "
+                            f"{status.lower().replace('_', ' ')}")
     cur.execute("UPDATE positions SET status = ?, open_quantity = ?, average_entry_price = ?, average_exit_price = ?, "
                 "realized_pnl = ?, fees = ?, opened_at = ?, closed_at = ?, updated_at = ? WHERE id = ?",
                 (status, led.open_quantity, led.average_entry_price, led.average_exit_price, led.realized_pnl,
@@ -258,8 +320,9 @@ def create(cur: sqlite3.Cursor, *, symbol: str, instrument_type: str, direction:
         raise PositionError("Option spreads are not supported yet; record each leg as its own position for now")
     if direction not in DIRECTIONS:
         raise PositionError("direction must be LONG or SHORT")
-    if not (quantity and quantity > 0 and math.isfinite(quantity)):
-        raise PositionError("quantity must be above zero")
+    quantity = number("quantity", quantity, above=0)
+    if quantity < MIN_QUANTITY:
+        raise PositionError(f"Quantities below {MIN_QUANTITY:g} are too small to record")
     if instrument_type == "OPTION":
         if option is None:
             raise PositionError("An option position needs its type, strike and expiration")
@@ -267,12 +330,20 @@ def create(cur: sqlite3.Cursor, *, symbol: str, instrument_type: str, direction:
             raise PositionError("Selling options to open is not supported yet: only bought calls and puts")
         if option.option_type.upper() not in ("CALL", "PUT"):
             raise PositionError("option_type must be CALL or PUT")
+        option.strike = number("strike", option.strike, above=0)
+        option.multiplier = number("contract multiplier", option.multiplier, above=0)
         if float(quantity) != int(quantity):
             raise PositionError("Options trade in whole contracts")
     for name, value in (("invalidation_price", invalidation_price), ("target_1", target_1), ("target_2", target_2),
                         ("risk_amount", risk_amount), ("initial_risk_per_unit", initial_risk_per_unit)):
-        if value is not None and not (math.isfinite(value) and value > 0):
-            raise PositionError(f"{name} must be a positive number")
+        if value is not None:
+            try:
+                number(name, value, above=0)
+            except PositionError as exc:
+                raise PositionError(f"{name} must be a positive number") from exc
+    if intended_horizon is not None and (isinstance(intended_horizon, bool) or not isinstance(intended_horizon, int)
+                                         or not 1 <= intended_horizon <= 1000):
+        raise PositionError("intended_horizon must be a whole number of trading days from 1 to 1000")
     mult = option.multiplier if instrument_type == "OPTION" and option else 1.0
     stamp = created_at or now_iso()
     cur.execute(
@@ -293,23 +364,36 @@ def create(cur: sqlite3.Cursor, *, symbol: str, instrument_type: str, direction:
 
 def add_execution(cur: sqlite3.Cursor, position_id: int, *, side: str, quantity: float, price: float,
                   fees: float = 0.0, executed_at: str | None = None, source: str = "MANUAL", note: str = "") -> Ledger:
+    """Record one fill. Nothing is written unless the whole history, with this fill in its place,
+    still accounts: no closing more than is open, no fill after the position has closed, every
+    number finite. A closed or cancelled position takes no more fills."""
     pos = _row(cur, position_id)
     if pos["status"] == "CANCELLED":
         raise PositionError("This position was cancelled")
-    side, source = side.upper(), source.upper()
+    if pos["status"] == "CLOSED":
+        raise PositionError(CLOSED_MESSAGE)
+    side, source = str(side).upper(), str(source).upper()
     if side not in SIDES:
         raise PositionError(f"side must be one of {', '.join(SIDES)}")
     if source not in SOURCES:
         raise PositionError(f"source must be one of {', '.join(SOURCES)}")
-    if pos["instrument_type"] == "OPTION" and float(quantity) != int(quantity):
+    quantity = number("quantity", quantity, above=0)
+    price = number("price", price, minimum=0)
+    fees = number("fees", 0.0 if fees is None else fees, minimum=0)
+    if pos["instrument_type"] == "OPTION" and quantity != int(quantity):
         raise PositionError("Options trade in whole contracts")
     stamp = parse_time(executed_at)
-    candidate = Fill(side, float(quantity), float(price), float(fees or 0.0), stamp)
-    fills = sorted(_fills(cur, position_id) + [candidate], key=lambda f: (f.executed_at, f.id or 10**12))
-    account(pos["direction"], pos["multiplier"], fills)          # raises before anything is written
+    candidate = Fill(side, quantity, price, fees, stamp)
+    existing = _fills(cur, position_id)
+    before = account(pos["direction"], pos["multiplier"], existing, allow_reopen=True)
+    fills = sorted(existing + [candidate], key=lambda f: (f.executed_at, f.id or 10**12))
+    after = account(pos["direction"], pos["multiplier"], fills, allow_reopen=True)   # raises before anything is written
+    if len(after.lifecycle_issues) > len(before.lifecycle_issues):
+        raise PositionError("That fill would close the position completely before a later fill opens it again, and a "
+                            "closed position is finished. Record a new trade as a new position, or correct the history.")
     cur.execute("INSERT INTO executions (position_id, side, quantity, price, fees, executed_at, source, note, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (position_id, side, float(quantity), float(price), float(fees or 0.0), stamp, source, note.strip(), now_iso()))
+                (position_id, side, quantity, price, fees, stamp, source, str(note or "").strip(), now_iso()))
     return recompute(cur, position_id)
 
 
@@ -332,8 +416,13 @@ def update_plan(cur: sqlite3.Cursor, position_id: int, changes: dict[str, Any]) 
         if key not in PLAN_FIELDS:
             raise PositionError(f"{key} cannot be changed")
         if key in ("invalidation_price", "target_1", "target_2", "risk_amount", "initial_risk_per_unit") and value is not None:
-            if not (math.isfinite(float(value)) and float(value) > 0):
-                raise PositionError(f"{key} must be a positive number")
+            try:
+                value = number(key, value, above=0)
+            except PositionError as exc:
+                raise PositionError(f"{key} must be a positive number") from exc
+        if key == "intended_horizon" and value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                                                or not 1 <= value <= 1000):
+            raise PositionError("intended_horizon must be a whole number of trading days from 1 to 1000")
         sets.append(f"{key} = ?")
         values.append(value.strip() if isinstance(value, str) else value)
     if sets:
@@ -379,7 +468,8 @@ def read(cur: sqlite3.Cursor, position_id: int) -> dict[str, Any]:
         snaps.append(snap)
     pos["snapshots"] = snaps
     led = account(pos["direction"], pos["multiplier"], [Fill(e["side"], e["quantity"], e["price"], e["fees"],
-                                                              e["executed_at"], e["id"]) for e in pos["executions"]])
+                                                              e["executed_at"], e["id"]) for e in pos["executions"]],
+                  allow_reopen=True)
     pos["ledger"] = asdict(led)
     pos["ledger"]["initial_risk"] = initial_risk(pos, led)
     return pos

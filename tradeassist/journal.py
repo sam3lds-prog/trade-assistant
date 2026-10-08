@@ -8,6 +8,7 @@ against results.
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from datetime import datetime, timezone
 from typing import Any
@@ -23,6 +24,18 @@ TARGET_FILL_RATE = 0.70
 
 class JournalError(ValueError):
     pass
+
+
+def _finite(name: str, value: Any) -> float:
+    """The journal's numbers are prices and seconds the user typed: refuse NaN and infinity here
+    too, not only in the HTTP layer, so nothing can reach the ledger without being checked."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError) as exc:
+        raise JournalError(f"{name} must be a number") from exc
+    if not math.isfinite(f):
+        raise JournalError(f"{name} must be a finite number")
+    return f
 
 
 def _now() -> str:
@@ -45,8 +58,12 @@ class Journal:
                expiration: str, contracts: int, thesis: str, planned_limit: float, max_limit: float,
                plan: dict[str, Any], quote: dict[str, Any], scorecard: list[dict[str, Any]],
                signals: list[Any], overrides: list[str]) -> int:
-        if contracts < 1:
-            raise JournalError("contracts must be at least 1")
+        if isinstance(contracts, bool) or not isinstance(contracts, int) or contracts < 1:
+            raise JournalError("contracts must be a whole number, at least 1")
+        strike = _finite("strike", strike)
+        for name, value in (("planned limit", planned_limit), ("most you will pay", max_limit)):
+            if value is not None and _finite(name, value) <= 0:
+                raise JournalError(f"{name} must be above zero")
         with self.db.tx() as cur:
             cur.execute(
                 "INSERT INTO trades (created_at, data_source, symbol, option_symbol, option_type, strike, "
@@ -87,6 +104,9 @@ class Journal:
         trade = self.get(trade_id)
         if side not in ("buy", "sell"):
             raise JournalError("side must be buy or sell")
+        bid, ask, limit_price = _finite("bid", bid), _finite("ask", ask), _finite("limit price", limit_price)
+        if seconds_to_fill is not None and _finite("seconds to fill", seconds_to_fill) < 0:
+            raise JournalError("seconds to fill cannot be negative")
         if ask < bid or ask <= 0 or limit_price <= 0:
             raise JournalError("Enter the bid, ask and limit price you saw when you placed the order")
         if side == "buy" and limit_price > ask + 0.005:
@@ -131,6 +151,7 @@ class Journal:
         trade = self.get(trade_id)
         if trade["status"] != "open":
             raise JournalError("Only an open trade can be closed")
+        exit_price = _finite("exit price", exit_price)
         if exit_price < 0:
             raise JournalError("exit price cannot be negative")
         pnl = (exit_price - trade["entry_price"]) * 100 * trade["contracts"]

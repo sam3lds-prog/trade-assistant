@@ -380,13 +380,25 @@ class TradeAssistant:
                             "filings point to a report before it. Confirm the date with the company, then "
                             "override this if you are sure.", "overridable": True})
         loss_cap = self.settings.account_size * self.settings.daily_loss_stop_pct / 100.0
-        realized, counted_as = self.loss_today()
-        if realized <= -loss_cap:
+        today = self.daily_loss_status()
+        realized, counted_as = today["counted"], today["counted_as"]
+        risk_notes: list[dict[str, Any]] = []
+        if today["loss_status"] == "STOP":
             violations.append({"key": "daily_loss", "label": "Daily loss stop",
                                "value": f"${-realized:,.0f} lost today ({counted_as})",
                                "text": f"Your rule is to stop for the day after losing "
                                        f"{self.settings.daily_loss_stop_pct:g}% (${loss_cap:,.0f}).",
                                "overridable": True})
+        elif today["coverage_status"] != "COMPLETE":
+            # A partial measurement is not a pass: say so, and with INCOMPLETE_RISK_POLICY=BLOCK treat it
+            # as a limit broken until it is overridden on purpose.
+            note = {"key": "daily_loss_incomplete", "label": "Daily loss not fully measured",
+                    "value": f"{today['positions_evaluated']} of {today['positions']} positions measured",
+                    "text": today["text"], "overridable": True}
+            if self.settings.incomplete_risk_policy == "BLOCK":
+                violations.append(note)
+            else:
+                risk_notes.append(note)
         ask = priced["contract"].get("ask")
         if ask and max_limit > ask + 1e-9:
             violations.append({"key": "above_ask", "label": "Limit above the ask", "value": f"${max_limit:.2f}",
@@ -410,7 +422,9 @@ class TradeAssistant:
             "max_loss_if_stop_holds": max_limit * stop_loss_pct / 100 * 100 * contracts,
         }
         out = {"priced": priced, "violations": violations, "blocking": blocking, "plan": plan,
-               "can_save": not blocking, "ignored_overrides": unknown, "saved_id": None}
+               "can_save": not blocking, "ignored_overrides": unknown, "saved_id": None,
+               "risk_notes": risk_notes, "within_limits": not violations and not risk_notes,
+               "incomplete_risk_policy": self.settings.incomplete_risk_policy}
         if save:
             if blocking:
                 raise RequestError("This ticket breaks a limit and cannot be saved: " +
@@ -578,20 +592,34 @@ class TradeAssistant:
                              "Written summaries of filings: open the linked filings to read them"],
         })
 
-    def loss_today(self) -> tuple[float, str]:
-        """Today's result for the daily loss stop. With portfolio risk on, it covers every position
-        and follows DAILY_LOSS_MODE; otherwise it is the option journal's closed trades."""
+    def daily_loss_status(self) -> dict[str, Any]:
+        """Today's result for the daily loss stop, with how much of it could be measured. With
+        portfolio risk on, it covers every position and follows DAILY_LOSS_MODE (portfolio.daily_loss);
+        otherwise it is the option journal's closed trades, which are always fully known."""
         analyst = getattr(self, "analyst", None)
         if analyst is not None and self.settings.features.get("portfolio_risk"):
             try:
-                d = analyst.daily_loss()
+                d = dict(analyst.daily_loss())
                 how = "closed and open" if d["mode"] == "REALIZED_PLUS_UNREALIZED" else "closed trades"
-                if d["unknown"]:
-                    how += f"; {len(d['unknown'])} position{'s' if len(d['unknown']) != 1 else ''} without a previous close not counted"
-                return d["counted"], how
+                if d["missing"]:
+                    n = len(d["missing"])
+                    how += f"; {n} position{'s' if n != 1 else ''} could not be measured and {'are' if n != 1 else 'is'} not counted"
+                d["counted_as"] = how
+                return d
             except (DataError, ValueError) as exc:
                 log.warning("Daily loss from positions unavailable, using the journal: %s", exc)
-        return self.journal.realized_today(), "closed trades"
+        realized = self.journal.realized_today()
+        cap = self.settings.account_size * self.settings.daily_loss_stop_pct / 100.0
+        loss = "STOP" if realized <= -cap else "WARN" if realized <= -0.75 * cap else "OK"
+        return {"mode": "REALIZED_ONLY", "counted": realized, "known_total": realized, "counted_as": "closed trades",
+                "loss_status": loss, "coverage_status": "COMPLETE", "status": loss, "positions": 0,
+                "positions_evaluated": 0, "missing": [], "unknown": [],
+                "text": f"Closed option-journal trades today: {'+' if realized >= 0 else '-'}${abs(realized):,.0f}."}
+
+    def loss_today(self) -> tuple[float, str]:
+        """Today's measured result and what it counts (see daily_loss_status)."""
+        d = self.daily_loss_status()
+        return d["counted"], d["counted_as"]
 
     def regime(self) -> dict[str, Any]:
         try:
