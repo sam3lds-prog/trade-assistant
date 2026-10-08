@@ -87,6 +87,47 @@ class PlanUpdate(Strict):
     notes: str | None = None
 
 
+class AdjustmentCreate(Strict):
+    kind: Literal["BORROW_FEE", "BORROW_RATE", "DIVIDEND_OWED", "DIVIDEND_RECEIVED", "CASH_ADJUSTMENT", "SPLIT"]
+    amount: float | None = None                     # dollars; negative is a cost
+    effective_at: str | None = None
+    rate_pct: float | None = Field(None, gt=0, le=1000)
+    quantity: float | None = Field(None, gt=0)
+    per_share: float | None = Field(None, gt=0)
+    ratio: float | None = Field(None, gt=0, le=1000)
+    period_start: str | None = None
+    period_end: str | None = None
+    note: str = ""
+    source: Literal["MANUAL", "IMPORT", "ROBINHOOD"] = "MANUAL"
+    external_id: str | None = Field(None, min_length=1, max_length=200)
+
+
+class Void(Strict):
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class OptionExpire(Strict):
+    underlying_price: float | None = Field(None, gt=0)
+    reason: str = ""
+
+
+class OptionExercise(Strict):
+    underlying_price: float | None = Field(None, gt=0)
+    quantity: int | None = Field(None, ge=1)
+    executed_at: str | None = None
+    apply_to_position_id: int | None = None
+    reason: str = ""
+
+
+class OptionAdjust(Strict):
+    effective_at: str
+    new_strike: float = Field(..., gt=0)
+    new_multiplier: float = Field(..., gt=0)
+    quantity_factor: float = Field(1.0, gt=0)
+    new_option_symbol: str | None = None
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
 class SnapshotBackfill(Strict):
     dry_run: bool = False
     upgrade_hindsight: bool = True
@@ -453,6 +494,31 @@ def build_router(svc: Any) -> APIRouter:
         with svc.db.tx() as cur:
             read(cur, position_id)                       # 400 if there is no such position
             return clean({"position_id": position_id, "corrections": corrections(cur, position_id)})
+
+    @router.post("/positions/{position_id}/adjustments")
+    def add_adjustment(position_id: int, req: AdjustmentCreate):
+        need("unified_positions")
+        return clean(desk.add_adjustment(position_id, req.model_dump()))
+
+    @router.post("/positions/{position_id}/adjustments/{adjustment_id}/void")
+    def void_adjustment(position_id: int, adjustment_id: int, req: Void):
+        need("unified_positions")
+        return clean(desk.void_adjustment(position_id, adjustment_id, req.reason))
+
+    @router.post("/positions/{position_id}/option/expire")
+    def expire_option(position_id: int, req: OptionExpire):
+        need("unified_positions")
+        return clean(desk.expire_option(position_id, req.model_dump()))
+
+    @router.post("/positions/{position_id}/option/exercise")
+    def exercise_option(position_id: int, req: OptionExercise):
+        need("unified_positions")
+        return clean(desk.exercise_option(position_id, req.model_dump()))
+
+    @router.post("/positions/{position_id}/option/adjust")
+    def adjust_option(position_id: int, req: OptionAdjust):
+        need("unified_positions")
+        return clean(desk.adjust_option(position_id, req.model_dump()))
 
     @router.post("/snapshots/backfill")
     def backfill_snapshots(req: SnapshotBackfill):

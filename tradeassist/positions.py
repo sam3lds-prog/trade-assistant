@@ -263,10 +263,47 @@ def initial_risk(pos: dict[str, Any], led: Ledger) -> float | None:
 
 # --- storage ----------------------------------------------------------------------------------
 
-def _fills(cur: sqlite3.Cursor, position_id: int) -> list[Fill]:
+def _raw_fills(cur: sqlite3.Cursor, position_id: int) -> list[Fill]:
     rows = cur.execute("SELECT id, side, quantity, price, fees, executed_at FROM executions WHERE position_id = ? "
                        "ORDER BY executed_at, id", (position_id,)).fetchall()
     return [Fill(r[1], r[2], r[3], r[4], r[5], r[0]) for r in rows]
+
+
+def _fills(cur: sqlite3.Cursor, position_id: int) -> list[Fill]:
+    """The position's fills in today's units: splits and contract adjustments applied (unit_adjustments)."""
+    return adjusted_fills(_raw_fills(cur, position_id), unit_adjustments(cur, position_id))
+
+
+def unit_adjustments(cur: sqlite3.Cursor, position_id: int) -> list[dict[str, Any]]:
+    """Changes of unit that apply to fills before they happened: a stock split (ratio r: r times
+    the shares at 1/r of the price) or an option contract adjustment (f times the contracts, each
+    worth old multiplier / (f x new multiplier) of the old price). The recorded fills are never
+    changed; these are applied when they are replayed."""
+    out: list[dict[str, Any]] = []
+    if _has_table(cur, "position_adjustments"):
+        for r in cur.execute("SELECT id, effective_at, ratio FROM position_adjustments WHERE position_id = ? AND kind = 'SPLIT' "
+                             "AND voided_at IS NULL ORDER BY effective_at, id", (position_id,)).fetchall():
+            out.append({"kind": "SPLIT", "id": r[0], "effective_at": r[1], "quantity_factor": r[2], "price_factor": 1.0 / r[2]})
+    if _has_table(cur, "option_events"):
+        for r in cur.execute("SELECT id, event_at, previous_json, new_json FROM option_events WHERE position_id = ? AND "
+                             "event = 'CONTRACT_ADJUSTED' ORDER BY event_at, id", (position_id,)).fetchall():
+            before, after = json.loads(r[2]), json.loads(r[3])
+            f = float(after.get("quantity_factor") or 1.0)
+            out.append({"kind": "CONTRACT_ADJUSTED", "id": r[0], "effective_at": r[1], "quantity_factor": f,
+                        "price_factor": float(before["multiplier"]) / (f * float(after["multiplier"]))})
+    return sorted(out, key=lambda a: a["effective_at"])
+
+
+def adjusted_fills(fills: Iterable[Fill], adjustments: Sequence[dict[str, Any]]) -> list[Fill]:
+    out = []
+    for f in fills:
+        qf = pf = 1.0
+        for a in adjustments:
+            if f.executed_at < a["effective_at"]:
+                qf *= a["quantity_factor"]
+                pf *= a["price_factor"]
+        out.append(f if qf == 1.0 and pf == 1.0 else Fill(f.side, f.quantity * qf, f.price * pf, f.fees, f.executed_at, f.id))
+    return out
 
 
 def _row(cur: sqlite3.Cursor, position_id: int) -> dict[str, Any]:
@@ -404,9 +441,10 @@ def add_execution(cur: sqlite3.Cursor, position_id: int, *, side: str, quantity:
         raise PositionError("Options trade in whole contracts")
     stamp = parse_time(executed_at)
     candidate = Fill(side, quantity, price, fees, stamp)
-    existing = _fills(cur, position_id)
-    before = account(pos["direction"], pos["multiplier"], existing, allow_reopen=True)
-    fills = sorted(existing + [candidate], key=lambda f: (f.executed_at, f.id or 10**12))
+    raw = _raw_fills(cur, position_id)
+    units = unit_adjustments(cur, position_id)
+    before = account(pos["direction"], pos["multiplier"], adjusted_fills(raw, units), allow_reopen=True)
+    fills = adjusted_fills(sorted(raw + [candidate], key=lambda f: (f.executed_at, f.id or 10**12)), units)
     after = account(pos["direction"], pos["multiplier"], fills, allow_reopen=True)   # raises before anything is written
     if len(after.lifecycle_issues) > len(before.lifecycle_issues):
         raise PositionError("That fill would close the position completely before a later fill opens it again, and a "
@@ -492,12 +530,13 @@ def correct_execution(cur: sqlite3.Cursor, position_id: int, execution_id: int, 
     previous = {k: row[k] for k in CORRECTABLE}
     if new == previous:
         raise PositionError("Those are the values already recorded")
-    fills_before = _fills(cur, position_id)
-    led_before = account(pos["direction"], pos["multiplier"], fills_before, allow_reopen=True)
+    raw = _raw_fills(cur, position_id)
+    units = unit_adjustments(cur, position_id)
+    led_before = account(pos["direction"], pos["multiplier"], adjusted_fills(raw, units), allow_reopen=True)
     fills_after = sorted([Fill(new["side"], new["quantity"], new["price"], new["fees"], new["executed_at"], f.id)
-                          if f.id == execution_id else f for f in fills_before],
+                          if f.id == execution_id else f for f in raw],
                          key=lambda f: (f.executed_at, f.id or 10**12))
-    led_after = account(pos["direction"], pos["multiplier"], fills_after, allow_reopen=True)
+    led_after = account(pos["direction"], pos["multiplier"], adjusted_fills(fills_after, units), allow_reopen=True)
     if len(led_after.lifecycle_issues) > len(led_before.lifecycle_issues):
         raise PositionError("With that correction the position would close completely before a later fill, which "
                             "would make it two trades. Record the later fills on a new position instead.")
@@ -628,11 +667,21 @@ def read(cur: sqlite3.Cursor, position_id: int) -> dict[str, Any]:
     pos["snapshots"] = snaps
     has_audit = cur.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'execution_corrections'").fetchone()
     pos["corrections"] = corrections(cur, position_id) if has_audit else []
-    led = account(pos["direction"], pos["multiplier"], [Fill(e["side"], e["quantity"], e["price"], e["fees"],
-                                                              e["executed_at"], e["id"]) for e in pos["executions"]],
+    pos["unit_adjustments"] = unit_adjustments(cur, position_id)
+    led = account(pos["direction"], pos["multiplier"],
+                  adjusted_fills([Fill(e["side"], e["quantity"], e["price"], e["fees"], e["executed_at"], e["id"])
+                                  for e in pos["executions"]], pos["unit_adjustments"]),
                   allow_reopen=True)
     pos["ledger"] = asdict(led)
     pos["ledger"]["initial_risk"] = initial_risk(pos, led)
+    pos["ledger"]["units_adjusted"] = bool(pos["unit_adjustments"])
+    pos["adjustments"] = adjustments(cur, position_id) if _has_table(cur, "position_adjustments") else []
+    pos["option_events"], pos["derived_from"] = ([], [])
+    if _has_table(cur, "option_events"):
+        pos["option_events"] = _events(cur, "position_id", position_id)
+        pos["derived_from"] = _events(cur, "resulting_position_id", position_id)
+    pos["financing"] = financing(pos)
+    pos["lifecycle"] = lifecycle(pos)
     return pos
 
 
@@ -643,6 +692,379 @@ def list_ids(cur: sqlite3.Cursor, statuses: Sequence[str] | None = None) -> list
     else:
         cur.execute("SELECT id FROM positions ORDER BY id DESC")
     return [r[0] for r in cur.fetchall()]
+
+
+# --- money outside the fills: borrow fees, dividends, splits ------------------------------------
+
+ADJUSTMENT_KINDS = ("BORROW_FEE", "BORROW_RATE", "DIVIDEND_OWED", "DIVIDEND_RECEIVED", "CASH_ADJUSTMENT", "SPLIT")
+MONEY_KINDS = ("BORROW_FEE", "DIVIDEND_OWED", "DIVIDEND_RECEIVED", "CASH_ADJUSTMENT")
+
+
+def adjustments(cur: sqlite3.Cursor, position_id: int) -> list[dict[str, Any]]:
+    cur.execute("SELECT * FROM position_adjustments WHERE position_id = ? ORDER BY effective_at, id", (position_id,))
+    names = [d[0] for d in cur.description]
+    out = []
+    for r in cur.fetchall():
+        a = dict(zip(names, r))
+        a["details"] = json.loads(a.pop("details_json") or "{}")
+        out.append(a)
+    return out
+
+
+def add_adjustment(cur: sqlite3.Cursor, position_id: int, kind: str, *, amount: float | None = None,
+                   effective_at: str | None = None, rate_pct: float | None = None, quantity: float | None = None,
+                   per_share: float | None = None, ratio: float | None = None, period_start: str | None = None,
+                   period_end: str | None = None, note: str = "", source: str = "MANUAL",
+                   external_id: str | None = None) -> int:
+    """Record money that moved outside the fills, or a stock split.
+
+    BORROW_FEE      a fee charged for borrowing shares sold short: a cost (amount below zero),
+                    optionally with the yearly rate and the days it covers
+    BORROW_RATE     the borrow rate from a date on (no money moves; used only to say what an
+                    unrecorded fee might be, clearly as an estimate)
+    DIVIDEND_OWED   a dividend paid on shares sold short (a cost): amount, or per_share x quantity
+    DIVIDEND_RECEIVED a dividend on shares held long
+    CASH_ADJUSTMENT any other cash the broker booked against the position (either sign)
+    SPLIT           a stock split: `ratio` new shares per old (2 for 2-for-1, 0.1 for 1-for-10);
+                    fills before it are replayed in post-split units and the plan's price
+                    levels are rescaled, with the old levels kept in `details`
+
+    Amounts come from the broker; nothing is estimated here. A broker's id (`external_id`) makes
+    importing the same entry twice a no-op."""
+    pos = _row(cur, position_id)
+    kind = str(kind).upper()
+    if kind not in ADJUSTMENT_KINDS:
+        raise PositionError(f"kind must be one of {', '.join(ADJUSTMENT_KINDS)}")
+    source = str(source).upper()
+    if source not in SOURCES:
+        raise PositionError(f"source must be one of {', '.join(SOURCES)}")
+    stock, short = pos["instrument_type"] == "STOCK", pos["direction"] == "SHORT"
+    if kind in ("BORROW_FEE", "BORROW_RATE", "DIVIDEND_OWED") and not (stock and short):
+        raise PositionError("Borrow fees, borrow rates and dividends owed apply to stock sold short")
+    if kind == "DIVIDEND_RECEIVED" and not (stock and not short):
+        raise PositionError("Dividends received apply to stock held long")
+    if kind == "SPLIT" and not stock:
+        raise PositionError("Record a split on the stock position; for an option, record the contract adjustment")
+    if pos.get("legacy_trade_id"):
+        raise PositionError("This position mirrors an entry in the option journal; record adjustments on its own positions")
+    stamp = parse_time(effective_at)
+    vals: dict[str, Any] = {"rate_pct": None, "quantity": None, "per_share": None, "ratio": None}
+    for name, value in (("rate_pct", rate_pct), ("quantity", quantity), ("per_share", per_share), ("ratio", ratio)):
+        if value is not None:
+            vals[name] = number(name, value, above=0)
+    if amount is not None:
+        amount = number("amount", amount)
+    details: dict[str, Any] = {}
+    if kind == "BORROW_FEE":
+        if amount is None or amount >= 0:
+            raise PositionError("A borrow fee is a cost: enter it as a negative amount, as the broker charged it")
+    elif kind == "BORROW_RATE":
+        if vals["rate_pct"] is None:
+            raise PositionError("Enter the yearly borrow rate in percent")
+        amount = 0.0
+    elif kind in ("DIVIDEND_OWED", "DIVIDEND_RECEIVED"):
+        if amount is None:
+            if vals["per_share"] is None or vals["quantity"] is None:
+                raise PositionError("Enter the dividend amount, or the dividend per share and the number of shares")
+            amount = vals["per_share"] * vals["quantity"]
+            amount = -amount if kind == "DIVIDEND_OWED" else amount
+        if kind == "DIVIDEND_OWED" and amount > 0 or kind == "DIVIDEND_RECEIVED" and amount < 0:
+            raise PositionError("A dividend owed on a short is a cost (negative); one received on a long is income")
+    elif kind == "CASH_ADJUSTMENT":
+        if amount is None or amount == 0:
+            raise PositionError("Enter the amount the broker booked, negative for a charge")
+    elif kind == "SPLIT":
+        if vals["ratio"] is None or vals["ratio"] == 1:
+            raise PositionError("Enter the split ratio: new shares per old share")
+        amount = 0.0
+        levels = {k: pos.get(k) for k in ("invalidation_price", "target_1", "target_2") if pos.get(k) is not None}
+        details = {"plan_levels_before": levels,
+                   "plan_levels_after": {k: v / vals["ratio"] for k, v in levels.items()},
+                   "planned_quantity_before": pos["quantity"]}
+    if period_start is not None:
+        period_start = parse_time(period_start)
+    if period_end is not None:
+        period_end = parse_time(period_end)
+    if period_start and period_end and period_end < period_start:
+        raise PositionError("The period ends before it starts")
+    if external_id is not None:
+        external_id = str(external_id).strip()
+        seen = cur.execute("SELECT id, position_id, kind, amount, effective_at FROM position_adjustments "
+                           "WHERE source = ? AND external_id = ?", (source, external_id)).fetchone()
+        if seen is not None:
+            if (seen[1], seen[2], seen[3], seen[4]) != (position_id, kind, amount, stamp):
+                raise PositionError(f"Entry {external_id} from {source.lower()} is already recorded with different details")
+            return int(seen[0])
+    cur.execute("INSERT INTO position_adjustments (position_id, kind, amount, rate_pct, quantity, per_share, ratio, "
+                "effective_at, period_start, period_end, source, external_id, note, details_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (position_id, kind, amount, vals["rate_pct"], vals["quantity"], vals["per_share"], vals["ratio"], stamp,
+                 period_start, period_end, source, external_id, str(note or "").strip(), json.dumps(details), now_iso()))
+    aid = int(cur.lastrowid)
+    if kind == "SPLIT":
+        account(pos["direction"], pos["multiplier"], _fills(cur, position_id), allow_reopen=True)   # still accounts
+        sets = {k: v for k, v in details["plan_levels_after"].items()}
+        # The planned size was in pre-split shares if the position was planned before the split.
+        sets["quantity"] = pos["quantity"] * vals["ratio"] if pos["created_at"] < stamp else pos["quantity"]
+        cur.execute(f"UPDATE positions SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?", (*sets.values(), position_id))
+        recompute(cur, position_id, correction=True)
+    return aid
+
+
+def void_adjustment(cur: sqlite3.Cursor, position_id: int, adjustment_id: int, reason: str) -> None:
+    """Mark a mistaken adjustment void. It stays on record with the reason; a voided split's plan
+    levels are put back."""
+    reason = str(reason or "").strip()
+    if not reason:
+        raise PositionError("Say why the entry is being voided")
+    row = cur.execute("SELECT kind, voided_at, details_json FROM position_adjustments WHERE id = ? AND position_id = ?",
+                      (adjustment_id, position_id)).fetchone()
+    if row is None:
+        raise PositionError(f"Position {position_id} has no adjustment {adjustment_id}")
+    if row[1]:
+        raise PositionError("That entry is already void")
+    cur.execute("UPDATE position_adjustments SET voided_at = ?, void_reason = ? WHERE id = ?", (now_iso(), reason, adjustment_id))
+    if row[0] == "SPLIT":
+        details = json.loads(row[2] or "{}")
+        sets = {**details.get("plan_levels_before", {}), "quantity": details.get("planned_quantity_before")}
+        sets = {k: v for k, v in sets.items() if v is not None}
+        if sets:
+            cur.execute(f"UPDATE positions SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?", (*sets.values(), position_id))
+        recompute(cur, position_id, correction=True)
+
+
+def financing(pos: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """Money outside the fills, kept apart from trading profit.
+
+    `trading_pnl` is what the fills made (after their fees); `financing_total` the borrow fees,
+    dividends and cash adjustments recorded; `net_economic_pnl` the two together. For stock
+    sold short, `borrow_status` says whether borrow fees are recorded for the whole time the
+    shares were borrowed: UNKNOWN when none are recorded, PARTIAL when they stop before the
+    position closed (or before today), RECORDED otherwise. An unrecorded fee is never filled in:
+    `borrow_estimate` (from a rate you entered) is shown beside it, labelled, and not added."""
+    now = now or datetime.now(timezone.utc)
+    active = [a for a in pos.get("adjustments", []) if not a.get("voided_at")]
+    by_kind = {k: sum(a["amount"] for a in active if a["kind"] == k) for k in MONEY_KINDS}
+    total = sum(by_kind.values())
+    out: dict[str, Any] = {"by_kind": by_kind, "financing_total": total, "entries": len(active),
+                           "trading_realized": pos["ledger"]["realized_pnl"]}
+    short_stock = pos["instrument_type"] == "STOCK" and pos["direction"] == "SHORT" and pos["ledger"]["fills"] > 0
+    if short_stock:
+        fees = [a for a in active if a["kind"] == "BORROW_FEE"]
+        end = datetime.fromisoformat(pos["ledger"]["closed_at"]) if pos["ledger"].get("closed_at") else now
+        start = datetime.fromisoformat(pos["ledger"]["opened_at"]) if pos["ledger"].get("opened_at") else end
+        through = max((datetime.fromisoformat(a["period_end"] or a["effective_at"]) for a in fees), default=None)
+        if not fees:
+            status, text = "UNKNOWN", "No borrow fees are recorded, so the cost of borrowing these shares is not known."
+        elif through is not None and (end - through).days >= 1:
+            status, text = "PARTIAL", f"Borrow fees are recorded through {through.date():%b %d, %Y}; later days are not known."
+        else:
+            status, text = "RECORDED", "Borrow fees are recorded for the whole time the shares were borrowed."
+        rates = [a for a in active if a["kind"] == "BORROW_RATE" or (a["kind"] == "BORROW_FEE" and a.get("rate_pct"))]
+        estimate = None
+        if status != "RECORDED" and rates and pos["ledger"].get("cost_basis"):
+            rate = rates[-1]["rate_pct"]
+            days = max((end - (through or start)).total_seconds() / 86400, 0.0)
+            shares = pos["ledger"]["open_quantity"] or pos["ledger"]["max_open_quantity"]
+            estimate = -rate / 100 * shares * pos["ledger"]["cost_basis"] * days / 360
+        out.update({"borrow_status": status, "borrow_text": text, "borrow_recorded_through": through.isoformat() if through else None,
+                    "borrow_estimate": estimate,
+                    "borrow_estimate_note": "An estimate from the rate you entered over the days without a recorded "
+                                            "fee, at cost. Not a charge, and not included in any profit figure."
+                    if estimate is not None else None})
+    return out
+
+
+def _events(cur: sqlite3.Cursor, column: str, position_id: int) -> list[dict[str, Any]]:
+    cur.execute(f"SELECT * FROM option_events WHERE {column} = ? ORDER BY event_at, id", (position_id,))
+    names = [d[0] for d in cur.description]
+    out = []
+    for r in cur.fetchall():
+        e = dict(zip(names, r))
+        e["previous"] = json.loads(e.pop("previous_json") or "{}")
+        e["new"] = json.loads(e.pop("new_json") or "{}")
+        out.append(e)
+    return out
+
+
+# --- how a bought option ends ------------------------------------------------------------------
+
+def expiration_close(expiration: str) -> datetime:
+    from .optionmath import NY
+    return datetime.combine(datetime.fromisoformat(expiration).date(), datetime.min.time().replace(hour=16), tzinfo=NY)
+
+
+def _option(cur: sqlite3.Cursor, position_id: int) -> tuple[dict[str, Any], dict[str, Any], Ledger]:
+    pos = _row(cur, position_id)
+    if pos["instrument_type"] != "OPTION":
+        raise PositionError("That is not an option position")
+    if pos.get("legacy_trade_id"):
+        raise PositionError("This position mirrors an entry in the option journal: close it there (at 0 if it expired "
+                            "worthless)")
+    cur.execute("SELECT * FROM option_contracts WHERE position_id = ? ORDER BY leg LIMIT 1", (position_id,))
+    leg = dict(zip([d[0] for d in cur.description], cur.fetchone()))
+    led = account(pos["direction"], pos["multiplier"], _fills(cur, position_id), allow_reopen=True)
+    return pos, leg, led
+
+
+def _intrinsic(leg: dict[str, Any], underlying: float) -> float:
+    return max((underlying - leg["strike"]) if leg["option_type"] == "CALL" else (leg["strike"] - underlying), 0.0)
+
+
+def _record_event(cur: sqlite3.Cursor, position_id: int, event: str, quantity: float, event_at: str, **kw: Any) -> int:
+    cur.execute("INSERT INTO option_events (position_id, event, quantity, event_at, underlying_price, underlying_price_source, "
+                "settlement_price, execution_id, resulting_position_id, resulting_execution_id, previous_json, new_json, "
+                "reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (position_id, event, quantity, event_at, kw.get("underlying_price"), kw.get("underlying_price_source"),
+                 kw.get("settlement_price"), kw.get("execution_id"), kw.get("resulting_position_id"),
+                 kw.get("resulting_execution_id"), json.dumps(kw.get("previous") or {}), json.dumps(kw.get("new") or {}),
+                 kw.get("reason") or "", now_iso()))
+    return int(cur.lastrowid)
+
+
+def _last_execution(cur: sqlite3.Cursor, position_id: int) -> int:
+    return int(cur.execute("SELECT MAX(id) FROM executions WHERE position_id = ?", (position_id,)).fetchone()[0])
+
+
+def expire_worthless(cur: sqlite3.Cursor, position_id: int, *, underlying_price: float | None = None,
+                     underlying_price_source: str | None = None, reason: str = "",
+                     now: datetime | None = None) -> dict[str, Any]:
+    """Record that a bought option expired with nothing left: the open contracts are closed at 0
+    at the 4 p.m. close on the expiration date. Refused before then. If the stock price at
+    expiration is known and the option was in the money by a cent or more, brokers normally
+    exercise it automatically, so a reason is required to record it as worthless."""
+    pos, leg, led = _option(cur, position_id)
+    if led.open_quantity <= EPS:
+        raise PositionError("Nothing is open on this option")
+    close = expiration_close(leg["expiration"])
+    if (now or datetime.now(timezone.utc)) < close:
+        raise PositionError(f"This option has not expired yet: it expires at the close on {leg['expiration']}")
+    itm = None
+    if underlying_price is not None:
+        underlying_price = number("stock price at expiration", underlying_price, above=0)
+        itm = _intrinsic(leg, underlying_price)
+        if itm >= 0.01 and not str(reason or "").strip():
+            raise PositionError(f"At {underlying_price:,.2f} this option was ${itm:,.2f} in the money at expiration, and "
+                                "brokers normally exercise that automatically. Record the exercise, or give the reason "
+                                "it expired worthless (for example, you told the broker not to exercise).")
+    stamp = close.astimezone(timezone.utc).isoformat(timespec="seconds")
+    add_execution(cur, position_id, side="SELL", quantity=led.open_quantity, price=0.0, executed_at=stamp,
+                  note="expired worthless")
+    eid = _last_execution(cur, position_id)
+    ev = _record_event(cur, position_id, "EXPIRED_WORTHLESS", led.open_quantity, stamp, underlying_price=underlying_price,
+                       underlying_price_source=underlying_price_source, settlement_price=0.0, execution_id=eid,
+                       reason=reason)
+    return {"event_id": ev, "execution_id": eid, "in_the_money_by": itm}
+
+
+def exercise(cur: sqlite3.Cursor, position_id: int, *, underlying_price: float, underlying_price_source: str = "entered",
+             quantity: float | None = None, event_at: str | None = None, apply_to_position_id: int | None = None,
+             reason: str = "") -> dict[str, Any]:
+    """Record exercising bought calls or puts (early, or automatically at expiration).
+
+    The option leg is closed at its intrinsic value against `underlying_price` (the stock price
+    at exercise), and the shares are recorded at that same price: bought for a call, sold for a
+    put. Together that is buying (or selling) the shares at the strike after paying the premium,
+    and each side's profit is shown where it belongs. The shares go on `apply_to_position_id`
+    (an open stock position in the same stock) or on a new stock position, long for a call and
+    short for a put, linked to the option. Shares delivered are contracts x the contract
+    multiplier; adjusted contracts that deliver cash or other securities are not supported."""
+    pos, leg, led = _option(cur, position_id)
+    s_price = number("stock price at exercise", underlying_price, above=0)
+    qty = led.open_quantity if quantity is None else number("contracts", quantity, above=0)
+    if qty != int(qty):
+        raise PositionError("Options are exercised in whole contracts")
+    if qty > led.open_quantity + EPS:
+        raise PositionError(f"Only {led.open_quantity:g} contracts are open")
+    close = expiration_close(leg["expiration"])
+    stamp = parse_time(event_at) if event_at else \
+        min(datetime.now(timezone.utc), close.astimezone(timezone.utc)).isoformat(timespec="seconds")
+    if datetime.fromisoformat(stamp) > close:
+        raise PositionError(f"An option cannot be exercised after it expires ({leg['expiration']})")
+    if led.opened_at and stamp < led.opened_at:
+        raise PositionError("That is before the option was bought")
+    intrinsic = _intrinsic(leg, s_price)
+    if intrinsic <= 0:
+        raise PositionError(f"At {s_price:,.2f} this {leg['option_type'].lower()} is out of the money: exercising it would "
+                            "lose money. Check the stock price, or record it as expired worthless.")
+    add_execution(cur, position_id, side="SELL", quantity=qty, price=intrinsic, executed_at=stamp,
+                  note=f"exercised at a stock price of {s_price:,.2f}")
+    eid = _last_execution(cur, position_id)
+    shares = qty * pos["multiplier"]
+    buying = leg["option_type"] == "CALL"
+    if apply_to_position_id is not None:
+        target = _row(cur, int(apply_to_position_id))
+        if target["instrument_type"] != "STOCK" or target["symbol"] != pos["symbol"]:
+            raise PositionError(f"The shares must go on a {pos['symbol']} stock position")
+        side = ("BUY" if target["direction"] == "LONG" else "BUY_TO_COVER") if buying else             ("SELL" if target["direction"] == "LONG" else "SELL_SHORT")
+        sid = int(target["id"])
+    else:
+        sid = create(cur, symbol=pos["symbol"], instrument_type="STOCK", direction="LONG" if buying else "SHORT",
+                     quantity=shares, thesis=f"Shares from exercising position {position_id} "
+                                              f"({leg['strike']:g} {leg['option_type'].lower()}, {leg['expiration']})",
+                     setup_type="option exercise", data_source=pos.get("data_source") or "",
+                     invalidation_price=pos.get("invalidation_price"), target_1=pos.get("target_1"),
+                     target_2=pos.get("target_2"))
+        side = "BUY" if buying else "SELL_SHORT"
+    add_execution(cur, sid, side=side, quantity=shares, price=s_price, executed_at=stamp,
+                  note=f"from exercising position {position_id}")
+    stock_eid = _last_execution(cur, sid)
+    ev = _record_event(cur, position_id, "EXERCISED", qty, stamp, underlying_price=s_price,
+                       underlying_price_source=underlying_price_source, settlement_price=intrinsic, execution_id=eid,
+                       resulting_position_id=sid, resulting_execution_id=stock_eid, reason=reason)
+    return {"event_id": ev, "execution_id": eid, "stock_position_id": sid, "stock_execution_id": stock_eid,
+            "shares": shares, "intrinsic": intrinsic}
+
+
+def adjust_contract(cur: sqlite3.Cursor, position_id: int, *, effective_at: str, new_strike: float, new_multiplier: float,
+                    quantity_factor: float = 1.0, new_option_symbol: str | None = None, reason: str) -> dict[str, Any]:
+    """Record a contract adjustment after a split or other corporate action: the strike, the
+    multiplier (shares delivered per contract) and how many contracts each old one became. The
+    original terms are kept in the event; fills before it are replayed in the new units, so
+    every figure stays in step and nothing recorded is changed."""
+    pos, leg, led = _option(cur, position_id)
+    reason = str(reason or "").strip()
+    if not reason:
+        raise PositionError("Say what corporate action adjusted the contract")
+    strike = number("new strike", new_strike, above=0)
+    mult = number("new multiplier", new_multiplier, above=0)
+    factor = number("contracts per old contract", quantity_factor, above=0)
+    stamp = parse_time(effective_at)
+    previous = {"strike": leg["strike"], "multiplier": pos["multiplier"], "option_symbol": leg["option_symbol"],
+                "planned_quantity": pos["quantity"]}
+    new = {"strike": strike, "multiplier": mult, "option_symbol": new_option_symbol or leg["option_symbol"],
+           "quantity_factor": factor, "planned_quantity": pos["quantity"] * factor}
+    ev = _record_event(cur, position_id, "CONTRACT_ADJUSTED", max(led.open_quantity, pos["quantity"]), stamp,
+                       previous=previous, new=new, reason=reason)
+    cur.execute("UPDATE option_contracts SET strike = ?, multiplier = ?, option_symbol = ? WHERE position_id = ? AND leg = ?",
+                (strike, mult, new["option_symbol"], position_id, leg["leg"]))
+    cur.execute("UPDATE positions SET multiplier = ?, quantity = ? WHERE id = ?", (mult, new["planned_quantity"], position_id))
+    after = account(pos["direction"], mult, _fills(cur, position_id), allow_reopen=True)
+    if after.open_quantity != int(round(after.open_quantity, 6)):
+        raise PositionError("That adjustment leaves a fraction of a contract open; check the contracts per old contract")
+    recompute(cur, position_id, correction=True)
+    return {"event_id": ev, "previous": previous, "new": new}
+
+
+def lifecycle(pos: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """How a bought option stands: OPEN, CLOSED (sold), EXPIRED_WORTHLESS, EXERCISED, or
+    UNRESOLVED when it is past expiration with contracts still open and no outcome recorded.
+    An unresolved expiration is never assumed to be worthless."""
+    if pos["instrument_type"] != "OPTION" or not pos.get("legs"):
+        return {"state": None}
+    events = [e["event"] for e in pos.get("option_events", []) if e["event"] != "CONTRACT_ADJUSTED"]
+    expired = (now or datetime.now(timezone.utc)) >= expiration_close(pos["legs"][0]["expiration"])
+    open_qty = pos["ledger"]["open_quantity"]
+    if open_qty > EPS:
+        if expired:
+            return {"state": "UNRESOLVED", "text": "This option is past its expiration with contracts still open. Record "
+                                                   "how it ended: expired worthless, or exercised."}
+        return {"state": "OPEN"}
+    if "EXERCISED" in events:
+        return {"state": "EXERCISED"}
+    if "EXPIRED_WORTHLESS" in events:
+        return {"state": "EXPIRED_WORTHLESS"}
+    return {"state": "CLOSED" if pos["ledger"]["fills"] else "PLANNED"}
 
 
 # --- the classic option journal ------------------------------------------------------------------

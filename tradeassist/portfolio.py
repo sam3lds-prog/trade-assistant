@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 
 from .optionmath import NY
-from .positions import Fill, account
+from .positions import Fill, account, adjusted_fills
 from .sectors import SECTOR_FUNDS
 from .simulate import Leg, leg_value
 
@@ -282,6 +282,9 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
         if missing_greeks:
             out["missing_fields"].extend(missing_greeks)
             out["missing"].append(f"no {', '.join(missing_greeks)} from the chain")
+        if mark.get("expired"):
+            out["risk_reason"] = "past expiration with contracts still open: record how it ended"
+            out["missing"].append("past expiration with no recorded outcome (expired worthless or exercised)")
         out["dte"] = mark.get("dte")
         out["iv"] = finite(mark.get("iv"))
         out["option"] = {"option_type": leg["option_type"], "strike": leg["strike"], "expiration": leg["expiration"]}
@@ -290,7 +293,9 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
         if inv and bias * (under - inv) <= 0:
             out["beyond_invalidation"] = True
         change = option_change(out, inv, 0.0, datetime.now(NY)) if inv and not out["beyond_invalidation"] else None
-        if change is not None:
+        if mark.get("expired"):
+            pass                                    # its risk depends on how it ended, which is not recorded yet
+        elif change is not None:
             out["risk_to_invalidation"] = min(price, max(0.0, -change)) * mult * qty
             out["risk_basis"], out["open_risk"] = "INVALIDATION", out["risk_to_invalidation"]
         else:
@@ -448,7 +453,8 @@ def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
     what was missing. Quantity held at midnight is measured from the previous close; quantity
     opened today from its fill, so a position bought last week and sold today counts only
     today's move."""
-    fills = [Fill(e["side"], e["quantity"], e["price"], e["fees"], e["executed_at"]) for e in view["executions"]]
+    fills = adjusted_fills([Fill(e["side"], e["quantity"], e["price"], e["fees"], e["executed_at"])
+                            for e in view["executions"]], view.get("unit_adjustments") or [])
     before = [f for f in fills if datetime.fromisoformat(f.executed_at) < today_start]
     mult = view["multiplier"]
     now_led = account(view["direction"], mult, fills, allow_reopen=True)

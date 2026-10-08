@@ -253,3 +253,54 @@ def history_integrity(cur: sqlite3.Cursor) -> None:
                     (now, "a second snapshot of this kind from before 2.1.1", kind, kind))
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_effective ON position_snapshots (position_id, snapshot_type) "
                 "WHERE superseded_at IS NULL AND snapshot_type IN ('PLAN', 'ENTRY', 'EXIT')")
+
+
+@migration(6, "financing adjustments (borrow fees, dividends, splits) and option lifecycle events")
+def financing_and_option_events(cur: sqlite3.Cursor) -> None:
+    """2.2: money that moves outside the fills (borrow fees on a short, dividends owed or received,
+    other cash adjustments), stock splits, and how an option ended (expired, exercised) or was
+    adjusted. None of it changes a fill: splits and contract adjustments are applied when the
+    fills are replayed (positions.adjusted_fills), and an option event adds the closing fill it
+    implies, linked here."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS position_adjustments (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        position_id   INTEGER NOT NULL REFERENCES positions (id) ON DELETE CASCADE,
+        kind          TEXT NOT NULL CHECK (kind IN ('BORROW_FEE', 'BORROW_RATE', 'DIVIDEND_OWED', 'DIVIDEND_RECEIVED',
+                                                    'CASH_ADJUSTMENT', 'SPLIT')),
+        amount        REAL NOT NULL DEFAULT 0,      -- effect on profit in dollars: negative is a cost
+        rate_pct      REAL,                         -- yearly borrow rate, for BORROW_RATE (and BORROW_FEE if known)
+        quantity      REAL,                         -- shares the fee or dividend is on
+        per_share     REAL,                         -- dividend per share
+        ratio         REAL,                         -- SPLIT: new shares per old share (2 for a 2-for-1)
+        effective_at  TEXT NOT NULL,                -- ex-date, charge date or split date (UTC)
+        period_start  TEXT,                         -- the days a borrow fee covers
+        period_end    TEXT,
+        source        TEXT NOT NULL DEFAULT 'MANUAL' CHECK (source IN ('MANUAL', 'IMPORT', 'ROBINHOOD')),
+        external_id   TEXT,
+        note          TEXT NOT NULL DEFAULT '',
+        details_json  TEXT NOT NULL DEFAULT '{}',   -- e.g. the plan levels a split changed, before and after
+        created_at    TEXT NOT NULL,
+        voided_at     TEXT,                         -- a mistaken entry is voided with a reason, never deleted
+        void_reason   TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_adjustments_position ON position_adjustments (position_id, effective_at)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_adjustments_external ON position_adjustments (source, external_id) "
+                "WHERE external_id IS NOT NULL")
+    cur.execute("""CREATE TABLE IF NOT EXISTS option_events (
+        id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+        position_id            INTEGER NOT NULL REFERENCES positions (id) ON DELETE CASCADE,
+        event                  TEXT NOT NULL CHECK (event IN ('EXPIRED_WORTHLESS', 'EXERCISED', 'CONTRACT_ADJUSTED')),
+        quantity               REAL NOT NULL CHECK (quantity > 0),   -- contracts it applied to
+        event_at               TEXT NOT NULL,
+        underlying_price       REAL,                                 -- the stock price it was settled against
+        underlying_price_source TEXT,
+        settlement_price       REAL,                                 -- per share the option leg was closed at
+        execution_id           INTEGER REFERENCES executions (id) ON DELETE SET NULL,
+        resulting_position_id  INTEGER REFERENCES positions (id) ON DELETE SET NULL,
+        resulting_execution_id INTEGER REFERENCES executions (id) ON DELETE SET NULL,
+        previous_json          TEXT NOT NULL DEFAULT '{}',           -- the contract's terms before an adjustment
+        new_json               TEXT NOT NULL DEFAULT '{}',
+        reason                 TEXT NOT NULL DEFAULT '',
+        created_at             TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_option_events_position ON option_events (position_id, event_at)")

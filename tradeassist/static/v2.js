@@ -122,6 +122,7 @@ function positionDetail(p, onChange) {
   if (mk.error) box.append(el("p", { class: "small error", text: `No current price: ${mk.error}` }));
   if (leg && isNum(mk.delta)) box.append(el("p", { class: "small muted", text: `Option now: bid ${money(mk.bid)}, ask ${money(mk.ask)}, delta ${num(mk.delta, 2)}, theta ${money(mk.theta)} a day, implied volatility ${pct(100 * mk.iv, 1)}, ${mk.dte} days to expiration. Stock ${money(mk.underlying)}.` }));
   if (p.mark && isNum(mk.price) && led.open_quantity > 0) box.append(markLine(mk, pnl));
+  box.append(...lifecycleBlock(p, onChange));
   const tc = p.thesis_check;
   if (tc.text) box.append(banner(tc.status === "INVALIDATED" ? "fail" : tc.status === "INTACT" || tc.status.startsWith("TARGET") ? "pass" : "warn", tc.text));
   if (led.lifecycle_issues && led.lifecycle_issues.length) box.append(banner("warn", `This position was opened again after it had closed (${led.lifecycle_issues.map(i => timeText(i.executed_at)).join(", ")}), which versions before 2.1.1 allowed. Its fills are kept exactly as recorded and its figures still add them up, but it mixes two trades. New fills after a close now go on a new position.`));
@@ -231,8 +232,81 @@ function positionDetail(p, onChange) {
     cancel.addEventListener("click", () => act(cancel, () => api(`/v2/positions/${p.id}/cancel`, { note: "" })));
     buttons.append(cancel);
   }
+  if (p.instrument_type === "STOCK" && p.executions.length && !p.legacy_trade_id) box.append(adjustmentsBlock(p, onChange));
   if (p.executions.length) box.append(positionAnalyticsBox(p));
   box.append(buttons, error, gradeBox);
+  return box;
+}
+
+/* ---------- financing and option lifecycle (2.2) ---------- */
+const LIFE_TAG = { OPEN: ["pass", "Open"], CLOSED: ["info", "Sold"], EXPIRED_WORTHLESS: ["info", "Expired worthless"], EXERCISED: ["info", "Exercised"], UNRESOLVED: ["warn", "Expired: outcome not recorded"] };
+const ADJ_WORDS = { BORROW_FEE: "Borrow fee", BORROW_RATE: "Borrow rate", DIVIDEND_OWED: "Dividend owed", DIVIDEND_RECEIVED: "Dividend received", CASH_ADJUSTMENT: "Cash adjustment", SPLIT: "Stock split" };
+
+function lifecycleBlock(p, onChange) {
+  const out = [];
+  const fin = p.financing || {};
+  if (fin.entries || fin.borrow_status) {
+    out.push(el("div", { class: "metrics" },
+      metric(signedMoney(p.pnl.trading_total), "Trading profit (the fills)"),
+      metric(signedMoney(p.pnl.financing), "Borrow fees, dividends and other cash"),
+      metric(signedMoney(p.pnl.net_economic), "Net after both")));
+    if (fin.borrow_status && fin.borrow_status !== "RECORDED") out.push(banner("warn", `${fin.borrow_text} Unknown financing cost: net profit leaves it out.${isNum(fin.borrow_estimate) ? ` At the rate you entered it would be about ${signedMoney(fin.borrow_estimate)}: an estimate, not a charge, and not included.` : ""}`));
+  }
+  if (p.ledger.units_adjusted) out.push(el("p", { class: "small muted", text: "A split or contract adjustment applies to this position: the fills below are shown as recorded, and every figure uses today's units." }));
+  for (const d of p.derived_from || []) out.push(el("p", { class: "small muted", text: `These shares came from exercising position ${d.position_id} at a stock price of ${money(d.underlying_price)} (${d.underlying_price_source}).` }));
+  const life = p.lifecycle || {};
+  if (p.instrument_type !== "OPTION" || !life.state) return out;
+  out.push(el("p", { class: "small" }, "Option: ", tagOf(LIFE_TAG, life.state)));
+  if (life.text) out.push(banner("warn", life.text));
+  if ((p.option_events || []).length) out.push(table([
+    { label: "When", cell: e => timeText(e.event_at) },
+    { label: "What", cell: e => ({ EXPIRED_WORTHLESS: "Expired worthless", EXERCISED: "Exercised", CONTRACT_ADJUSTED: "Contract adjusted" })[e.event] },
+    { label: "Stock price", num: true, cell: e => isNum(e.underlying_price) ? el("span", { title: e.underlying_price_source || "" }, money(e.underlying_price)) : "" },
+    { label: "Detail", cell: e => e.event === "CONTRACT_ADJUSTED" ? `strike ${e.previous.strike} → ${e.new.strike}, multiplier ${e.previous.multiplier} → ${e.new.multiplier}${e.new.quantity_factor !== 1 ? `, ${e.new.quantity_factor} per old contract` : ""}` : e.resulting_position_id ? `shares on position ${e.resulting_position_id}` : "" },
+    { label: "Why", cell: e => e.reason || "" }], p.option_events));
+  if (p.legacy_trade_id || p.ledger.open_quantity <= 0) return out;
+  const error = el("div", { class: "error", role: "alert" });
+  const act = (b, fn) => withBusy(b, error, async () => onChange(await fn()));
+  const sPrice = numInput({ placeholder: "from the daily close" }), reason = textInput({ placeholder: "optional" });
+  const when = timeInput(), applyTo = textInput({ placeholder: "new position", "aria-label": "Stock position id" });
+  const expire = el("button", { class: "plain", text: "It expired worthless" });
+  const exer = el("button", { class: "plain", text: "It was exercised" });
+  expire.addEventListener("click", () => act(expire, () => api(`/v2/positions/${p.id}/option/expire`, { underlying_price: optNum(sPrice), reason: reason.value })));
+  exer.addEventListener("click", () => act(exer, () => api(`/v2/positions/${p.id}/option/exercise`, { underlying_price: optNum(sPrice), executed_at: when.value || null, reason: reason.value,
+    apply_to_position_id: applyTo.value.trim() ? Number(applyTo.value) : null })));
+  out.push(el("h4", { text: "How it ended" }),
+    el("p", { class: "small muted", text: "Record the outcome rather than letting it be assumed. Worthless closes the contracts at $0 at the expiration close; if the stock finished in the money you will be asked why it was not exercised. Exercise closes the contracts at their value against the stock price and records the shares at that price, on a new stock position or on the one you name." }),
+    el("div", { class: "inline-form" }, field("Stock price", sPrice), field("Exercised when (blank: now or at expiration)", when), field("Shares go on position", applyTo), field("Reason", reason), expire, exer), error);
+  return out;
+}
+
+function adjustmentsBlock(p, onChange) {
+  const box = el("div");
+  const error = el("div", { class: "error", role: "alert" });
+  const kinds = p.direction === "SHORT" ? ["BORROW_FEE", "DIVIDEND_OWED", "BORROW_RATE", "CASH_ADJUSTMENT", "SPLIT"] : ["DIVIDEND_RECEIVED", "CASH_ADJUSTMENT", "SPLIT"];
+  box.append(el("h4", { text: p.direction === "SHORT" ? "Borrow fees, dividends and other cash" : "Dividends and other cash" }));
+  if ((p.adjustments || []).length) box.append(table([
+    { label: "Date", cell: a => timeText(a.effective_at) },
+    { label: "What", cell: a => el("span", { class: a.voided_at ? "muted" : "" }, ADJ_WORDS[a.kind] || a.kind, a.voided_at ? el("span", { title: a.void_reason }, " (void)") : "") },
+    { label: "Amount", num: true, cell: a => a.kind === "SPLIT" ? `${a.ratio} for 1` : a.kind === "BORROW_RATE" ? `${a.rate_pct}% a year` : signedMoney(a.amount, 2) },
+    { label: "Covers", cell: a => a.period_start ? `${shortDate(a.period_start)} to ${shortDate(a.period_end)}` : "" },
+    { label: "Note", cell: a => a.note || "" },
+    { label: "", cell: a => { if (a.voided_at) return ""; const b = el("button", { class: "plain small", text: "Void" }); b.addEventListener("click", ev => { ev.stopPropagation(); const why = prompt("Why is this entry wrong?"); if (why) withBusy(b, error, async () => onChange(await api(`/v2/positions/${p.id}/adjustments/${a.id}/void`, { reason: why }))); }); return b; } }], p.adjustments));
+  const kind = el("select", { "aria-label": "Kind" }, kinds.map(k => el("option", { value: k, text: ADJ_WORDS[k] })));
+  const amount = el("input", { type: "number", step: "0.01", placeholder: "-12.50 for a charge" }), date = timeInput();
+  const perShare = numInput({ placeholder: "dividend per share" }), shares = numInput({ step: "any", placeholder: "shares" });
+  const rate = numInput({ placeholder: "% a year" }), ratio = numInput({ step: "any", placeholder: "new per old" });
+  const from = timeInput(), to = timeInput(), note = textInput({ placeholder: "optional" });
+  const add = el("button", { class: "plain", text: "Record it" });
+  add.addEventListener("click", () => withBusy(add, error, async () => {
+    const body = { kind: kind.value, effective_at: date.value || null, note: note.value };
+    for (const [k, input] of [["amount", amount], ["per_share", perShare], ["quantity", shares], ["rate_pct", rate], ["ratio", ratio]]) { const v = optNum(input); if (v !== null) body[k] = v; }
+    if (from.value) body.period_start = from.value; if (to.value) body.period_end = to.value;
+    onChange(await api(`/v2/positions/${p.id}/adjustments`, body));
+  }));
+  box.append(el("div", { class: "inline-form" }, field("Kind", kind), field("Amount ($)", amount), field("Date", date), field("Per share", perShare), field("Shares", shares),
+      field("Rate", rate), field("Split ratio", ratio), field("Fee covers from", from), field("to", to), field("Note", note), add),
+    el("p", { class: "small muted", text: "Enter what your broker booked; nothing here is estimated. A split replays earlier fills in post-split shares and rescales the plan's prices; the fills themselves are kept as recorded." }), error);
   return box;
 }
 
