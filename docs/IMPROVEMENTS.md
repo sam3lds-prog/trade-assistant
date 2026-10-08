@@ -140,3 +140,19 @@ Version set to 2.1.1. Tests: 415 passed, 2 skipped.
 Known limitations: there is no broker import in the app, so 2.5 covers the recording side
 only. Journal fill times are when the attempt was logged. Rebuilt snapshots have no option
 quotes or Greeks, because no connected source has their history.
+
+### Sprint 3: exposure, open risk, marks and risk models (2.2)
+
+| Requirement | Done | Where | Tests (`test_risk_models.py`) |
+| --- | --- | --- | --- |
+| 3.1 Gross and net | Totals, `by_symbol` and `by_sector` with net, gross, long, short; concentration warnings on gross; options keep delta dollars, premium, notional and liquidation value apart; `definitions` | `portfolio.py`, `v2.js` | `test_3_1_*` (2) |
+| 3.2 Open-risk completeness | `risk_basis` per position (INVALIDATION, PREMIUM, CONFIGURED, BEYOND_INVALIDATION, UNKNOWN); `risk_coverage` with bases, unknowns and a limit conclusion that says whether it covers everything; stock past its invalidation is no longer counted as zero risk; alerts use `open_risk` | `portfolio.py`, `analysis.py`, `v2.js` | `test_3_2_*` (2) |
+| 3.5 Mark-to-market | Last, bid, ask, mid, spread, analytical mark with its basis, liquidation price (bid for long, ask for short, zero with no bid); liquidation P&L per position and in total; shown on the position and portfolio screens | `market.py`, `desk.py`, `portfolio.py`, `v2.js` | `test_3_5_*` (2) |
+| 3.6 Risk models | Returns without forward fill; beta and correlation on overlapping days with a 40-day minimum and sample sizes; return-quality flags (short history, missing days, stale runs); historical 1-in-20 loss, expected shortfall and worst day beside the normal approximation; stress floors stock at zero; reference tests (least squares beta, hand-computed covariance and quantiles, Hull's Black-Scholes example, vega units) | `portfolio.py`, `v2.js` | `test_3_6_*` (8) |
+
+Confirmed and fixed here: forward-filled closes made missing days zero returns (2.1 beta and
+correlation were biased toward zero for stocks with gaps); a stock through its invalidation
+price counted as zero open risk; a beta of 3 in a 50% crash took a stock below zero in
+stress tests.
+
+Tests: 429 passed, 2 skipped.

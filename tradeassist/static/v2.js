@@ -121,6 +121,7 @@ function positionDetail(p, onChange) {
     isNum(p.days_held) ? metric(String(p.days_held), "Days held") : null));
   if (mk.error) box.append(el("p", { class: "small error", text: `No current price: ${mk.error}` }));
   if (leg && isNum(mk.delta)) box.append(el("p", { class: "small muted", text: `Option now: bid ${money(mk.bid)}, ask ${money(mk.ask)}, delta ${num(mk.delta, 2)}, theta ${money(mk.theta)} a day, implied volatility ${pct(100 * mk.iv, 1)}, ${mk.dte} days to expiration. Stock ${money(mk.underlying)}.` }));
+  if (p.mark && isNum(mk.price) && led.open_quantity > 0) box.append(markLine(mk, pnl));
   const tc = p.thesis_check;
   if (tc.text) box.append(banner(tc.status === "INVALIDATED" ? "fail" : tc.status === "INTACT" || tc.status.startsWith("TARGET") ? "pass" : "warn", tc.text));
   if (led.lifecycle_issues && led.lifecycle_issues.length) box.append(banner("warn", `This position was opened again after it had closed (${led.lifecycle_issues.map(i => timeText(i.executed_at)).join(", ")}), which versions before 2.1.1 allowed. Its fills are kept exactly as recorded and its figures still add them up, but it mixes two trades. New fills after a close now go on a new position.`));
@@ -233,6 +234,16 @@ function positionDetail(p, onChange) {
   if (p.executions.length) box.append(positionAnalyticsBox(p));
   box.append(buttons, error, gradeBox);
   return box;
+}
+
+function markLine(mk, pnl) {
+  const parts = [`Marked at ${money(mk.price)} (${mk.mark_basis || mk.source || "mark"})`];
+  if (isNum(mk.bid) && isNum(mk.ask)) parts.push(`bid ${money(mk.bid)}, ask ${money(mk.ask)}${isNum(mk.spread_pct) ? `, spread ${pct(mk.spread_pct, 1)} of the midpoint` : ""}`);
+  if (isNum(mk.last) && !(mk.mark_basis || "").startsWith("last")) parts.push(`last trade ${money(mk.last)}`);
+  if (isNum(pnl.liquidation_unrealized)) parts.push(`closing now at ${mk.liquidation_basis ? mk.liquidation_basis.split(":")[0] : "the quote"} would be about ${signedMoney(pnl.liquidation_unrealized)} unrealized, an estimate rather than a fill`);
+  else parts.push("no two-sided quote, so no estimate of what closing now would get");
+  if (mk.as_of) parts.push(`quote ${timeText(mk.as_of)}`);
+  return el("p", { class: "small muted", text: parts.join("; ") + "." });
 }
 
 const SNAP_METHOD = { LIVE: "Live", PRIOR_BAR: "Rebuilt: last close before the fill", END_OF_DAY: "Rebuilt: fill day's close", JOURNAL_QUOTE: "Journal ticket quote" };
@@ -795,40 +806,56 @@ function renderPortfolio(r) {
   const frag = el("div"), t = r.totals, dl = r.daily_loss, u = t.unknown_counts || {}, n = r.count;
   if (r.data_source === "demo") frag.append(banner("warn", "Demo data: the prices are made up."));
   // The daily-stop panel below explains an incomplete day itself; a reached or near stop still leads the page.
-  for (const w of r.warnings) if (w.code !== "DAILY_LOSS_INCOMPLETE") frag.append(banner(w.level === "fail" ? "fail" : w.level === "warn" ? "warn" : "info", w.text));
+  for (const w of r.warnings) if (w.code !== "DAILY_LOSS_INCOMPLETE" && w.code !== "OPEN_RISK_UNKNOWN") frag.append(banner(w.level === "fail" ? "fail" : w.level === "warn" ? "warn" : "info", w.text));
   if (!r.count) { frag.append(el("div", { class: "panel" }, el("p", { class: "muted", text: "No open positions. Add them on the Positions screen (option-journal trades appear there automatically)." }))); }
   const acct = r.account_size, share = v => acct ? ` (${pct(100 * v / acct, 0)} of the account)` : "";
   const cov = r.coverage || { status: "COMPLETE" };
-  frag.append(el("div", { class: "panel" }, el("h3", {}, "Totals ", cov.status !== "COMPLETE" ? tagOf(COVERAGE_TAG, cov.status) : ""), el("div", { class: "metrics" },
-    metric(signedMoney(t.net_exposure), `Net exposure in stock dollars${share(Math.abs(t.net_exposure))}${partialNote(u.exposure, n)}`),
-    metric(money(t.gross_exposure, 0), `Gross exposure${partialNote(u.exposure, n)}`),
-    metric(signedMoney(t.spy_equivalent), `SPY-equivalent dollars (beta-weighted)${partialNote(u.exposure, n)}`),
-    metric(money(t.open_risk, 0), `Risk to invalidation, limit ${money(t.open_risk_limit, 0)}${t.open_risk_unknown ? `; ${t.open_risk_unknown} of ${n} unknown, so the total is at least this` : ""}`),
-    metric(isNum(t.one_day_move_95) ? money(t.one_day_move_95, 0) : "n/a", `A bad day (1 in 20), from the last six months${partialNote(u.exposure, n)}`),
-    metric(signedMoney(t.theta_per_day), `Time decay per day (options)${partialNote(u.theta, n)}`),
-    metric(signedMoney(t.vega_per_point), `Per point of implied volatility${partialNote(u.vega, n)}`)),
+  const defs = r.definitions || {};
+  const def = (key, label) => el("span", { title: defs[key] || "" }, label);
+  frag.append(el("div", { class: "panel" }, el("h3", {}, "Exposure ", cov.status !== "COMPLETE" ? tagOf(COVERAGE_TAG, cov.status) : ""),
+    el("p", { class: "small muted", text: "In delta-equivalent stock dollars. Gross adds longs and shorts; net lets them offset, so a hedged book shows both how big it is and which way it leans." }),
+    el("div", { class: "metrics" },
+      metric(money(t.gross_exposure, 0), `Gross${share(t.gross_exposure)}${partialNote(u.exposure, n)}`),
+      metric(signedMoney(t.net_exposure), `Net${share(Math.abs(t.net_exposure))}${partialNote(u.exposure, n)}`),
+      metric(`${signedMoney(t.long_exposure)} / ${signedMoney(t.short_exposure)}`, "Long / short"),
+      metric(signedMoney(t.spy_equivalent), `SPY-equivalent (beta-weighted)${partialNote(u.exposure, n)}`),
+      metric(signedMoney(t.theta_per_day), `Time decay per day (options)${partialNote(u.theta, n)}`),
+      metric(signedMoney(t.vega_per_point), `Per point of implied volatility${partialNote(u.vega, n)}`)),
+    el("h4", { text: "Value" }),
+    el("div", { class: "metrics" },
+      metric(signedMoney(t.market_value), `Market value at the mark${partialNote(u.market_value, n)}`),
+      metric(t.liquidation_complete === false && !isNum(t.estimated_liquidation_value) ? unknownText() : signedMoney(t.estimated_liquidation_value), `Closing now, at the bid or ask (estimate)${partialNote(u.liquidation, n)}`),
+      isNum(t.option_premium_at_risk) && t.option_premium_at_risk > 0 ? metric(money(t.option_premium_at_risk, 0), "Option premium at risk") : null),
     cov.status !== "COMPLETE" ? el("p", { class: "small muted", text: "Totals add up the positions that could be measured; see the note at the top of the page." }) : null));
+  if (r.risk_coverage) frag.append(riskPanel(r.risk_coverage));
+  if (r.bad_day) frag.append(badDayPanel(r.bad_day));
   if (dl) frag.append(dailyLossPanel(dl));
 
   if (r.positions.length) frag.append(el("div", { class: "panel" }, el("h3", { text: "By position" }), table([
     { label: "Position", cell: x => el("span", {}, x.description, x.priced === false ? el("span", { class: "small error", text: " · no current price" }) : null) },
     { label: "Sector", cell: x => x.sector || "" },
-    { label: "Exposure", num: true, cell: x => knownSigned(x.dollar_delta, 0, (x.missing || []).join("; ")) }, { label: "Beta", num: true, cell: x => isNum(x.beta) ? num(x.beta, 2) : "n/a" },
+    { label: "Exposure", num: true, cell: x => knownSigned(x.dollar_delta, 0, (x.missing || []).join("; ")) },
+    { label: "Beta", num: true, cell: x => isNum(x.beta) ? el("span", { title: `${x.beta_samples} days` }, num(x.beta, 2)) : el("span", { class: "muted", title: "Not enough overlapping history: counted as 1" }, "n/a") },
     { label: "SPY-equivalent", num: true, cell: x => knownSigned(x.beta_dollars, 0, (x.missing || []).join("; ")) },
-    { label: "Risk to invalidation", num: true, cell: x => knownMoney(x.risk_to_invalidation, 0, (x.missing || []).join("; ")) },
+    { label: "Open risk", num: true, cell: x => knownMoney(x.open_risk, 0, x.risk_reason || (x.missing || []).join("; ")) },
+    { label: "Measured by", cell: x => el("span", { class: "small", title: (r.risk_coverage && r.risk_coverage.basis_words[x.risk_basis]) || "" }, RISK_BASIS_WORDS[x.risk_basis] || x.risk_basis) },
     { label: "Theta / day", num: true, cell: x => x.instrument_type === "OPTION" ? knownSigned(x.theta) : "" },
     { label: "Plan", cell: x => tagOf(THESIS, x.thesis_status) }], r.positions),
-    el("p", { class: "small muted", text: "Exposure is in stock dollars: shares times price, or delta times 100 times contracts times the stock price for options. Beta to SPY from six months of daily moves." })));
+    el("p", { class: "small muted", text: "Exposure is in stock dollars: shares times price, or delta times the contract multiplier times contracts times the stock price for options. Beta to SPY from six months of daily moves on the days both traded; with fewer than 40 such days there is no beta and the position counts one for one." })));
 
-  if (r.by_sector.length) {
-    const max = Math.max(...r.by_sector.map(x => Math.abs(x.exposure)), 1);
-    frag.append(el("div", { class: "panel" }, el("h3", { text: "By sector" }), el("div", { class: "bars" }, r.by_sector.map(x => el("div", { class: "bar-row" },
-      el("span", { text: x.sector }), el("div", { class: "score-track" }, el("i", { class: x.exposure >= 0 ? "pos" : "neg", style: `width:${100 * Math.abs(x.exposure) / max}%` })),
-      el("strong", { text: signedMoney(x.exposure) }))))));
+  for (const [key, title, rows] of [["sector", "By sector", r.by_sector], ["symbol", "By stock", r.by_symbol]]) {
+    if (!rows || !rows.length) continue;
+    const max = Math.max(...rows.map(x => x.gross), 1);
+    frag.append(el("div", { class: "panel" }, el("h3", { text: title }), el("div", { class: "bars" }, rows.map(x => el("div", { class: "bar-row" },
+      el("span", { text: x[key] }), el("div", { class: "score-track", title: `Gross ${money(x.gross, 0)}: long ${money(x.long, 0)}, short ${money(-x.short, 0)}` },
+        el("i", { class: x.net >= 0 ? "pos" : "neg", style: `width:${100 * x.gross / max}%` })),
+      el("strong", { text: Math.abs(x.net) < x.gross - 0.5 ? `${signedMoney(x.net)} net · ${money(x.gross, 0)} gross` : signedMoney(x.net) })))),
+      el("p", { class: "small muted", text: "Bar length is gross exposure; its colour is the direction of the net." })));
   }
   if (r.correlation) {
     const c = r.correlation;
-    const cell = v => el("td", { class: "num cell", style: `background: color-mix(in oklab, var(${v >= 0 ? "--div-pos" : "--div-neg"}) ${Math.round(70 * Math.abs(v))}%, var(--div-mid))`, text: num(v, 2) });
+    const cell = v => isNum(v) ? el("td", { class: "num cell", style: `background: color-mix(in oklab, var(${v >= 0 ? "--div-pos" : "--div-neg"}) ${Math.round(70 * Math.abs(v))}%, var(--div-mid))`, text: num(v, 2) })
+      : el("td", { class: "num cell muted", title: "Fewer than 40 days both traded", text: "n/a" });
     frag.append(el("div", { class: "panel" }, el("h3", { text: "How the holdings move together" }),
       el("div", { class: "scroll" }, el("table", { class: "pnl-grid" }, el("thead", {}, el("tr", {}, el("th", { text: "" }), c.symbols.map(s2 => el("th", { class: "num", text: s2 })))),
         el("tbody", {}, c.symbols.map((a2, i) => el("tr", {}, el("td", { text: a2 }), c.matrix[i].map(cell)))))),
@@ -839,6 +866,29 @@ function renderPortfolio(r) {
   return frag;
 }
 
+const RISK_BASIS_WORDS = { INVALIDATION: "to invalidation", PREMIUM: "premium", CONFIGURED: "your dollar risk", BEYOND_INVALIDATION: "past invalidation", UNKNOWN: "unknown" };
+function riskPanel(rc) {
+  const level = rc.within_limit === false ? "fail" : rc.within_limit === null ? "warn" : "pass";
+  return el("div", { class: "panel" }, el("h3", {}, "Open risk ", tagOf(COVERAGE_TAG, rc.status)),
+    banner(level, rc.conclusion),
+    el("div", { class: "metrics" },
+      metric(money(rc.bases.INVALIDATION, 0), "To invalidation prices"),
+      metric(money(rc.bases.PREMIUM, 0), "Option premium (no invalidation, or past it)"),
+      metric(money(rc.bases.CONFIGURED, 0), "Dollar risk you entered (your assumption)"),
+      metric(`${rc.measured} of ${rc.positions}`, "Positions measured")),
+    rc.unknown.length ? el("ul", { class: "small" }, rc.unknown.map(u => el("li", { text: `${u.description}: ${u.reason}` }))) : null);
+}
+
+function badDayPanel(b) {
+  if (!b.available) return el("div", { class: "panel" }, el("h3", { text: "A bad day" }), el("p", { class: "small muted", text: `Not estimated: ${b.reason}.` }));
+  return el("div", { class: "panel" }, el("h3", { text: "A bad day" }), el("div", { class: "metrics" },
+    metric(money(b.parametric_95, 0), "1 day in 20, normal approximation"),
+    metric(money(b.historical_95, 0), "1 day in 20, from the past days themselves"),
+    metric(isNum(b.expected_shortfall_95) ? money(b.expected_shortfall_95, 0) : "n/a", "Average of the days worse than that"),
+    metric(money(b.worst_day, 0), "Worst day in the sample")),
+    el("p", { class: "small muted", text: b.note }));
+}
+
 function stressPanel(r) {
   const box = el("div", { class: "panel" }, el("h3", { text: "Stress tests" }));
   const rows = el("div");
@@ -846,7 +896,7 @@ function stressPanel(r) {
     { label: "Scenario", cell: x => x.name },
     { label: "Profit or loss", num: true, cell: x => x.complete === false ? el("span", { title: `Not repriced: ${x.excluded.join("; ")}` }, signedMoney(x.pnl), el("span", { class: "small muted", text: ` (${x.excluded.length} left out)` })) : signedMoney(x.pnl) },
     { label: "Of the account", num: true, cell: x => isNum(x.share_of_account) ? signedPct(100 * x.share_of_account, 1) : "n/a" },
-    { label: "Hit hardest", cell: x => x.worst && x.worst.pnl < 0 ? `${x.worst.description} (${signedMoney(x.worst.pnl)})` : "" }], list));
+    { label: "Hit hardest", cell: x => x.worst && x.worst.pnl < 0 ? `${x.worst.description} (${signedMoney(x.worst.pnl)})${x.worst.clamped ? ", to zero" : ""}` : "" }], list));
   show(r.stress);
   const mkt = el("input", { type: "number", step: 1, value: -15, min: -90, max: 200 }), iv = el("input", { type: "number", step: 1, value: 12, min: -50, max: 150 });
   const sym = el("input", { class: "sym", type: "text", placeholder: "optional", "aria-label": "One stock" }), move = el("input", { type: "number", step: 1, value: -25 });

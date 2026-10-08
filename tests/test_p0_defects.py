@@ -103,7 +103,7 @@ def test_1_1_portfolio_with_an_unpriced_holding_returns_and_says_it_is_incomplet
     assert cov["unpriced"][0]["description"] == "LONG 10 MSFT" and cov["unpriced"][0]["reasons"] == ["MSFT quote timed out"]
     texts = [w["text"] for w in r["warnings"]]
     assert any(t_.startswith("Portfolio risk is incomplete because 1 position does not have a current price") for t_ in texts)
-    assert any("unknown risk" in t_ for t_ in texts)
+    assert any("not known whether the whole is inside the limit" in t_ for t_ in texts)
     # Stress tests still run, on what can be repriced, and say what they left out.
     for sc in r["stress"]:
         assert sc["complete"] is False and sc["excluded"] == ["LONG 10 MSFT"]

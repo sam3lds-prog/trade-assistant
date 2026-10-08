@@ -6,15 +6,18 @@ and delta times 100 times contracts times the stock price for a call or put. Bet
 (from the last six months of daily returns on finished bars) turns each into SPY-equivalent
 dollars, so a long in a jumpy stock and a short in a quiet one are not treated as a hedge.
 
-Risk to invalidation is what each position would lose if its stock went to its invalidation
-price now: the distance times the shares for stock, and the option's model value at that
-stock price for a call or put (never more than its value now). Without an invalidation price
-a stock position's risk is unknown and an option's is its whole value.
+Open risk is measured per position on a stated basis (RISK_BASES): to the invalidation price
+(the distance times the shares for stock, the option's model value at that stock price for a
+call or put, never more than its value now); the whole premium for a bought option without
+one; the dollars at risk you entered, for stock without an invalidation price; otherwise
+unknown, as it is for stock already through its invalidation price. `risk_coverage` adds up
+what is known and says whether that covers every position.
 
-The one-day move estimate is 1.645 standard deviations of the portfolio's daily P&L, from
-the covariance of the last six months of daily returns and the dollar exposures: a rough
-"bad day, one day in twenty" figure that uses deltas only and assumes the past six months
-are typical. Stress tests reprice everything with the simulator's model under a market move
+A bad day: 1.645 standard deviations of daily P&L from the covariance of the last six months
+of returns (the normal approximation), and the same exposures applied to each of those days'
+actual returns (historical 5th percentile, expected shortfall beyond it, worst day), all on
+the days every holding has a return. Deltas only; estimates, never a maximum loss. Returns are
+only taken between consecutive closes, so a missing day is never a zero return. Stress tests reprice everything with the simulator's model under a market move
 (each stock moving its beta times the move), a volatility shift and optional moves for named
 stocks.
 
@@ -66,45 +69,151 @@ def finite(v: Any) -> float | None:
     return f if math.isfinite(f) else None
 
 
+MIN_SAMPLES = 40                 # overlapping daily returns needed for a beta, a correlation or a covariance
+STALE_RUN = 3                    # this many unchanged closes in a row look like a stale feed, not a quiet stock
+Z_95 = 1.645
+
+
 def returns_frame(bars: dict[str, pd.DataFrame], days: int = CORRELATION_DAYS) -> pd.DataFrame:
+    """Daily returns, one column per symbol, on the union of their dates.
+
+    A return is only computed between two consecutive trading days that both have a close: a
+    day missing for one stock leaves NaN for it on that day and the next, rather than a zero
+    return (which carrying the last close forward would invent) or a two-day return set beside
+    the market's one-day return. Everything that uses these returns pairs them up on the days
+    both have."""
     closes = {}
     for sym, df in bars.items():
         if df is None or df.empty:
             continue
         s = df.set_index(pd.to_datetime(df["date"]))["close"].astype(float)
-        closes[sym] = s[~s.index.duplicated(keep="last")]
+        s = s[~s.index.duplicated(keep="last")]
+        closes[sym] = s.where(s > 0)                 # a zero or negative close is bad data, not a price
     if not closes:
         return pd.DataFrame()
-    frame = pd.DataFrame(closes).sort_index().ffill()
-    return frame.pct_change().iloc[1:].tail(days)
+    frame = pd.DataFrame(closes).sort_index()
+    return frame.pct_change(fill_method=None).iloc[1:].tail(days)
 
 
-def betas(rets: pd.DataFrame, market: str = "SPY") -> dict[str, float]:
+def return_quality(rets: pd.DataFrame, market: str = "SPY") -> dict[str, dict[str, Any]]:
+    """For each symbol: how many usable returns, how many of the market's days are missing, and
+    whether runs of unchanged closes suggest a stale price feed."""
     out = {}
-    if market not in rets.columns:
-        return out
-    m = rets[market]
-    var = float(m.var())
+    market_days = rets[market].notna() if market in rets.columns else None
     for sym in rets.columns:
-        if sym == market:
-            out[sym] = 1.0
-            continue
-        pair = rets[[sym, market]].dropna()
-        if len(pair) >= 40 and var > 0:
-            out[sym] = float(pair[sym].cov(pair[market]) / pair[market].var())
+        col = rets[sym]
+        usable = int(col.notna().sum())
+        missing = int((market_days & col.isna()).sum()) if market_days is not None else 0
+        zeros = (col == 0).astype(int)
+        run = longest = 0
+        for z in zeros:
+            run = run + 1 if z else 0
+            longest = max(longest, run)
+        issues = []
+        if usable < MIN_SAMPLES:
+            issues.append(f"only {usable} daily returns, fewer than the {MIN_SAMPLES} needed")
+        if missing:
+            issues.append(f"{missing} of the market's trading days have no close")
+        if longest >= STALE_RUN:
+            issues.append(f"{longest + 1} unchanged closes in a row: the price may be stale")
+        out[sym] = {"returns": usable, "missing_days": missing, "longest_unchanged_run": longest,
+                    "issues": issues, "reliable": not issues}
     return out
 
 
+def beta_stats(rets: pd.DataFrame, market: str = "SPY") -> dict[str, dict[str, Any]]:
+    """Beta to the market for each symbol, from the days both have a return (the same days for
+    the covariance and the market's variance), with the sample size. Fewer than MIN_SAMPLES
+    overlapping days gives no beta."""
+    out: dict[str, dict[str, Any]] = {}
+    if market not in rets.columns:
+        return out
+    for sym in rets.columns:
+        if sym == market:
+            out[sym] = {"beta": 1.0, "samples": int(rets[market].notna().sum()), "status": "OK"}
+            continue
+        pair = rets[[sym, market]].dropna()
+        var = float(pair[market].var()) if len(pair) > 1 else 0.0
+        if len(pair) >= MIN_SAMPLES and var > 0:
+            out[sym] = {"beta": float(pair[sym].cov(pair[market]) / var), "samples": len(pair), "status": "OK"}
+        else:
+            out[sym] = {"beta": None, "samples": len(pair), "status": "INSUFFICIENT",
+                        "reason": f"{len(pair)} overlapping days with {market}, fewer than {MIN_SAMPLES}"}
+    return out
+
+
+def betas(rets: pd.DataFrame, market: str = "SPY") -> dict[str, float]:
+    """The betas that could be measured (beta_stats), by symbol."""
+    return {k: v["beta"] for k, v in beta_stats(rets, market).items() if v["beta"] is not None}
+
+
+def one_day_risk(rets: pd.DataFrame, exposures: dict[str, float]) -> dict[str, Any]:
+    """How much the exposures might lose in one day, two ways, on the days every holding has a
+    return (one consistent sample):
+
+    - parametric: 1.645 standard deviations of daily P&L from the covariance of returns, the
+      normal approximation, about one day in twenty;
+    - historical: the same exposures applied to each past day's actual returns; the 5th
+      percentile loss and the average of the days worse than it (expected shortfall), plus the
+      worst day.
+
+    Both use deltas only, assume the sample is typical, and are estimates of a bad day, never a
+    maximum loss."""
+    cols = [s for s in exposures if s in rets.columns]
+    if not cols:
+        return {"available": False, "reason": "no price history for the holdings"}
+    sample = rets[cols].dropna()
+    if len(sample) < MIN_SAMPLES:
+        return {"available": False, "samples": len(sample),
+                "reason": f"only {len(sample)} days on which every holding has a return; {MIN_SAMPLES} are needed"}
+    d = np.array([exposures[s] for s in cols])
+    var = float(d @ sample.cov().to_numpy() @ d)
+    pnl = sample.to_numpy() @ d
+    cut = float(np.quantile(pnl, 0.05))
+    tail = pnl[pnl <= cut]
+    return {"available": True, "samples": len(sample), "symbols": cols,
+            "parametric_95": Z_95 * math.sqrt(var) if var > 0 else 0.0,
+            "historical_95": max(0.0, -cut), "expected_shortfall_95": max(0.0, float(-tail.mean())) if len(tail) else None,
+            "worst_day": max(0.0, float(-pnl.min())),
+            "note": f"From {len(sample)} trading days with deltas only. Estimates of a bad day (about one in twenty), "
+                    "not a maximum: larger losses happen, and gaps and volatility changes are not included."}
+
+
 EXPOSURE_FIELDS = ("dollar_delta", "market_value", "beta_dollars", "theta", "vega", "gamma_dollars",
-                   "risk_to_invalidation")
+                   "risk_to_invalidation", "open_risk", "notional", "premium_at_risk", "liquidation_value")
+# How each position's open risk is measured (risk_coverage):
+RISK_BASES = {
+    "INVALIDATION": "the loss if the stock went to the invalidation price now",
+    "PREMIUM": "the whole premium of a bought option, the most it can lose",
+    "CONFIGURED": "the dollars at risk you entered for it (an assumption you made, not a measurement)",
+    "BEYOND_INVALIDATION": "the stock is already through the invalidation price, so the plan no longer bounds the loss",
+    "UNKNOWN": "cannot be measured",
+}
+# What each total measures. They are different things and are never added to one another.
+DEFINITIONS = {
+    "dollar_delta": "Delta-equivalent stock dollars: shares times the stock price, or delta x multiplier x contracts x "
+                    "the stock price for an option. Signed: positive gains when the stock rises.",
+    "gross_exposure": "Sum of each position's delta dollars without their signs: a long and a short of the same size "
+                      "add up instead of cancelling.",
+    "net_exposure": "Sum of each position's delta dollars with their signs: the directional bet left after longs and "
+                    "shorts offset.",
+    "market_value": "What the open positions are worth at the analytical mark: positive for what you hold, negative "
+                    "for stock you owe on a short. For an option, its premium.",
+    "notional": "Shares, or contracts x multiplier, times the stock price, unsigned and not delta-adjusted.",
+    "premium_at_risk": "For bought options, their current value: the most they can still lose.",
+    "liquidation_value": "What closing now would roughly realise: the bid for something held, the ask for a short. "
+                         "An estimate from the quote, never a promised fill.",
+    "open_risk": "Each position's risk by its basis (risk_coverage.bases), added up only where it is known.",
+}
 
 
 def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
-    """Dollar exposure, Greeks and risk to invalidation for one position view (Desk.view).
+    """Dollar exposure, value, Greeks and risk for one position view (Desk.view).
 
     Every position comes back with the same fields. A figure that cannot be worked out is None,
     never 0: `priced` says whether the position has a current price and stock price, and
-    `missing` and `missing_fields` say what is unknown and why."""
+    `missing` and `missing_fields` say what is unknown and why. `risk_basis` says how `open_risk`
+    was measured (RISK_BASES)."""
     led, mark = view["ledger"], view.get("mark") or {}
     qty = led["open_quantity"]
     sign = 1 if view["direction"] == "LONG" else -1
@@ -117,6 +226,7 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
                            "beta_assumed": beta is None,
                            "bias": view["bias"], "thesis_status": view["thesis_check"]["status"],
                            "invalidation_price": view.get("invalidation_price"), "missing": [], "missing_fields": [],
+                           "risk_basis": "UNKNOWN", "risk_reason": None, "beyond_invalidation": False,
                            **{k: None for k in EXPOSURE_FIELDS}}
     if price is None:
         out["missing_fields"].append("price")
@@ -125,20 +235,38 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
     out["priced"] = price is not None and under is not None
     if not out["priced"]:
         out["missing"].append(mark.get("error") or "no current price")
+        out["risk_reason"] = "no current price"
         return out
+    liq = finite(mark.get("liquidation_price"))
+    out["liquidation_value"] = sign * liq * mult * qty if liq is not None else None
+    out["notional"] = abs(qty * mult * under)
     inv = finite(view.get("invalidation_price"))
+    configured = finite(view.get("risk_amount"))
     if view["instrument_type"] == "STOCK":
         out["dollar_delta"] = sign * qty * under
         out["market_value"] = sign * qty * price
         out["theta"] = out["vega"] = out["gamma_dollars"] = 0.0
-        out["risk_to_invalidation"] = (max(0.0, sign * (under - inv)) * qty) if inv else None
-        if inv is None:
+        if inv:
+            out["risk_to_invalidation"] = max(0.0, sign * (under - inv)) * qty
+            if sign * (under - inv) <= 0:
+                out["beyond_invalidation"] = True
+                out["risk_basis"] = "BEYOND_INVALIDATION"
+                out["risk_reason"] = (f"already through its invalidation price of {inv:,.2f}: the plan says exit, and "
+                                      "until then the loss is not bounded by it")
+            else:
+                out["risk_basis"], out["open_risk"] = "INVALIDATION", out["risk_to_invalidation"]
+        elif configured:
+            out["risk_basis"], out["open_risk"] = "CONFIGURED", configured
+            out["missing"].append("no invalidation price: its risk is the dollar amount you entered")
+        else:
             out["missing"].append("no invalidation price, so its risk is unknown")
             out["missing_fields"].append("invalidation_price")
+            out["risk_reason"] = "no invalidation price and no dollar risk entered"
     else:
         leg = view["legs"][0]
         delta = finite(mark.get("delta"))
         out["market_value"] = price * mult * qty
+        out["premium_at_risk"] = price * mult * qty
         if delta is None:
             out["missing"].append("no delta from the chain, so its exposure is unknown")
             out["missing_fields"].append("delta")
@@ -158,18 +286,56 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
         out["iv"] = finite(mark.get("iv"))
         out["option"] = {"option_type": leg["option_type"], "strike": leg["strike"], "expiration": leg["expiration"]}
         out["model_vol"], out["growth"], out["rate"] = finite(mark.get("model_vol")), mark.get("growth"), mark.get("rate")
-        if inv:
-            change = option_change(out, inv, 0.0, datetime.now(NY))
-            out["risk_to_invalidation"] = (min(price, max(0.0, -change)) * mult * qty) if change is not None \
-                else price * mult * qty
+        bias = 1 if leg["option_type"] == "CALL" else -1
+        if inv and bias * (under - inv) <= 0:
+            out["beyond_invalidation"] = True
+        change = option_change(out, inv, 0.0, datetime.now(NY)) if inv and not out["beyond_invalidation"] else None
+        if change is not None:
+            out["risk_to_invalidation"] = min(price, max(0.0, -change)) * mult * qty
+            out["risk_basis"], out["open_risk"] = "INVALIDATION", out["risk_to_invalidation"]
         else:
+            # A bought option can lose no more than what it is worth, whatever the stock does.
             out["risk_to_invalidation"] = price * mult * qty
-            out["missing"].append("no invalidation price: the whole premium is counted as at risk")
+            out["risk_basis"], out["open_risk"] = "PREMIUM", price * mult * qty
+            if not inv:
+                out["missing"].append("no invalidation price: the whole premium is counted as at risk")
     if out["dollar_delta"] is not None:
         out["beta_dollars"] = out["dollar_delta"] * (beta if beta is not None else 1.0)
         if beta is None:
             out["missing"].append("no beta to SPY: counted one for one")
     return out
+
+
+def risk_coverage(exps: list[dict[str, Any]], limit: float, limit_pct: float) -> dict[str, Any]:
+    """Open risk by how it was measured, what could not be measured, and a conclusion against the
+    limit that says whether it covers every position."""
+    bases = {b: 0.0 for b in ("INVALIDATION", "PREMIUM", "CONFIGURED")}
+    unknown = []
+    for x in exps:
+        if x["open_risk"] is not None:
+            bases[x["risk_basis"]] += x["open_risk"]
+        else:
+            unknown.append({"id": x["id"], "description": x["description"], "basis": x["risk_basis"],
+                            "reason": x.get("risk_reason") or RISK_BASES[x["risk_basis"]]})
+    total = sum(bases.values())
+    n, k = len(exps), len(exps) - len(unknown)
+    status = "COMPLETE" if not unknown else ("UNAVAILABLE" if k == 0 else "PARTIAL")
+    if total > limit:
+        within = False
+        text = (f"Open risk is at least ${total:,.0f}, above the {limit_pct:g}% limit (${limit:,.0f})"
+                + (f"; {len(unknown)} more position{'s are' if len(unknown) != 1 else ' is'} not measured." if unknown else "."))
+    elif unknown:
+        within = None
+        text = (f"Open risk is ${total:,.0f} across the {k} of {n} positions it could be measured for, inside the "
+                f"{limit_pct:g}% limit (${limit:,.0f}), but {len(unknown)} position{'s are' if len(unknown) != 1 else ' is'} "
+                "not measured, so it is not known whether the whole is inside the limit.")
+    else:
+        within = True
+        text = (f"Open risk is ${total:,.0f} across all {n} position{'s' if n != 1 else ''}, inside the {limit_pct:g}% "
+                f"limit (${limit:,.0f}).") if n else "No open positions."
+    return {"status": status, "positions": n, "measured": k, "total_known": total, "limit": limit,
+            "within_limit": within, "includes_all_positions": not unknown, "bases": bases, "unknown": unknown,
+            "basis_words": RISK_BASES, "conclusion": text}
 
 
 def known_sum(rows: list[dict[str, Any]], key: str) -> tuple[float, int]:
@@ -246,12 +412,14 @@ def stress(exposures: list[dict[str, Any]], scenarios: list[dict[str, Any]], acc
                 move = moves[x["symbol"]]
             if gap and largest is not None and x["symbol"] == largest["symbol"]:
                 move = -gap * (1 if largest["dollar_delta"] > 0 else -1)
-            s_new = x["underlying"] * (1 + move)
+            # A stock cannot fall below zero, however large the beta times the market move.
+            clamped = 1 + move < 0
+            s_new = x["underlying"] * max(1 + move, 0.0)
             if x["instrument_type"] == "STOCK":
                 sign = 1 if x["direction"] == "LONG" else -1
                 pnl = sign * (s_new - x["underlying"]) * x["open_quantity"]
             else:
-                ch = option_change(x, s_new, iv, now)
+                ch = option_change(x, max(s_new, 1e-6), iv, now)
                 # Never worth less than nothing: a bought option loses at most its value.
                 if ch is not None:
                     pnl = max(ch, -x["price"]) * x["multiplier"] * x["open_quantity"]
@@ -260,7 +428,8 @@ def stress(exposures: list[dict[str, Any]], scenarios: list[dict[str, Any]], acc
                 else:
                     skipped.append(x["description"])
                     continue
-            rows.append({"id": x["id"], "symbol": x["symbol"], "description": x["description"], "stock_move": move, "pnl": pnl})
+            rows.append({"id": x["id"], "symbol": x["symbol"], "description": x["description"],
+                         "stock_move": max(move, -1.0), "pnl": pnl, "clamped": clamped})
             total += pnl
         worst = min(rows, key=lambda r: r["pnl"], default=None)
         out.append({"name": sc.get("name") or "Custom scenario", "market_move_pct": 100 * m, "iv_shift_points": 100 * iv,
@@ -377,26 +546,44 @@ def daily_loss(views: list[dict[str, Any]], mode: str, account_size: float, stop
                      else "Counts closed trades only; open losses do not count until they are closed.")}
 
 
+def _by(exps: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    """Net and gross delta dollars grouped by `key`: net lets longs and shorts offset, gross does
+    not, so a hedged book still shows how big it is."""
+    groups: dict[str, dict[str, float]] = {}
+    for x in exps:
+        if x["dollar_delta"] is None:
+            continue
+        g = groups.setdefault(x[key], {"net": 0.0, "gross": 0.0, "long": 0.0, "short": 0.0, "positions": 0})
+        d = x["dollar_delta"]
+        g["net"] += d
+        g["gross"] += abs(d)
+        g["long" if d > 0 else "short"] += d
+        g["positions"] += 1
+    rows = [{key: k, "exposure": v["net"], **v} for k, v in groups.items()]
+    return sorted(rows, key=lambda r: -r["gross"])
+
+
 def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_size: float, max_open_risk_pct: float,
             daily: dict[str, Any], sector_of, scenarios: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Portfolio totals, concentration, correlation, stress tests and warnings.
 
     Totals are sums over the positions whose figure is known. `coverage` says which positions
     are left out and why, and every total that leaves something out is flagged, so a partial
-    sum is never presented as the whole portfolio."""
+    sum is never presented as the whole portfolio. Delta dollars, market value, notional,
+    premium at risk and liquidation value are separate measures (DEFINITIONS) and are never
+    added to one another."""
     rets = returns_frame(bars)
-    beta = betas(rets)
+    stats = beta_stats(rets)
+    quality = return_quality(rets) if not rets.empty else {}
     held = sorted({v["symbol"] for v in views})
-    exps = [exposure(v, beta.get(v["symbol"])) for v in views]
+    exps = [exposure(v, (stats.get(v["symbol"]) or {}).get("beta")) for v in views]
     cov_ = coverage(exps)
     sized = [x for x in exps if x["dollar_delta"] is not None]
     gross = sum(abs(x["dollar_delta"]) for x in sized)
     net = sum(x["dollar_delta"] for x in sized)
     beta_net, _ = known_sum(exps, "beta_dollars")
-    open_risk, risk_unknown = known_sum(exps, "risk_to_invalidation")
     risk_cap = account_size * max_open_risk_pct / 100.0
-    by_symbol: dict[str, float] = {}
-    by_sector: dict[str, float] = {}
+    rc = risk_coverage(exps, risk_cap, max_open_risk_pct)
 
     def sector_name(sym: str) -> str:
         if sym in INDEX_FUNDS:
@@ -405,32 +592,28 @@ def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_
         return SECTOR_FUNDS.get(fund, "Sector not known") if fund else "Sector not known"
     for x in exps:
         x["sector"] = sector_name(x["symbol"])
-        if x["dollar_delta"] is None:
-            continue
-        by_symbol[x["symbol"]] = by_symbol.get(x["symbol"], 0.0) + x["dollar_delta"]
-        by_sector[x["sector"]] = by_sector.get(x["sector"], 0.0) + x["dollar_delta"]
+        st = stats.get(x["symbol"]) or {}
+        x["beta_samples"] = st.get("samples")
+        if x["priced"] and st.get("status") == "INSUFFICIENT":
+            x["missing"].append(f"beta not measured: {st['reason']}")
+    by_symbol, by_sector = _by(exps, "symbol"), _by(exps, "sector")
+    net_by_symbol = {r["symbol"]: r["net"] for r in by_symbol}
     warnings: list[dict[str, str]] = []
     if cov_["status"] != "COMPLETE":
         warnings.append({"level": "warn", "code": "INCOMPLETE_PRICES", "text": cov_["text"]})
-    if open_risk > risk_cap:
-        warnings.append({"level": "fail", "code": "OPEN_RISK",
-                         "text": f"Risk to invalidation across open positions is ${open_risk:,.0f}, above the "
-                                 f"{max_open_risk_pct:g}% limit (${risk_cap:,.0f})"
-                                 + (f", and {risk_unknown} more position{'s have' if risk_unknown != 1 else ' has'} risk "
-                                    "that could not be measured." if risk_unknown else ".")})
-    elif risk_unknown:
-        warnings.append({"level": "warn", "code": "OPEN_RISK_UNKNOWN",
-                         "text": f"Risk to invalidation is ${open_risk:,.0f} for the positions it could be measured for, "
-                                 f"inside the {max_open_risk_pct:g}% limit (${risk_cap:,.0f}), but {risk_unknown} "
-                                 f"position{'s have' if risk_unknown != 1 else ' has'} unknown risk, so it is not known "
-                                 "whether the total is inside the limit."})
-    for sym, d in by_symbol.items():
-        if account_size and abs(d) > MAX_POSITION_SHARE * account_size:
-            warnings.append({"level": "warn", "text": f"{sym} exposure of ${abs(d):,.0f} is {100 * abs(d) / account_size:.0f}% "
-                                                      "of the account."})
-    for name, d in by_sector.items():
-        if gross and abs(d) > MAX_SECTOR_SHARE * gross and len(exps) > 1:
-            warnings.append({"level": "warn", "text": f"{name}: {100 * abs(d) / gross:.0f}% of gross exposure."})
+    if rc["within_limit"] is False:
+        warnings.append({"level": "fail", "code": "OPEN_RISK", "text": rc["conclusion"]})
+    elif rc["within_limit"] is None:
+        warnings.append({"level": "warn", "code": "OPEN_RISK_UNKNOWN", "text": rc["conclusion"]})
+    for r in by_symbol:
+        if account_size and r["gross"] > MAX_POSITION_SHARE * account_size:
+            offset = f" (net ${r['net']:,.0f} after longs and shorts offset)" if abs(r["net"]) < r["gross"] - 1e-6 else ""
+            warnings.append({"level": "warn", "text": f"{r['symbol']} exposure of ${r['gross']:,.0f} is "
+                                                      f"{100 * r['gross'] / account_size:.0f}% of the account{offset}."})
+    for r in by_sector:
+        if gross and r["gross"] > MAX_SECTOR_SHARE * gross and len(exps) > 1:
+            offset = f"; net ${r['net']:,.0f}" if abs(r["net"]) < r["gross"] - 1e-6 else ""
+            warnings.append({"level": "warn", "text": f"{r['sector']}: {100 * r['gross'] / gross:.0f}% of gross exposure{offset}."})
     for x in exps:
         if x["thesis_status"] == "INVALIDATED":
             warnings.append({"level": "fail", "text": f"{x['description']} is through its invalidation price."})
@@ -439,33 +622,37 @@ def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_
         if x["priced"]:                            # unpriced positions are named in the coverage warning
             for m in x["missing"]:
                 warnings.append({"level": "info", "text": f"{x['description']}: {m}."})
+    for sym in held:
+        q = quality.get(sym)
+        if q and q["issues"]:
+            warnings.append({"level": "info", "code": "RETURN_QUALITY",
+                             "text": f"{sym} price history: {'; '.join(q['issues'])}. Its beta, correlation and the "
+                                     "bad-day estimates are less reliable."})
     theta, theta_unknown = known_sum(exps, "theta")
     if account_size and theta < -0.002 * account_size:
         warnings.append({"level": "warn", "text": f"Options lose about ${-theta:,.0f} a day to time decay, "
                                                   f"{100 * -theta / account_size:.2f}% of the account."})
     corr = None
     pairs = []
-    one_day = None
-    if len(held) >= 1 and not rets.empty:
-        cols = [s for s in held if s in rets.columns]
-        if len(cols) >= 2:
-            c = rets[cols].corr()
-            corr = {"symbols": cols, "matrix": [[round(float(c.loc[a, b]), 2) for b in cols] for a in cols]}
-            for i, a in enumerate(cols):
-                for b in cols[i + 1:]:
-                    rho = float(c.loc[a, b])
-                    same_way = np.sign(by_symbol.get(a, 0)) == np.sign(by_symbol.get(b, 0))
-                    if rho >= HIGH_CORRELATION:
-                        pairs.append({"a": a, "b": b, "correlation": rho, "same_direction": bool(same_way)})
-                        if same_way:
-                            warnings.append({"level": "warn", "text": f"{a} and {b} move together (correlation {rho:.2f}) "
-                                                                      "and are held the same way: closer to one bet than two."})
-        known_cols = [s for s in cols if s in by_symbol]
-        if known_cols:
-            d = np.array([by_symbol[s] for s in known_cols])
-            cov = rets[known_cols].cov().to_numpy()
-            var = float(d @ cov @ d)
-            one_day = 1.645 * math.sqrt(var) if var > 0 else 0.0
+    cols = [s for s in held if s in rets.columns] if not rets.empty else []
+    if len(cols) >= 2:
+        c = rets[cols].corr(min_periods=MIN_SAMPLES)
+        cell = lambda a, b: None if pd.isna(c.loc[a, b]) else round(float(c.loc[a, b]), 2)   # noqa: E731
+        corr = {"symbols": cols, "matrix": [[cell(a, b) for b in cols] for a in cols], "min_samples": MIN_SAMPLES}
+        for i, a in enumerate(cols):
+            for b in cols[i + 1:]:
+                if pd.isna(c.loc[a, b]):
+                    continue
+                rho = float(c.loc[a, b])
+                same_way = np.sign(net_by_symbol.get(a, 0)) == np.sign(net_by_symbol.get(b, 0))
+                if rho >= HIGH_CORRELATION:
+                    pairs.append({"a": a, "b": b, "correlation": rho, "same_direction": bool(same_way)})
+                    if same_way:
+                        warnings.append({"level": "warn", "text": f"{a} and {b} move together (correlation {rho:.2f}) "
+                                                                  "and are held the same way: closer to one bet than two."})
+    bad_day = one_day_risk(rets, net_by_symbol) if not rets.empty else {"available": False, "reason": "no price history"}
+    if bad_day.get("available") and cov_["status"] != "COMPLETE":
+        bad_day["note"] += " Positions without a price or a delta are not included."
     stress_rows = stress(exps, scenarios or DEFAULT_SCENARIOS, account_size)
     if daily.get("loss_status", daily["status"]) in ("STOP", "WARN"):
         warnings.insert(0, {"level": "fail" if daily.get("loss_status", daily["status"]) == "STOP" else "warn",
@@ -475,25 +662,31 @@ def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_
     mv, mv_unknown = known_sum(exps, "market_value")
     vega, vega_unknown = known_sum(exps, "vega")
     gamma, gamma_unknown = known_sum(exps, "gamma_dollars")
+    liq, liq_unknown = known_sum(exps, "liquidation_value")
+    notional, _ = known_sum(exps, "notional")
+    premium, _ = known_sum([x for x in exps if x["instrument_type"] == "OPTION"], "premium_at_risk")
     exposure_unknown = len(exps) - len(sized)
-    return {"positions": exps, "count": len(exps), "symbols": held, "coverage": cov_,
+    return {"positions": exps, "count": len(exps), "symbols": held, "coverage": cov_, "risk_coverage": rc,
             "totals": {"gross_exposure": gross, "net_exposure": net, "spy_equivalent": beta_net,
                        "long_exposure": sum(x["dollar_delta"] for x in sized if x["dollar_delta"] > 0),
                        "short_exposure": sum(x["dollar_delta"] for x in sized if x["dollar_delta"] < 0),
-                       "market_value": mv, "theta_per_day": theta,
-                       "vega_per_point": vega,
-                       "gamma_dollars_per_1pct": gamma,
-                       "open_risk": open_risk, "open_risk_limit": risk_cap,
-                       "open_risk_unknown": risk_unknown, "open_risk_complete": risk_unknown == 0,
-                       "one_day_move_95": one_day,
+                       "market_value": mv, "gross_market_value": sum(abs(x["market_value"]) for x in exps
+                                                                     if x["market_value"] is not None),
+                       "notional": notional, "option_premium_at_risk": premium,
+                       "estimated_liquidation_value": liq, "liquidation_complete": liq_unknown == 0,
+                       "theta_per_day": theta, "vega_per_point": vega, "gamma_dollars_per_1pct": gamma,
+                       "open_risk": rc["total_known"], "open_risk_limit": risk_cap,
+                       "open_risk_unknown": len(rc["unknown"]), "open_risk_complete": rc["includes_all_positions"],
+                       "one_day_move_95": bad_day.get("parametric_95") if bad_day.get("available") else None,
                        "complete": cov_["status"] == "COMPLETE",
                        "unknown_counts": {"exposure": exposure_unknown, "market_value": mv_unknown,
                                           "theta": theta_unknown, "vega": vega_unknown, "gamma": gamma_unknown,
-                                          "open_risk": risk_unknown}},
-            "by_symbol": [{"symbol": k, "exposure": v} for k, v in sorted(by_symbol.items(), key=lambda kv: -abs(kv[1]))],
-            "by_sector": [{"sector": k, "exposure": v} for k, v in sorted(by_sector.items(), key=lambda kv: -abs(kv[1]))],
+                                          "open_risk": len(rc["unknown"]), "liquidation": liq_unknown}},
+            "by_symbol": by_symbol, "by_sector": by_sector, "bad_day": bad_day,
+            "betas": stats, "return_quality": quality, "definitions": DEFINITIONS,
             "correlation": corr, "correlated_pairs": pairs, "stress": stress_rows, "daily_loss": daily,
             "warnings": warnings, "account_size": account_size}
 
 
-__all__ = ["analyse", "daily_loss", "stress", "exposure", "coverage", "known_sum", "DEFAULT_SCENARIOS", "DAILY_LOSS_MODES"]
+__all__ = ["analyse", "daily_loss", "stress", "exposure", "coverage", "risk_coverage", "known_sum", "returns_frame",
+           "beta_stats", "betas", "one_day_risk", "return_quality", "DEFAULT_SCENARIOS", "DAILY_LOSS_MODES", "DEFINITIONS"]

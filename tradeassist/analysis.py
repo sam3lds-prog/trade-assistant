@@ -730,7 +730,7 @@ class Analyst:
                 log.info("No earnings date for %s: %s", v["symbol"], exc)
             found.extend(alert_rules.position_alerts(v, trend, earnings, today))
         s = self.svc.settings
-        risks = [exposure(v, None)["risk_to_invalidation"] for v in open_views]
+        risks = [exposure(v, None)["open_risk"] for v in open_views]
         open_risk = float(sum(r for r in risks if r is not None)) if open_views else None
         daily = self.daily_loss(views) if self.svc.settings.features.get("portfolio_risk") else None
         found.extend(alert_rules.account_alerts(daily, open_risk, s.account_size * s.max_open_risk_pct / 100.0,
