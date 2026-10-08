@@ -54,11 +54,19 @@ function buildPositions() {
   filter.addEventListener("change", refresh);
   const form = newPositionForm(async p => { await refresh(); showDetail(p); });
 
+  const rebuild = el("button", { class: "plain small", text: "Rebuild missing snapshots" });
+  const rebuildNote = el("span", { class: "small muted", "aria-live": "polite" });
+  rebuild.addEventListener("click", () => withBusy(rebuild, error, async () => {
+    const r = await api("/v2/snapshots/backfill", { dry_run: false, upgrade_hindsight: true });
+    rebuildNote.textContent = ` ${r.created} added, ${r.superseded} replaced, ${r.unavailable} not available from the price history (${r.positions_checked} positions checked).`;
+    await refresh(); if (selected) openDetail(selected);
+  }));
   const view = el("section", {},
     el("h2", { text: "Positions" }),
     el("p", { class: "lede", text: "Stock you are long or short, and the calls and puts you hold, in one place. Each position is built from its fills, so partial entries and exits, average cost, fees and profit or loss come out right. Record what you did at your broker here; this app never places orders." }),
     error,
-    el("div", { class: "panel" }, el("div", { class: "panel-head" }, el("h3", { text: "Your positions" }), filter), summary, listBox),
+    el("div", { class: "panel" }, el("div", { class: "panel-head" }, el("h3", { text: "Your positions" }), filter), summary, listBox,
+      el("p", { class: "small", style: "margin-top:8px" }, rebuild, rebuildNote)),
     detailBox, form);
   view.onShow = () => { refresh(); if (selected) openDetail(selected); };
   return view;
@@ -127,7 +135,10 @@ function positionDetail(p, onChange) {
   savePlan.addEventListener("click", () => act(savePlan, () => {
     const body = { thesis: thesis.value, setup_type: setup.value, notes: notes.value };
     for (const [k, input] of [["invalidation_price", inv], ["target_1", t1], ["target_2", t2], ["risk_amount", risk], ["intended_horizon", horizon]]) {
-      const v = optNum(input); if (v !== null) body[k] = k === "intended_horizon" ? Math.round(v) : v;
+      const v = optNum(input);
+      // A blank box clears a value that was set (sent as null); a box that was already blank is left out.
+      if (v !== null) body[k] = k === "intended_horizon" ? Math.round(v) : v;
+      else if (p[k] !== null && p[k] !== undefined) body[k] = null;
     }
     return api(`/v2/positions/${p.id}/plan`, body);
   }));
@@ -145,8 +156,21 @@ function positionDetail(p, onChange) {
     { label: "Quantity", num: true, cell: x => qtyText(x.quantity) },
     { label: "Price", num: true, cell: x => money(x.price) },
     { label: "Fees", num: true, cell: x => money(x.fees) },
-    { label: "Recorded from", cell: x => ({ MANUAL: "you", IMPORT: "option journal", ROBINHOOD: "Robinhood" })[x.source] || x.source },
-    { label: "Note", cell: x => x.note || "" }], p.executions) : el("p", { class: "small muted", text: "No fills yet: this is a plan." }));
+    { label: "Recorded from", cell: x => ({ MANUAL: "you", IMPORT: p.legacy_trade_id ? "option journal" : "import", ROBINHOOD: "Robinhood" })[x.source] || x.source },
+    { label: "Note", cell: x => x.note || "" },
+    ...(p.legacy_trade_id ? [] : [{ label: "", cell: x => { const b = el("button", { class: "plain small", text: "Correct" }); b.addEventListener("click", ev => { ev.stopPropagation(); fixBox.replaceChildren(correctionForm(p, x, onChange)); }); return b; } }])],
+    p.executions) : el("p", { class: "small muted", text: "No fills yet: this is a plan." }));
+  const fixBox = el("div");
+  box.append(fixBox);
+  if (p.corrections && p.corrections.length) {
+    box.append(el("h4", { text: "Corrections" }), table([
+      { label: "When", cell: c => timeText(c.changed_at) },
+      { label: "Fill", num: true, cell: c => String(c.execution_id ?? "") },
+      { label: "Changed", cell: c => Object.keys(c.new || {}).filter(k => JSON.stringify(c.new[k]) !== JSON.stringify((c.previous || {})[k])).map(k => `${k.replace("_", " ")}: ${fillValue(k, c.previous[k])} → ${fillValue(k, c.new[k])}`).join("; ") || c.action.toLowerCase() },
+      { label: "Why", cell: c => c.reason },
+      { label: "By", cell: c => ({ USER: "you", JOURNAL_SYNC: "option journal", REPAIR: "repair" })[c.source] || c.source }], p.corrections),
+      el("p", { class: "small muted", text: "Fills are corrected in place and every change is kept here with the values before and after." }));
+  }
   if (p.legacy_trade_id) {
     box.append(el("p", { class: "small muted", text: "This position mirrors an entry in the option journal. Log its fills there and they appear here." }));
   } else if (p.status === "CLOSED") {
@@ -170,7 +194,7 @@ function positionDetail(p, onChange) {
   // What the market looked like at plan, entry, exit and reviews.
   box.append(el("h4", { text: "Snapshots" }));
   box.append(p.snapshots.length ? table([
-    { label: "Taken", cell: s => `${s.snapshot_type[0]}${s.snapshot_type.slice(1).toLowerCase()} · ${timeText(s.timestamp)}` },
+    { label: "Snapshot · market as of", cell: s => `${s.snapshot_type[0]}${s.snapshot_type.slice(1).toLowerCase()} · ${timeText(s.timestamp)}` },
     { label: "Stock", num: true, cell: s => money(s.underlying_price) },
     { label: "RSI", num: true, cell: s => num(s.rsi_14, 0) },
     { label: "MACD hist.", num: true, cell: s => num(s.macd_histogram, 2) },
@@ -180,7 +204,10 @@ function positionDetail(p, onChange) {
     { label: "Market", cell: s => s.market_regime ? s.market_regime.replaceAll("_", " ").toLowerCase() : "n/a" },
     ...(leg ? [{ label: "Delta", num: true, cell: s => num(s.delta, 2) }, { label: "IV", num: true, cell: s => isNum(s.iv) ? pct(100 * s.iv, 0) : "n/a" }] : []),
     { label: "Daily bar", cell: s => s.bar_status ? `${s.bar_status.toLowerCase()} · ${s.data_timestamp}` : (s.data_timestamp || "n/a") },
+    { label: "Source", cell: snapshotSource },
   ], p.snapshots) : el("p", { class: "small muted", text: "None yet." }));
+  if (p.snapshots.some(s => s.effective !== false && s.uses_later_data)) box.append(banner("warn", "A snapshot here was built from market data after the fill (marked hindsight). It is shown, but analytics do not use it as what was known at entry. Rebuilding snapshots replaces it with one from the last close before the fill."));
+  if (p.executions.length && !p.snapshots.some(s => s.snapshot_type === "ENTRY" && s.effective !== false)) box.append(el("p", { class: "small muted", text: "Historical entry-time market data is unavailable for this position so far. Rebuild snapshots on the Positions screen to add it where the price history allows." }));
 
   const buttons = el("div", { class: "row", style: "margin-top:12px" });
   const snap = el("button", { class: "plain", text: "Take a review snapshot now" });
@@ -206,6 +233,44 @@ function positionDetail(p, onChange) {
   if (p.executions.length) box.append(positionAnalyticsBox(p));
   box.append(buttons, error, gradeBox);
   return box;
+}
+
+const SNAP_METHOD = { LIVE: "Live", PRIOR_BAR: "Rebuilt: last close before the fill", END_OF_DAY: "Rebuilt: fill day's close", JOURNAL_QUOTE: "Journal ticket quote" };
+function snapshotSource(s) {
+  const parts = [SNAP_METHOD[s.method] || (s.method ? s.method.toLowerCase() : "not recorded")];
+  if (s.capture_timing === "RETROSPECTIVE" && s.method === "LIVE") parts.push("taken later");
+  const node = el("span", { title: [s.provenance && s.provenance.note, s.observation_cutoff ? `data up to ${timeText(s.observation_cutoff)}` : "", s.superseded_reason ? `replaced: ${s.superseded_reason}` : ""].filter(Boolean).join(" · ") }, parts.join(", "));
+  if (s.uses_later_data) node.append(" ", statusTag("warn", "hindsight"));
+  if (s.effective === false) { node.append(" ", statusTag("info", "replaced")); node.classList.add("muted"); }
+  return node;
+}
+const fillValue = (k, v) => v === null || v === undefined ? "n/a" : k === "executed_at" ? timeText(v) : k === "side" ? (SIDE_WORDS[v] || v) : k === "price" || k === "fees" ? money(v) : String(v);
+
+function correctionForm(p, x, onChange) {
+  const error = el("div", { class: "error", role: "alert" });
+  const sides = p.direction === "LONG" ? [["BUY", "Buy"], ["SELL", "Sell"]] : [["SELL_SHORT", "Sell short"], ["BUY_TO_COVER", "Buy to cover"], ["SELL", "Sell (opens)"], ["BUY", "Buy (covers)"]];
+  const side = el("select", { "aria-label": "Action" }, sides.map(([v, t]) => el("option", { value: v, text: t }))); side.value = x.side;
+  const qty = el("input", { type: "number", min: 0, step: p.instrument_type === "OPTION" ? 1 : "any", value: x.quantity });
+  const price = numInput({ value: x.price }), fees = numInput({ value: x.fees });
+  const local = new Date(x.executed_at).toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T").slice(0, 16);
+  const when = timeInput(); when.value = local;
+  const reason = textInput({ placeholder: "What was wrong, for the record" });
+  const save = el("button", { class: "primary", text: "Save the correction" });
+  save.addEventListener("click", () => withBusy(save, error, async () => {
+    const body = { reason: reason.value.trim() };
+    if (side.value !== x.side) body.side = side.value;
+    if (Number(qty.value) !== x.quantity) body.quantity = Number(qty.value);
+    if (Number(price.value) !== x.price) body.price = Number(price.value);
+    if (Number(fees.value) !== x.fees) body.fees = Number(fees.value);
+    if (when.value && when.value !== local) body.executed_at = when.value;
+    if (Object.keys(body).length === 1) throw new Error("Change at least one value.");
+    if (body.reason.length < 3) throw new Error("Say why the fill is being corrected.");
+    onChange(await api(`/v2/positions/${p.id}/executions/${x.id}/correct`, body));
+  }));
+  return el("div", { class: "panel", style: "margin-top:8px" }, el("h4", { text: `Correct the fill of ${timeText(x.executed_at)}` }),
+    el("p", { class: "small muted", text: "Fix what was entered wrongly. The fill is changed in place, the position's figures are worked out again, and the old and new values are kept with your reason." }),
+    el("div", { class: "inline-form" }, field("Action", side), field("Quantity", qty), field("Price", price), field("Fees", fees), field("When (New York time)", when)),
+    field("Reason", reason), el("div", { class: "row", style: "margin-top:8px" }, save), error);
 }
 
 function newPositionForm(onSaved) {

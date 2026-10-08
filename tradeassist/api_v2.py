@@ -58,9 +58,24 @@ class ExecutionCreate(Strict):
     fees: float = Field(0.0, ge=0)
     executed_at: str | None = None
     note: str = ""
+    # For fills copied from a broker: its id makes recording the same fill twice a no-op.
+    source: Literal["MANUAL", "IMPORT", "ROBINHOOD"] = "MANUAL"
+    external_id: str | None = Field(None, min_length=1, max_length=200)
+
+
+class ExecutionCorrection(Strict):
+    """Only the fields sent are corrected. `reason` is required and kept with the change."""
+    side: Literal["BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER"] | None = None
+    quantity: float | None = Field(None, gt=0)
+    price: float | None = Field(None, ge=0)
+    fees: float | None = Field(None, ge=0)
+    executed_at: str | None = None
+    reason: str = Field(..., min_length=3, max_length=500)
 
 
 class PlanUpdate(Strict):
+    """Only the fields sent change. Send null to clear a level, the risk amount or the horizon;
+    leave a field out to keep it. Thesis, setup and notes take an empty string to clear."""
     thesis: str | None = None
     setup_type: str | None = None
     intended_horizon: int | None = Field(None, ge=1, le=1000)
@@ -68,7 +83,13 @@ class PlanUpdate(Strict):
     target_1: float | None = Field(None, gt=0)
     target_2: float | None = Field(None, gt=0)
     risk_amount: float | None = Field(None, gt=0)
+    initial_risk_per_unit: float | None = Field(None, gt=0)
     notes: str | None = None
+
+
+class SnapshotBackfill(Strict):
+    dry_run: bool = False
+    upgrade_hindsight: bool = True
 
 
 class HistoryBuild(Strict):
@@ -414,7 +435,35 @@ def build_router(svc: Any) -> APIRouter:
     @router.post("/positions/{position_id}/plan")
     def update_plan(position_id: int, req: PlanUpdate):
         need("unified_positions")
-        return clean(desk.update(position_id, {k: v for k, v in req.model_dump().items() if v is not None}))
+        # Fields the request sent, including nulls: a null clears, a field left out is kept.
+        return clean(desk.update(position_id, req.model_dump(exclude_unset=True)))
+
+    @router.post("/positions/{position_id}/executions/{execution_id}/correct")
+    def correct_execution(position_id: int, execution_id: int, req: ExecutionCorrection):
+        need("unified_positions")
+        changes = req.model_dump(exclude_unset=True, exclude={"reason"})
+        if any(v is None for v in changes.values()):
+            raise PositionError("A correction needs a value for each field it changes")
+        return clean(desk.correct(position_id, execution_id, changes, req.reason))
+
+    @router.get("/positions/{position_id}/corrections")
+    def position_corrections(position_id: int):
+        need("unified_positions")
+        from .positions import corrections, read
+        with svc.db.tx() as cur:
+            read(cur, position_id)                       # 400 if there is no such position
+            return clean({"position_id": position_id, "corrections": corrections(cur, position_id)})
+
+    @router.post("/snapshots/backfill")
+    def backfill_snapshots(req: SnapshotBackfill):
+        need("unified_positions")
+        return clean(desk.backfill_snapshots(req.dry_run, req.upgrade_hindsight))
+
+    @router.get("/snapshots/status")
+    def snapshot_status():
+        need("unified_positions")
+        from .snapshots import status
+        return clean(status(svc.db))
 
     @router.post("/positions/{position_id}/cancel")
     def cancel_position(position_id: int, req: Note):

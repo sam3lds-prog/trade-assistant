@@ -118,3 +118,25 @@ Checked on screen (demo data, 1280 px and 390 px): portfolio with an unpriced op
 stop, and "(1 left out)" on each stress test; no horizontal scrolling.
 
 Tests: 390 passed, 2 skipped before the property tests; 394 passed, 2 skipped with them.
+
+### Sprint 2: position history and journal integrity (2.1.1)
+
+Migration 5 adds snapshot provenance columns, `execution_corrections`,
+`snapshot_reconstruction`, `executions.external_id` with a unique index per source, and a
+unique index allowing one effective PLAN, ENTRY and EXIT per position. It infers provenance
+for existing snapshots and marks duplicates superseded; it changes no fill.
+
+| Requirement | Done | Where | Tests (`test_history_integrity.py`) |
+| --- | --- | --- | --- |
+| 2.1 Snapshots for journal trades | Shared rules in `snapshots.py` used by the desk and, through journal listeners, by the classic journal; PLAN from the ticket's saved quote; idempotent `reconcile` and `backfill` with status per attempt; `/v2/snapshots/backfill` and `/status`; "Rebuild missing snapshots" button | `snapshots.py`, `desk.py`, `journal.py`, `api_v2.py`, `v2.js` | `test_2_1_*` (3), migration 5 test |
+| Stable journal mirror (found in audit) | `sync_legacy_trade` reconciles fills in place; ids stable; changes recorded as JOURNAL_SYNC corrections; runs on migration-1 tables only, since migration 1 calls it | `positions.py` | `test_journal_sync_is_idempotent_and_keeps_fill_ids`, `test_resyncing_a_2_1_database_changes_no_fill` |
+| 2.2 Clearing plan fields | `exclude_unset`; null clears nullable fields, omitted keeps, text fields refuse null; `initial_risk_per_unit` added to the API; the plan form sends null for a cleared box | `api_v2.py`, `positions.py`, `v2.js` | `test_2_2_*` (3) |
+| 2.3 Time-accurate snapshots | LIVE within 15 minutes of the fill, else PRIOR_BAR from the last finished bar before it; fill price as the stock price; trend and regime extras use the same cutoff; `uses_later_data`; analytics ignore hindsight snapshots and report how many trades lack entry context | `desk.py`, `snapshots.py`, `analytics.py` | `test_2_3_*` (3), hindsight replacement test |
+| 2.4 Audited corrections | `correct_execution` with reason, source, before/after values and ledger figures in one transaction; may change status (the one sanctioned way); dependent snapshots superseded and rebuilt; journal mirrors refused; UI form and history | `positions.py`, `desk.py`, `api_v2.py`, `v2.js` | `test_2_4_*` (6) |
+| 2.5 Import idempotency | `external_id` per source: repeat is a no-op, a conflicting repeat is refused; fills without an id are never merged | `positions.py`, `api_v2.py` | `test_2_5_*` (2) |
+
+Version set to 2.1.1. Tests: 415 passed, 2 skipped.
+
+Known limitations: there is no broker import in the app, so 2.5 covers the recording side
+only. Journal fill times are when the attempt was logged. Rebuilt snapshots have no option
+quotes or Greeks, because no connected source has their history.

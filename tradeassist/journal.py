@@ -8,15 +8,18 @@ against results.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import statistics
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .db import Database
 from .positions import sync_legacy_trade
 from .optionmath import NY
 from .pricer import BUCKETS, bucket_for
+
+log = logging.getLogger(__name__)
 
 MIN_CALIBRATION_ATTEMPTS = 10
 TARGET_FILL_RATE = 0.70
@@ -52,6 +55,18 @@ def _row_to_trade(row) -> dict[str, Any]:
 class Journal:
     def __init__(self, db: Database):
         self.db = db
+        # Called with a trade id after a change is committed. The position desk listens, to bring
+        # the trade's mirror snapshots up to date (snapshots.py); a failing listener is logged and
+        # never undoes or blocks the journal change.
+        self.listeners: list[Callable[[int], None]] = []
+
+    def _changed(self, trade_id: int) -> None:
+        for listener in list(self.listeners):
+            try:
+                listener(trade_id)
+            except Exception as exc:          # noqa: BLE001
+                log.warning("After journal entry %s changed, %s failed: %s", trade_id,
+                            getattr(listener, "__name__", "a listener"), exc)
 
     # --- writing ---------------------------------------------------------
     def create(self, *, data_source: str, symbol: str, option_symbol: str, option_type: str, strike: float,
@@ -75,7 +90,8 @@ class Journal:
                  json.dumps(signals), json.dumps(overrides)))
             trade_id = int(cur.lastrowid)
             sync_legacy_trade(cur, trade_id)          # keep the unified positions in step
-            return trade_id
+        self._changed(trade_id)
+        return trade_id
 
     def get(self, trade_id: int) -> dict[str, Any]:
         row = self.db.one("SELECT * FROM trades WHERE id = ?", (trade_id,))
@@ -144,6 +160,8 @@ class Journal:
                             "WHERE id = ?", (limit_price, _now(), pnl, trade_id))
             if filled:
                 sync_legacy_trade(cur, trade_id)
+        if filled:
+            self._changed(trade_id)
         return self.get(trade_id)
 
     def close_at(self, trade_id: int, exit_price: float, note: str = "") -> dict[str, Any]:
@@ -160,6 +178,7 @@ class Journal:
                         "notes = TRIM(notes || ' ' || ?) WHERE id = ?",
                         (exit_price, _now(), pnl, note, trade_id))
             sync_legacy_trade(cur, trade_id)
+        self._changed(trade_id)
         return self.get(trade_id)
 
     def cancel(self, trade_id: int, note: str = "") -> dict[str, Any]:
@@ -170,6 +189,7 @@ class Journal:
             cur.execute("UPDATE trades SET status = 'cancelled', notes = TRIM(notes || ' ' || ?) WHERE id = ?",
                         (note, trade_id))
             sync_legacy_trade(cur, trade_id)
+        self._changed(trade_id)
         return self.get(trade_id)
 
     # --- reading for limits ----------------------------------------------
