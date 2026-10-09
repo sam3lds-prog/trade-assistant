@@ -1,4 +1,4 @@
-# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.3)
+# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.3.1)
 
 This is the engineering record for the improvement programme that follows 2.1.0: the
 baseline it started from, what was found in the code, what each sprint changed, the tests
@@ -239,6 +239,54 @@ are reported, not changed. Duplicate-looking fills are reported, never merged, b
 real orders can fill alike. The recent-problems list is kept in memory and starts empty when
 the app restarts; the full log is in the terminal running the app.
 
+## Independent review and 2.3.1
+
+Two reviewers that had not seen the code being written checked everything from 2.1.0 to
+2.3.0: one for accounting and data integrity, one for risk figures, look-ahead, market-data
+freshness and security. Each finding was reproduced with a script before it was fixed, and
+each now has a regression test in `tests/test_review_fixes.py` (named by its id below) that
+fails on 2.3.0 and passes on 2.3.1. Migration 9 is new; migration 8 was left as shipped.
+
+| Id | Severity | Finding (confirmed by reproduction) | Fix |
+| --- | --- | --- | --- |
+| B1 | High | The ticket's open-risk limit counted only option-journal premium: a stock position over the limit left the check passing | Open risk of every other position on its stated basis is added (`TradeAssistant.book_risk`); unmeasured risk is a note, or a limit under `INCOMPLETE_RISK_POLICY=BLOCK` |
+| B2 | High | When positions could not be read, the daily loss fell back to the journal and reported COMPLETE and OK | It is UNAVAILABLE and INCOMPLETE, with the reason |
+| B3 | High | A stale saved quote counted as a measurement in the daily loss, so the ticket could show the day as complete and OK | A stale price does not measure the day; the position is listed as not measured |
+| A1 | High | One position whose fills no longer account (possible in 2.1.0 data) made the positions list, portfolio risk, reconciliation, data health and repair all fail | Listed apart with its fills and a Correct button, counted as not measured everywhere; the fill can be corrected; repair works item by item |
+| B4 | High/medium | The bad-day figures silently left out a held stock with no history | `left_out`, `complete`, the share of exposure measured, a BAD_DAY_PARTIAL warning, and the UI names it |
+| B5 | Medium | Credentials could reach the health endpoints, error replies and tracebacks; the redaction rules missed short bearer tokens, JSON keys and other forms | Source errors are redacted where they arise; broader rules; tracebacks and uvicorn's loggers redacted |
+| B6 | Medium | The calibration's held-out dates were part of the test they were meant to confirm | The check uses the earlier 70% of dates only |
+| B7 | Medium | Yesterday's close for the daily loss could come from history that failed to refresh (days old) | Not used; the position is listed with the reason |
+| B8 | Medium | No Host check (DNS rebinding could reach the API); a body-less cross-site POST was accepted | Host names limited to this computer; writes from another page refused (403) |
+| A2 | Medium | A split, a voided split or a contract adjustment could reopen a closed position with no audit record, leaving a stale exit snapshot | Refused unless confirmed with a reason; recorded as a correction; snapshots reconciled |
+| A3 | Medium | A split entered as a date was applied again to fills made earlier that day | A plain date is the ex-date (start of day) |
+| A4 | Medium | A remainder below the smallest recordable quantity (from rounding or a split) could never be closed | Closed with the fill that left it (`rounded_off`); an over-close by less than that amount closes what is open |
+| A5 | Medium | Borrow status said RECORDED when fees covered only some days | Coverage by calendar day; PARTIAL names the uncovered days; the estimate covers them |
+| B9 | Medium/low | Research fingerprints missed the benchmark and regime bars, so changed inputs looked like non-determinism | Every bar set a run reads is fingerprinted (`Market.recording`) |
+| B10 | Medium/low | Freshness was judged from the last trade's time before the bid and ask time | The older of the bid and ask times first |
+| A6 | Low/medium | Voiding a split restored stale plan levels; the planned size was not rescaled for a position recorded after the fact | The split's own scaling is undone on today's values; the size rule uses the first fill too |
+| A7 | Low | Repair re-read journal mirrors (changing their fills) while saying no fill was changed; the journal check folded extra fills | Wording corrected; fills compared as lists |
+| A8 | Low | A back-dated fill could move a reopening on a position reopened by an older version | Refused unless it removes one |
+| A9 | Low | Thesis and notes edited on a journal mirror were overwritten at the next journal change | Edited in the journal; refused on the mirror with the reason |
+| A10 | Low | Expiring an option worthless with no stock price known skipped the in-the-money check | A reason is required |
+| A11 | Low | Migration 8 checked an option leg's three fields in one rule, so a leg with one old fault could get another | Migration 9: one rule per field |
+| B11 | Low | A quote time in the future was FRESH | UNKNOWN |
+| B12 | Low | A Monday holiday made Friday's close stale (safe side) | The allowance reaches the previous weekday's session |
+| B13 | Low | Trade reviews used the exit day's range after an intraday exit | Left out unless the exit was at the close |
+| B14 | Low | The dependence-adjusted interval was too narrow when one period held most cases | Periods weighted by size: (sum of sizes)^2 / (sum of squared sizes) |
+| B15 | Low | A total nothing could be measured for showed $0 | `null`, shown as unknown |
+| B16 | Low | A stress test of a bought option without a volatility could lose more than its value | Capped at its value |
+
+Checked and found sound by the reviewers: ledger replay for adds, partial exits, fees, shorts
+closed with BUY or BUY_TO_COVER, splits after a partial close and exercise; migrations 5 to 8
+on all three fixtures (no original value changed, re-running changes nothing, backups taken,
+rollback on failure); snapshot cut-offs and idempotent backfills; import ids; returns without
+forward fill, the 40-day beta minimum, VaR and expected-shortfall signs and units; the
+pause logic of the source health; no endpoint that places, changes or cancels an order; no
+stale quote in option pricing; deterministic research hashes.
+
+Version set to 2.3.1. Tests: 513 passed, 2 skipped.
+
 ## Test evidence (deliverable C)
 
 Run on Python 3.13.16 with pandas 3.0.5, numpy 2.5.3, FastAPI 0.143.0 and pydantic 2.13.5:
@@ -254,7 +302,8 @@ Run on Python 3.13.16 with pandas 3.0.5, numpy 2.5.3, FastAPI 0.143.0 and pydant
 | Sprint 4 | 443 | 2 |
 | Sprint 5 (2.2.0) | 454 | 2 |
 | Sprint 6 | 468 | 2 |
-| **Sprint 7 (2.3.0)** | **484** | **2** |
+| Sprint 7 (2.3.0) | 484 | 2 |
+| **Review fixes (2.3.1)** | **513** | **2** |
 
 The two skips are the same as at the baseline (`test_optionmath.py`: implied volatility
 cannot be solved from a near-zero price). The one warning is the test client's own
@@ -264,28 +313,28 @@ New test files in this programme: `test_migrations.py` (7), `test_p0_defects.py`
 `test_ledger_properties.py` (4, property-based with hypothesis, derandomized),
 `test_history_integrity.py` (21), `test_risk_models.py` (14), `test_short_and_options.py`
 (14), `test_freshness.py` (11), `test_validation.py` (14), `test_diagnostics.py` (12),
-`test_static_assets.py` (4). Test names begin with the requirement they prove
+`test_static_assets.py` (4), `test_review_fixes.py` (29). Test names begin with the requirement they prove
 (`test_1_2_*`, `test_6_4_*`, ...).
 
-Line coverage of the package: **93%** (10,609 statements). The modules this programme
+Line coverage of the package: **93%** (10,889 statements). The modules this programme
 changed most:
 
 | Module | Coverage |
 | --- | --- |
-| `positions.py` | 93% |
-| `portfolio.py` | 96% |
+| `positions.py` | 94% |
+| `portfolio.py` | 97% |
 | `snapshots.py` | 90% |
-| `analytics.py` | 93% |
+| `analytics.py` | 94% |
 | `signalbook.py` | 95% |
-| `freshness.py` | 88% |
-| `market.py` | 94% |
-| `desk.py` | 87% |
+| `freshness.py` | 89% |
+| `market.py` | 93% |
+| `desk.py` | 88% |
 | `reconcile.py` | 90% |
-| `events.py` | 92% |
+| `events.py` | 90% |
 | `runs.py` | 92% |
 | `backup.py` | 97% |
 | `db.py` | 99% |
-| `schema_v2.py` | 94% |
+| `schema_v2.py` | 95% |
 | `api_v2.py` | 95% |
 
 Lint: `ruff check .` passes (rules in `ruff.toml`). Screens were checked in Chromium at
@@ -298,11 +347,12 @@ favicon).
 Each fixture is a database written by the released code of that version
 (`tests/fixtures/make_legacy_dbs.py`), with journal entries in every state and, from 2.0.0
 on, unified positions including one reopened after closing. Each was opened by 2.3.0, which
-migrated it, then reconciled and repaired:
+migrated it, then reconciled and repaired (2.3.1 adds migration 9, which only replaces the
+option-leg rule, and gives the same results):
 
 | | 0.4.0 | 2.0.0 | 2.1.0 |
 | --- | --- | --- | --- |
-| Schema | none → 8 | 3 → 8 | 4 → 8 |
+| Schema | none → 8 (9 in 2.3.1) | 3 → 8 (9) | 4 → 8 (9) |
 | Copy taken before migrating | yes (`…-before-migration-1-…`) | yes (`…-before-migration-4-…`) | yes (`…-before-migration-5-…`) |
 | Journal entries / attempts kept | 5 / 4 | 5 / 4 | 5 / 4 |
 | Fills | 0 → 5 (journal mirrored) | 12, unchanged | 12, unchanged |
@@ -334,15 +384,17 @@ What this means for a real database:
 
 | Check | Result |
 | --- | --- |
-| Full test suite | 484 passed, 2 skipped |
+| Full test suite | 513 passed, 2 skipped (2.3.1) |
 | Lint | `ruff check .` clean |
+| Independent review | two reviewers; 27 findings reproduced and fixed with regression tests (above) |
 | Migrations from 0.4.0, 2.0.0 and 2.1.0 databases, with a copy first | pass (`test_migrations.py`, report above) |
 | A failed migration rolls back and leaves the copy | pass (`test_migrations.py`) |
 | Ledger property tests | pass (`test_ledger_properties.py`) |
 | No endpoint places, changes or cancels an order; Robinhood tools are read-only | unchanged and re-checked by `test_robinhood.py` (order and account tools refused) |
 | No made-up historical option prices | option backtests stay off (`options_backtest` flag) and refuse to run |
 | Unknown never shown as zero | portfolio totals, daily loss, open risk, analytics and the positions list (tests in `test_p0_defects.py`, `test_risk_models.py`, `test_validation.py`) |
-| No credential in logs, health endpoints or the health screen | pass (`test_8_3_*`, `test_7_4_*`, `test_freshness.py`) |
+| No credential in logs, health endpoints, error replies or the health screen | pass (`test_8_3_*`, `test_7_4_*`, `test_B5_*`) |
+| Requests from other web pages cannot change data | pass (`test_B8_*`) |
 | Every screen opens without a script error, desktop and phone width | pass (`test_static_assets.py`; screenshots) |
-| Version numbers | `tradeassist.__version__` 2.3.0; the page warns when it was loaded from an older version |
+| Version numbers | `tradeassist.__version__` 2.3.1; the page warns when it was loaded from an older version |
 | CI | the workflow is in `.github/workflows/tests.yml`, but GitHub Actions has not run on this repository (no runs recorded; it appears to be switched off in the repository's settings) |

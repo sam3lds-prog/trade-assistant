@@ -113,7 +113,7 @@ def test_6_1_the_database_refuses_impossible_rows(app):
         with svc.db.tx() as cur:
             cur.execute("INSERT INTO positions (symbol, instrument_type, direction, status, quantity, created_at, updated_at) "
                         "VALUES ('A', 'STOCK', 'LONG', 'PLANNED', 0, 'x', 'x')")
-    with pytest.raises(sqlite3.IntegrityError, match="strike and multiplier"):
+    with pytest.raises(sqlite3.IntegrityError, match="strike above zero"):
         with svc.db.tx() as cur:
             cur.execute("INSERT INTO positions (symbol, instrument_type, direction, status, quantity, created_at, updated_at) "
                         "VALUES ('A', 'OPTION', 'LONG', 'PLANNED', 1, 'x', 'x')")
@@ -234,7 +234,7 @@ def test_8_3_migrations_are_logged_with_their_backup(tmp_path, caplog):
     conn.close()
     Database(path).close()
     line = next(r.getMessage() for r in caplog.records if "event=migration_applied" in r.getMessage())
-    assert "versions=5,6,7,8" in line and "backup=old-before-migration-5-" in line
+    assert "versions=5,6,7,8,9" in line and "backup=old-before-migration-5-" in line
 
 
 def test_position_errors_stay_plain(app):

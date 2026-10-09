@@ -74,6 +74,18 @@ def parse(stamp: Any) -> datetime | None:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
+def quote_time(q: Mapping[str, Any]) -> Any:
+    """The time a quote's price is from. A bid and ask are what a mark and a fill depend on, so
+    their time comes first, the older of the two (as the pricer measures quote age); the last
+    trade's time only when the source gives no bid or ask time. An option that has not traded for
+    days can have a live bid and ask, and a fresh trade does not make an old bid and ask fresh."""
+    sides = [parse(q.get(k)) for k in ("bid_time", "ask_time")]
+    sides = [t for t in sides if t is not None]
+    if sides:
+        return min(sides).isoformat()
+    return q.get("trade_time")
+
+
 def last_session_close(now: datetime) -> datetime:
     """The 4 p.m. New York close of the latest weekday session that has ended by `now`."""
     ny = now.astimezone(NY)
@@ -143,6 +155,8 @@ def observe(kind: str, instrument: str, provider: str, observed_at: Any, *, retr
     if seen is None:
         freshness = "UNKNOWN"
         warnings.append("the source gave no time for this price")
+    elif age < -120:
+        freshness = "UNKNOWN"               # a time in the future says nothing about how old the price is
     elif session == "OPEN":
         if not realtime:
             freshness = "DELAYED" if age <= DELAYED_SECONDS else "STALE"
@@ -150,8 +164,12 @@ def observe(kind: str, instrument: str, provider: str, observed_at: Any, *, retr
             freshness = "FRESH" if age <= max(limit, 1) else "STALE"
     else:
         latest = last_session_close(retrieved)
-        # Allowed: anything from the latest session on; and one extra day for a holiday.
-        floor = latest - timedelta(hours=7) - timedelta(days=1)
+        # Allowed: anything from the latest session on, and from the weekday session before it, for a market
+        # holiday (there is no holiday calendar here, so a Monday holiday must reach back to Friday).
+        before = latest - timedelta(days=1)
+        while before.weekday() >= 5:
+            before -= timedelta(days=1)
+        floor = before - timedelta(hours=7)
         freshness = "LAST_SESSION" if seen >= floor else "STALE"
     if from_cache:
         freshness = "STALE"
@@ -220,6 +238,8 @@ class SourceHealth:
             self.last_success = self._clock()
 
     def failure(self, what: str, error: str) -> None:
+        from .events import redact
+        error = redact(error)                # the health view and its endpoints never show a credential
         with self._lock:
             now = self._clock()
             self.consecutive_failures += 1
@@ -244,4 +264,4 @@ class SourceHealth:
 
 
 __all__ = ["observe", "thresholds", "quote_completeness", "label", "describe_age", "SourceHealth", "session_state",
-           "last_session_close", "KINDS"]
+           "last_session_close", "quote_time", "KINDS"]

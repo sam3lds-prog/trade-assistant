@@ -18,6 +18,53 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.3.1
+
+Fixes from an independent review of 2.1.0 to 2.3.0. Every one was reproduced first and has a
+regression test; the full list is in [IMPROVEMENTS.md](IMPROVEMENTS.md). Migration 9 runs on
+the first start (a copy of the database is taken first).
+
+**Risk checks**
+
+- The trade ticket's open-risk limit now counts open risk on the Positions screen, not only
+  the option journal. A position whose risk cannot be measured is named in a note.
+- The daily loss stop never reports a complete, OK day when the positions could not be read,
+  when a price is a stale saved copy, or when yesterday's close comes from history that could
+  not be refreshed.
+- The bad-day estimate names any holding it leaves out for lack of history, and says it
+  understates. A total that nothing could be measured for shows as unknown, not $0.
+
+**Records**
+
+- A position whose fills no longer add up (possible with data from older versions) no longer
+  stops the other screens: it is listed on its own with a Correct button for each fill and
+  counted as not measured everywhere.
+- A split, a voided split or a contract adjustment that would reopen a closed position asks
+  for confirmation and a reason, and is recorded as a correction.
+- A split entered as a date applies to every fill on that date. Voiding a split keeps later
+  splits and plan edits.
+- A tiny remainder left by rounding or a split (below a millionth of a share) closes with the
+  sale that left it, instead of keeping the position open for ever.
+- Borrow status is PARTIAL when any day of the short has no recorded fee.
+- The thesis and notes of an option-journal trade are edited in the journal.
+- Recording an option as expired worthless with no known stock price needs a reason.
+
+**Data and security**
+
+- A quote's age comes from its bid and ask times; a time in the future is unknown, not fresh;
+  Friday's close is not stale on a Monday holiday.
+- Credentials are removed from error messages, the health screens and tracebacks, not only
+  from log lines, and more forms of them are recognised.
+- The app answers only to this computer's own host names, and refuses changes requested by
+  another web page open in the browser.
+
+**Analytics**
+
+- Signal calibration is tested on the earlier 70% of dates only, so the held-out dates are a
+  real check. Frequency ranges are wider when one period holds most of the cases.
+- Trade reviews leave out the exit day's range when the exit was during the session.
+- Research runs fingerprint the benchmark and market-regime prices they used.
+
 ## 2.3.0
 
 **Fixed**

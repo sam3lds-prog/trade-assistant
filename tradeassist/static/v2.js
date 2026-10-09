@@ -36,7 +36,7 @@ function buildPositions() {
       const d = await api(`/v2/positions?status=${filter.value()}`);
       error.textContent = "";
       summary.replaceChildren(positionSummary(d.positions, filter.value()));
-      listBox.replaceChildren(positionTable(d.positions, p => openDetail(p.id)));
+      listBox.replaceChildren(...(d.invalid || []).map(u => unreadablePanel(u, async () => { await refresh(); })), positionTable(d.positions, p => openDetail(p.id)));
     } catch (e) { error.textContent = e.message; }
     finally { listBox.classList.remove("refetching"); }
   }
@@ -70,6 +70,23 @@ function buildPositions() {
     detailBox, form);
   view.onShow = () => { refresh(); if (selected) openDetail(selected); };
   return view;
+}
+
+// A position whose fills no longer add up (data from an older version, say): left out of every figure,
+// shown with its fills so the wrong one can be corrected.
+function unreadablePanel(u, onChange) {
+  const box = el("div", { class: "panel" }, el("h3", {}, `${u.description} `, statusTag("fail", "Fills do not add up")), banner("fail", u.text));
+  const formBox = el("div");
+  box.append(table([
+    { label: "When", cell: x => timeText(x.executed_at) },
+    { label: "Action", cell: x => SIDE_WORDS[x.side] || x.side },
+    // As stored, however small: a quantity too small to show is often what is wrong.
+    { label: "Quantity", num: true, cell: x => isNum(x.quantity) && x.quantity > 0 && x.quantity < 0.0001 ? x.quantity.toExponential(1) : qtyText(x.quantity) },
+    { label: "Price", num: true, cell: x => money(x.price) },
+    { label: "Fees", num: true, cell: x => isNum(x.fees) ? money(x.fees) : String(x.fees) },
+    { label: "", cell: x => { if (u.legacy_trade_id) return ""; const b = el("button", { class: "plain small", text: "Correct" }); b.addEventListener("click", () => formBox.replaceChildren(correctionForm(u, x, onChange))); return b; } }], u.executions), formBox);
+  if (u.legacy_trade_id) box.append(el("p", { class: "small muted", text: "It mirrors an option-journal entry: fix the entry in the journal, or run Repair on the Data health screen to re-read it." }));
+  return box;
 }
 
 function positionSummary(rows, which) {
@@ -286,6 +303,20 @@ function lifecycleBlock(p, onChange) {
   return out;
 }
 
+// A split (or voiding one) that would leave shares open on a closed position is refused until confirmed:
+// the refusal is shown with a button that sends the same request again, confirmed, with the reason given.
+async function withReopen(button, errorBox, send) {
+  errorBox.replaceChildren();
+  try { await withBusy(button, errorBox, () => send(false)); }
+  finally {
+    if (/confirm_reopen/.test(errorBox.textContent)) {
+      const again = el("button", { class: "plain small", text: "Record it and reopen the position" });
+      again.addEventListener("click", () => withBusy(again, errorBox, () => send(true)));
+      errorBox.append(" ", again);
+    }
+  }
+}
+
 function adjustmentsBlock(p, onChange) {
   const box = el("div");
   const error = el("div", { class: "error", role: "alert" });
@@ -297,15 +328,15 @@ function adjustmentsBlock(p, onChange) {
     { label: "Amount", num: true, cell: a => a.kind === "SPLIT" ? `${a.ratio} for 1` : a.kind === "BORROW_RATE" ? `${a.rate_pct}% a year` : signedMoney(a.amount, 2) },
     { label: "Covers", cell: a => a.period_start ? `${shortDate(a.period_start)} to ${shortDate(a.period_end)}` : "" },
     { label: "Note", cell: a => a.note || "" },
-    { label: "", cell: a => { if (a.voided_at) return ""; const b = el("button", { class: "plain small", text: "Void" }); b.addEventListener("click", ev => { ev.stopPropagation(); const why = prompt("Why is this entry wrong?"); if (why) withBusy(b, error, async () => onChange(await api(`/v2/positions/${p.id}/adjustments/${a.id}/void`, { reason: why }))); }); return b; } }], p.adjustments));
+    { label: "", cell: a => { if (a.voided_at) return ""; const b = el("button", { class: "plain small", text: "Void" }); b.addEventListener("click", ev => { ev.stopPropagation(); const why = prompt("Why is this entry wrong?"); if (why) withReopen(b, error, async confirm => onChange(await api(`/v2/positions/${p.id}/adjustments/${a.id}/void`, { reason: why, confirm_reopen: confirm }))); }); return b; } }], p.adjustments));
   const kind = el("select", { "aria-label": "Kind" }, kinds.map(k => el("option", { value: k, text: ADJ_WORDS[k] })));
   const amount = el("input", { type: "number", step: "0.01", placeholder: "-12.50 for a charge" }), date = timeInput();
   const perShare = numInput({ placeholder: "dividend per share" }), shares = numInput({ step: "any", placeholder: "shares" });
   const rate = numInput({ placeholder: "% a year" }), ratio = numInput({ step: "any", placeholder: "new per old" });
   const from = timeInput(), to = timeInput(), note = textInput({ placeholder: "optional" });
   const add = el("button", { class: "plain", text: "Record it" });
-  add.addEventListener("click", () => withBusy(add, error, async () => {
-    const body = { kind: kind.value, effective_at: date.value || null, note: note.value };
+  add.addEventListener("click", () => withReopen(add, error, async confirm => {
+    const body = { kind: kind.value, effective_at: date.value || null, note: note.value, confirm_reopen: confirm };
     for (const [k, input] of [["amount", amount], ["per_share", perShare], ["quantity", shares], ["rate_pct", rate], ["ratio", ratio]]) { const v = optNum(input); if (v !== null) body[k] = v; }
     if (from.value) body.period_start = from.value; if (to.value) body.period_end = to.value;
     onChange(await api(`/v2/positions/${p.id}/adjustments`, body));
@@ -915,16 +946,16 @@ function renderPortfolio(r) {
   frag.append(el("div", { class: "panel" }, el("h3", {}, "Exposure ", cov.status !== "COMPLETE" ? tagOf(COVERAGE_TAG, cov.status) : ""),
     el("p", { class: "small muted", text: "In delta-equivalent stock dollars. Gross adds longs and shorts; net lets them offset, so a hedged book shows both how big it is and which way it leans." }),
     el("div", { class: "metrics" },
-      metric(money(t.gross_exposure, 0), `Gross${share(t.gross_exposure)}${partialNote(u.exposure, n)}`),
-      metric(signedMoney(t.net_exposure), `Net${share(Math.abs(t.net_exposure))}${partialNote(u.exposure, n)}`),
-      metric(`${signedMoney(t.long_exposure)} / ${signedMoney(t.short_exposure)}`, "Long / short"),
-      metric(signedMoney(t.spy_equivalent), `SPY-equivalent (beta-weighted)${partialNote(u.exposure, n)}`),
-      metric(signedMoney(t.theta_per_day), `Time decay per day (options)${partialNote(u.theta, n)}`),
-      metric(signedMoney(t.vega_per_point), `Per point of implied volatility${partialNote(u.vega, n)}`)),
+      metric(knownMoney(t.gross_exposure, 0), `Gross${isNum(t.gross_exposure) ? share(t.gross_exposure) : ""}${partialNote(u.exposure, n)}`),
+      metric(knownSigned(t.net_exposure), `Net${isNum(t.net_exposure) ? share(Math.abs(t.net_exposure)) : ""}${partialNote(u.exposure, n)}`),
+      metric(isNum(t.long_exposure) ? `${signedMoney(t.long_exposure)} / ${signedMoney(t.short_exposure)}` : unknownText(), "Long / short"),
+      metric(knownSigned(t.spy_equivalent), `SPY-equivalent (beta-weighted)${partialNote(u.exposure, n)}`),
+      metric(knownSigned(t.theta_per_day), `Time decay per day (options)${partialNote(u.theta, n)}`),
+      metric(knownSigned(t.vega_per_point), `Per point of implied volatility${partialNote(u.vega, n)}`)),
     el("h4", { text: "Value" }),
     el("div", { class: "metrics" },
-      metric(signedMoney(t.market_value), `Market value at the mark${partialNote(u.market_value, n)}`),
-      metric(t.liquidation_complete === false && !isNum(t.estimated_liquidation_value) ? unknownText() : signedMoney(t.estimated_liquidation_value), `Closing now, at the bid or ask (estimate)${partialNote(u.liquidation, n)}`),
+      metric(knownSigned(t.market_value), `Market value at the mark${partialNote(u.market_value, n)}`),
+      metric(knownSigned(t.estimated_liquidation_value), `Closing now, at the bid or ask (estimate)${partialNote(u.liquidation, n)}`),
       isNum(t.option_premium_at_risk) && t.option_premium_at_risk > 0 ? metric(money(t.option_premium_at_risk, 0), "Option premium at risk") : null),
     cov.status !== "COMPLETE" ? el("p", { class: "small muted", text: "Totals add up the positions that could be measured; see the note at the top of the page." }) : null));
   if (r.risk_coverage) frag.append(riskPanel(r.risk_coverage));
@@ -975,7 +1006,7 @@ function portfolioStrip(r) {
   const riskUnknown = t.open_risk_unknown || 0;
   return el("div", { class: "panel" }, el("div", { class: "metrics" },
     metric(String(n), "Open positions"),
-    metric(money(t.gross_exposure, 0), `Gross exposure, net ${signedMoney(t.net_exposure)}${partialNote(u.exposure, n)}`),
+    metric(knownMoney(t.gross_exposure, 0), isNum(t.net_exposure) ? `Gross exposure, net ${signedMoney(t.net_exposure)}${partialNote(u.exposure, n)}` : "Exposure: no position could be measured"),
     metric(riskUnknown ? el("span", {}, money(t.open_risk, 0), el("span", { class: "small muted", text: " + unknown" })) : money(t.open_risk, 0),
       riskUnknown ? `Open risk (${riskUnknown} of ${n} not measured)` : `Open risk${isNum(t.open_risk_limit) ? ` of ${money(t.open_risk_limit, 0)} allowed` : ""}`),
     dl ? metric(el("span", {}, signedMoney(dl.known_total ?? dl.counted), dl.status === "OK" ? "" : el("span", { class: "small muted", text: dl.status === "INCOMPLETE" ? " so far" : "" })),
@@ -1019,6 +1050,7 @@ function badDayPanel(b) {
     metric(money(b.historical_95, 0), "1 day in 20, from the past days themselves"),
     metric(isNum(b.expected_shortfall_95) ? money(b.expected_shortfall_95, 0) : "n/a", "Average of the days worse than that"),
     metric(money(b.worst_day, 0), "Worst day in the sample")),
+    (b.left_out || []).length ? banner("warn", `Leaves out ${b.left_out.map(x => `${x.symbol} (${signedMoney(x.exposure)} exposure)`).join(", ")}: no usable price history, so these figures understate a bad day.`) : null,
     el("p", { class: "small muted", text: b.note }));
 }
 
@@ -1674,11 +1706,12 @@ const RECON_WORDS = {
   journal_mismatches: "Journal entries whose position differs", unresolved_options: "Options past expiration with contracts open",
   market_data_gaps: "Open positions with no price history", rule_breaks: "Rows the database rules would refuse",
   missing_snapshots: "Snapshots a position should have", hindsight_snapshots: "Snapshots built from later data",
+  stale_snapshots: "Snapshots that no longer apply",
   unavailable_snapshots: "Snapshots the price history cannot rebuild" };
 // What each finding means for the numbers on the other screens, in order of how much it matters.
 const RECON_LEVEL = { ledger_mismatches: "fail", invalid_states: "fail", rule_breaks: "fail", journal_mismatches: "warn",
   lifecycle_issues: "warn", possible_duplicate_fills: "warn", unresolved_options: "warn", market_data_gaps: "warn",
-  hindsight_snapshots: "info", missing_snapshots: "info", unavailable_snapshots: "info" };
+  hindsight_snapshots: "info", missing_snapshots: "info", unavailable_snapshots: "info", stale_snapshots: "warn" };
 
 function buildHealth() {
   const error = el("div", { class: "error", role: "alert" });
@@ -1704,6 +1737,7 @@ function renderHealth(h, reload) {
   // One line on top that says whether anything needs a look.
   const problems = [];
   if (src.status === "PAUSED" || src.status === "DEGRADED") problems.push(["fail", `The data source is ${src.status === "PAUSED" ? "paused after repeated failures" : "failing"}: ${src.last_error || "no detail given"}.`]);
+  if ((h.unreadable_positions || []).length) problems.push(["fail", `${h.unreadable_positions.length} open position${h.unreadable_positions.length === 1 ? "'s" : "s'"} fills no longer add up, so ${h.unreadable_positions.length === 1 ? "it is" : "they are"} left out of every figure: ${h.unreadable_positions.map(u => `${u.description} (${u.error})`).join("; ")}. Correct the fill on the Positions screen.`]);
   if (h.positions_missing_valuations.length) problems.push(["warn", `${h.positions_missing_valuations.length} open position${h.positions_missing_valuations.length === 1 ? "" : "s"} could not be valued, so totals that include them are incomplete.`]);
   if (q.stale) problems.push(["warn", `${q.stale} open position${q.stale === 1 ? " is" : "s are"} priced from a stale quote or one with no time.`]);
   if (rc && rc.needs_repair) problems.push(["fail", "Some stored figures differ from the fills they come from. Read the reconciliation report below before repairing."]);
@@ -1718,7 +1752,7 @@ function renderHealth(h, reload) {
       metric(`${src.successes} / ${src.failures}`, "Requests answered / failed since the app started"),
       src.paused_for_seconds ? metric(`${num(src.paused_for_seconds, 0)} s`, "Paused for") : null),
     src.last_error ? el("p", { class: "small error", text: `Last error: ${src.last_error}` }) : null,
-    el("p", { class: "small muted", text: "After three failures in a row the app waits 30 seconds before asking again. Position and portfolio screens may then show the last price received, marked stale; pricing an option and writing a ticket never use a saved price." })));
+    el("p", { class: "small muted", text: "After three failures in a row the app waits 30 seconds before asking again. Position and portfolio screens may then show the last price received, marked stale. Pricing an option never uses a saved price, and the daily loss stop never counts a stale price as measured." })));
 
   const fresh = Object.entries(q.by_freshness || {});
   frag.append(el("div", { class: "panel" }, el("h3", { text: "Prices of open positions" }),
@@ -1824,13 +1858,13 @@ function repairControl(r, reload) {
   const go = el("button", { class: "primary", text: "Copy the database, then repair" });
   const cancel = el("button", { class: "plain", text: "Cancel" });
   const ask = el("div", { class: "panel hidden" },
-    el("p", { text: `This recomputes ${n} position${n === 1 ? "'s figures from its" : "s' figures from their"} fills${j ? ` and re-reads ${j} journal entr${j === 1 ? "y" : "ies"}` : ""}. A copy of the database is saved first. No fill is changed, nothing is merged or deleted, and positions opened again after closing stay as recorded.` }),
+    el("p", { text: `This recomputes ${n} position${n === 1 ? "'s figures from its" : "s' figures from their"} fills${j ? ` and re-reads ${j} journal entr${j === 1 ? "y" : "ies"}` : ""}. A copy of the database is saved first. No fill you recorded is changed, merged or deleted${j ? "; the journal entries' fills are re-read from the journal, which is their record, and each change is kept as a correction" : ""}. Positions opened again after closing stay as recorded.` }),
     el("div", { class: "row" }, go, cancel));
   start.addEventListener("click", () => { ask.classList.remove("hidden"); start.disabled = true; });
   cancel.addEventListener("click", () => { ask.classList.add("hidden"); start.disabled = false; });
   go.addEventListener("click", () => withBusy(go, err, async () => {
     const done = await api("/v2/diagnostics/repair", { confirm: true });
-    await reload(`Repaired ${done.recomputed.length} position${done.recomputed.length === 1 ? "" : "s"} and ${done.journal_resynced.length} journal entr${done.journal_resynced.length === 1 ? "y" : "ies"} from the fills. The copy taken first is ${(done.backup || "").split(/[\\/]/).pop() || "not needed (in-memory database)"}.`);
+    await reload(`Repaired ${done.recomputed.length} position${done.recomputed.length === 1 ? "" : "s"} and ${done.journal_resynced.length} journal entr${done.journal_resynced.length === 1 ? "y" : "ies"} from the fills.${done.failed && done.failed.length ? ` ${done.failed.length} could not be repaired because their fills do not add up: correct them on the Positions screen.` : ""} The copy taken first is ${(done.backup || "").split(/[\\/]/).pop() || "not needed (in-memory database)"}.`);
   }));
   return el("div", {}, el("p", {}, start), ask, err);
 }

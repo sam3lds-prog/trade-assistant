@@ -160,8 +160,11 @@ def one_day_risk(rets: pd.DataFrame, exposures: dict[str, float]) -> dict[str, A
     Both use deltas only, assume the sample is typical, and are estimates of a bad day, never a
     maximum loss."""
     cols = [s for s in exposures if s in rets.columns]
+    gross = sum(abs(v) for v in exposures.values())
+    left_out = [{"symbol": s, "exposure": exposures[s], "reason": "no daily returns in the price history"}
+                for s in exposures if s not in cols and abs(exposures[s]) > 0]
     if not cols:
-        return {"available": False, "reason": "no price history for the holdings"}
+        return {"available": False, "reason": "no price history for the holdings", "left_out": left_out}
     sample = rets[cols].dropna()
     if len(sample) < MIN_SAMPLES:
         return {"available": False, "samples": len(sample),
@@ -171,12 +174,18 @@ def one_day_risk(rets: pd.DataFrame, exposures: dict[str, float]) -> dict[str, A
     pnl = sample.to_numpy() @ d
     cut = float(np.quantile(pnl, 0.05))
     tail = pnl[pnl <= cut]
-    return {"available": True, "samples": len(sample), "symbols": cols,
-            "parametric_95": Z_95 * math.sqrt(var) if var > 0 else 0.0,
-            "historical_95": max(0.0, -cut), "expected_shortfall_95": max(0.0, float(-tail.mean())) if len(tail) else None,
-            "worst_day": max(0.0, float(-pnl.min())),
-            "note": f"From {len(sample)} trading days with deltas only. Estimates of a bad day (about one in twenty), "
-                    "not a maximum: larger losses happen, and gaps and volatility changes are not included."}
+    out = {"available": True, "samples": len(sample), "symbols": cols, "left_out": left_out, "complete": not left_out,
+           "share_of_exposure_measured": (sum(abs(exposures[s]) for s in cols) / gross) if gross else 1.0,
+           "parametric_95": Z_95 * math.sqrt(var) if var > 0 else 0.0,
+           "historical_95": max(0.0, -cut), "expected_shortfall_95": max(0.0, float(-tail.mean())) if len(tail) else None,
+           "worst_day": max(0.0, float(-pnl.min())),
+           "note": f"From {len(sample)} trading days with deltas only. Estimates of a bad day (about one in twenty), "
+                   "not a maximum: larger losses happen, and gaps and volatility changes are not included."}
+    if left_out:
+        share = 100 * (1 - out["share_of_exposure_measured"])
+        out["note"] += (f" It leaves out {', '.join(x['symbol'] for x in left_out)} ({share:.0f}% of the exposure), "
+                        "which has no usable price history, so the whole portfolio's bad day is not known.")
+    return out
 
 
 EXPOSURE_FIELDS = ("dollar_delta", "market_value", "beta_dollars", "theta", "vega", "gamma_dollars",
@@ -316,6 +325,18 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
     return out
 
 
+def unreadable_exposure(u: dict[str, Any]) -> dict[str, Any]:
+    """A position whose fills no longer account (Desk.unreadable), as an exposure that measures
+    nothing: it counts in every coverage figure as missing, never as zero."""
+    reason = f"its fills no longer add up ({u.get('error')})"
+    return {"id": u["id"], "symbol": u["symbol"], "description": u["description"], "instrument_type": u["instrument_type"],
+            "direction": u["direction"], "open_quantity": None, "multiplier": u.get("multiplier"), "price": None,
+            "underlying": None, "beta": None, "beta_assumed": True, "bias": 0, "thesis_status": "UNKNOWN",
+            "invalidation_price": None, "missing": [reason], "missing_fields": ["fills"], "risk_basis": "UNKNOWN",
+            "risk_reason": reason, "beyond_invalidation": False, "priced": False, "unreadable": True,
+            **{k: None for k in EXPOSURE_FIELDS}}
+
+
 def risk_coverage(exps: list[dict[str, Any]], limit: float, limit_pct: float) -> dict[str, Any]:
     """Open risk by how it was measured, what could not be measured, and a conclusion against the
     limit that says whether it covers every position."""
@@ -441,6 +462,11 @@ def stress(exposures: list[dict[str, Any]], scenarios: list[dict[str, Any]], acc
                     pnl = max(ch, -x["price"]) * x["multiplier"] * x["open_quantity"]
                 elif x["dollar_delta"] is not None:
                     pnl = x["dollar_delta"] * move
+                    value = x.get("market_value")
+                    if value is None and x.get("price") is not None:
+                        value = x["price"] * x["multiplier"] * x["open_quantity"]
+                    if value is not None:
+                        pnl = max(pnl, -value)                # a bought option loses at most its value
                 else:
                     skipped.append(x["description"])
                     continue
@@ -483,8 +509,12 @@ def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
     if now_led.open_quantity > 0 and price is None:
         err = mark.get("error")
         reasons.append("no current price" + (f" ({err})" if err else ""))
+    elif now_led.open_quantity > 0 and (mark.get("freshness") or {}).get("freshness") == "STALE":
+        # A saved or old quote can say a loss is smaller (or larger) than it is: it never measures today.
+        why = "; ".join((mark.get("freshness") or {}).get("warnings", [])[:1])
+        reasons.append("the price is stale" + (f" ({why})" if why else ""))
     if prev_led.open_quantity > 0 and prev is None:
-        reasons.append("no previous close")
+        reasons.append("no previous close" + (f" ({view['prev_reason']})" if view.get("prev_reason") else ""))
     if reasons:
         return {**base, "realized": realized, "unrealized_change": None, "known": False, "reason": " and ".join(reasons)}
     unreal_now = now_led.unrealized(price) if now_led.open_quantity > 0 else 0.0
@@ -494,7 +524,7 @@ def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
 
 
 def daily_loss(views: list[dict[str, Any]], mode: str, account_size: float, stop_pct: float,
-               now: datetime | None = None) -> dict[str, Any]:
+               now: datetime | None = None, unreadable: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Today's result against the daily loss stop, kept apart from how much of it could be measured.
 
     `loss_status` (OK, WARN, STOP) is the known total against the stop: a measured loss that
@@ -527,7 +557,10 @@ def daily_loss(views: list[dict[str, Any]], mode: str, account_size: float, stop
             weight_known += d["weight"]
         else:
             missing.append({"id": v.get("id"), "description": v["description"], "reason": d.get("reason") or "unknown"})
-    n = len(views)
+    for u in unreadable or []:                 # positions whose fills no longer account: nothing about them is known
+        missing.append({"id": u["id"], "description": u["description"], "reason": "its fills no longer add up"})
+        unreal_missing += 1
+    n = len(views) + len(unreadable or [])
     coverage_status = "COMPLETE" if not missing else ("UNAVAILABLE" if evaluated == 0 else "PARTIAL")
     cap = account_size * stop_pct / 100.0
     loss_status = "STOP" if known_total <= -cap else "WARN" if known_total <= -0.75 * cap else "OK"
@@ -581,7 +614,8 @@ def _by(exps: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
 
 
 def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_size: float, max_open_risk_pct: float,
-            daily: dict[str, Any], sector_of, scenarios: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+            daily: dict[str, Any], sector_of, scenarios: list[dict[str, Any]] | None = None,
+            unreadable: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Portfolio totals, concentration, correlation, stress tests and warnings.
 
     Totals are sums over the positions whose figure is known. `coverage` says which positions
@@ -592,8 +626,9 @@ def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_
     rets = returns_frame(bars)
     stats = beta_stats(rets)
     quality = return_quality(rets) if not rets.empty else {}
-    held = sorted({v["symbol"] for v in views})
     exps = [exposure(v, (stats.get(v["symbol"]) or {}).get("beta")) for v in views]
+    exps += [unreadable_exposure(u) for u in unreadable or []]
+    held = sorted({x["symbol"] for x in exps})
     cov_ = coverage(exps)
     sized = [x for x in exps if x["dollar_delta"] is not None]
     gross = sum(abs(x["dollar_delta"]) for x in sized)
@@ -673,7 +708,16 @@ def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_
                                                                   "and are held the same way: closer to one bet than two."})
     bad_day = one_day_risk(rets, net_by_symbol) if not rets.empty else {"available": False, "reason": "no price history"}
     if bad_day.get("available") and cov_["status"] != "COMPLETE":
+        bad_day["complete"] = False
         bad_day["note"] += " Positions without a price or a delta are not included."
+    if bad_day.get("available") and bad_day.get("left_out"):
+        warnings.append({"level": "warn", "code": "BAD_DAY_PARTIAL", "text": "The bad-day estimate leaves out "
+                         + ", ".join(x["symbol"] for x in bad_day["left_out"]) + ", which has no usable price history, so "
+                         "it understates how much a bad day could cost."})
+    for u in unreadable or []:
+        warnings.insert(0, {"level": "fail", "code": "UNREADABLE_POSITION",
+                            "text": f"{u['description']}: its fills no longer add up ({u.get('error')}), so it is left out "
+                                    "of every figure on this page. Correct the fill on the Positions screen."})
     stress_rows = stress(exps, scenarios or DEFAULT_SCENARIOS, account_size)
     if daily.get("loss_status", daily["status"]) in ("STOP", "WARN"):
         warnings.insert(0, {"level": "fail" if daily.get("loss_status", daily["status"]) == "STOP" else "warn",
@@ -687,15 +731,23 @@ def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_
     notional, _ = known_sum(exps, "notional")
     premium, _ = known_sum([x for x in exps if x["instrument_type"] == "OPTION"], "premium_at_risk")
     exposure_unknown = len(exps) - len(sized)
+    n = len(exps)
+
+    def total(value: float, unknown: int) -> float | None:
+        """A total over positions none of which could be measured is unknown, not $0."""
+        return None if n and unknown == n else value
     return {"positions": exps, "count": len(exps), "symbols": held, "coverage": cov_, "risk_coverage": rc,
-            "totals": {"gross_exposure": gross, "net_exposure": net, "spy_equivalent": beta_net,
-                       "long_exposure": sum(x["dollar_delta"] for x in sized if x["dollar_delta"] > 0),
-                       "short_exposure": sum(x["dollar_delta"] for x in sized if x["dollar_delta"] < 0),
-                       "market_value": mv, "gross_market_value": sum(abs(x["market_value"]) for x in exps
-                                                                     if x["market_value"] is not None),
+            "totals": {"gross_exposure": total(gross, exposure_unknown), "net_exposure": total(net, exposure_unknown),
+                       "spy_equivalent": total(beta_net, exposure_unknown),
+                       "long_exposure": total(sum(x["dollar_delta"] for x in sized if x["dollar_delta"] > 0), exposure_unknown),
+                       "short_exposure": total(sum(x["dollar_delta"] for x in sized if x["dollar_delta"] < 0), exposure_unknown),
+                       "market_value": total(mv, mv_unknown),
+                       "gross_market_value": total(sum(abs(x["market_value"]) for x in exps if x["market_value"] is not None),
+                                                   mv_unknown),
                        "notional": notional, "option_premium_at_risk": premium,
-                       "estimated_liquidation_value": liq, "liquidation_complete": liq_unknown == 0,
-                       "theta_per_day": theta, "vega_per_point": vega, "gamma_dollars_per_1pct": gamma,
+                       "estimated_liquidation_value": total(liq, liq_unknown), "liquidation_complete": liq_unknown == 0,
+                       "theta_per_day": total(theta, theta_unknown), "vega_per_point": total(vega, vega_unknown),
+                       "gamma_dollars_per_1pct": total(gamma, gamma_unknown),
                        "open_risk": rc["total_known"], "open_risk_limit": risk_cap,
                        "open_risk_unknown": len(rc["unknown"]), "open_risk_complete": rc["includes_all_positions"],
                        "one_day_move_95": bad_day.get("parametric_95") if bad_day.get("available") else None,
