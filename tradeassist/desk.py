@@ -21,6 +21,7 @@ from .market import complete_only
 from .positions import (DIRECTIONS, OptionLeg, PositionError, add_adjustment, add_execution, adjust_contract, cancel,
                         correct_execution, create, exercise, expiration_close, expire_worthless, list_ids, now_iso, parse_time,
                         read, update_plan, void_adjustment)
+from .events import emit
 from .providers.base import DataError
 from .snapshots import LIVE_WINDOW, SnapshotService, close_of, cutoff_session, when
 from .structure import STATE_WORDS
@@ -94,7 +95,7 @@ class Desk:
         try:
             return self.snapshots.reconcile(position_id)
         except Exception as exc:          # noqa: BLE001 - market data can fail in many ways
-            log.warning("Snapshots for position %s could not be brought up to date: %s", position_id, exc)
+            emit("snapshot_failed", logging.WARNING, position_id=position_id, error=exc)
             return None
 
     # --- marks ---------------------------------------------------------------------
@@ -163,6 +164,11 @@ class Desk:
                 pos["mark"] = self.mark(pos)
             except (DataError, ValueError) as exc:
                 pos["mark"] = {"price": None, "error": str(exc)}
+                emit("missing_valuation", position_id=position_id, symbol=pos["symbol"], error=exc)
+            fresh = (pos["mark"] or {}).get("freshness") or {}
+            if fresh.get("freshness") in ("STALE", "UNKNOWN"):
+                emit("stale_market_data", position_id=position_id, symbol=pos["symbol"], freshness=fresh["freshness"],
+                     from_cache=fresh.get("from_cache"))
         price = pos["mark"]["price"] if pos["mark"] else None
         liq = (pos["mark"] or {}).get("liquidation_price")
         sign = 1 if pos["direction"] == "LONG" else -1
@@ -293,6 +299,8 @@ class Desk:
         depended on it (snapshots.py)."""
         with self.db.tx() as cur:
             done = correct_execution(cur, position_id, execution_id, changes, reason, "USER")
+        emit("correction_recorded", position_id=position_id, execution_id=execution_id, fields=",".join(sorted(changes)),
+             status_before=done["status_before"], status_after=done["status_after"])
         self._reconcile(position_id)
         out = self.view(position_id)
         out["correction"] = done

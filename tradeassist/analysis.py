@@ -564,6 +564,8 @@ class Analyst:
                 bars[sym] = self.market.bars(sym, 1, complete=True)
             except DataError as exc:
                 notes.append(f"{sym}: no price history for correlation and beta ({exc}).")
+                from .events import emit
+                emit("risk_calculation_failed", logging.WARNING, symbol=sym, part="beta and correlation", error=exc)
         s = self.svc.settings
         out = portfolio.analyse(open_views, bars, s.account_size, s.max_open_risk_pct, self.daily_loss(views), self.sector,
                                 scenarios)
@@ -589,7 +591,9 @@ class Analyst:
         from .journal import JournalError
         if view.get("legacy_trade_id"):
             try:
-                view["legacy_overrides"] = self.svc.journal.get(view["legacy_trade_id"]).get("overrides") or []
+                trade = self.svc.journal.get(view["legacy_trade_id"])
+                view["legacy_overrides"] = trade.get("overrides") or []
+                view["legacy_signals"] = trade.get("signals") or []
             except JournalError:                 # the classic entry is gone; the mirror still counts
                 view["legacy_overrides"] = []
         return view

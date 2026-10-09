@@ -32,6 +32,20 @@ shorts (kept apart from trading profit), stock splits, how options ended (expire
 exercised, adjusted), and a freshness tag on every price so an old quote is never shown as
 current.
 
+Version 2.3 makes the history and the research checkable. Journal analytics use one
+definition of a trade and its result (trading profit plus borrow fees and dividends), and a
+habit that could not be checked is no longer counted as "did not happen". Signal frequencies
+get honest intervals for overlapping cases and a held-out check; backtests and studies record
+the settings and data they ran on, so two runs can be compared. A new **Data health** screen
+shows the data source, how fresh each open position's price is, what could not be valued,
+the saved price history, the snapshots and the database, with a read-only reconciliation
+report of every stored figure against its fills and a repair (after a copy of the database)
+when one is wrong. The database itself now refuses impossible rows, a closed trade gets a
+plain-words review, errors say what to do, and the log never carries a credential. 2.3 also
+fixes a 2.2.0 fault that kept the Version 2 part of the page from loading, so the Analyze,
+Positions and Portfolio risk buttons were missing and the Version 2 additions to the other
+screens did not appear. Release notes: `docs/RELEASE_NOTES.md`.
+
 ## Start it
 
 Needs Python 3.11 or newer (built and tested on 3.13 with pandas 3 and numpy 2).
@@ -384,6 +398,24 @@ market regime, with shorts that pay a borrow fee, walk-forward testing and a Mon
 range. Option strategies are not backtested, because no connected source has past option
 prices and faking them would only look precise.
 
+**Data health (2.3).** Whether the numbers on the other screens can be trusted: the data
+source and its recent failures, how fresh each open position's price is and which could not
+be valued, the saved daily history of the stocks you hold and watch, missing or hindsight
+snapshots (with a button to rebuild them from the saved history), the schema version and
+the copy taken before the last upgrade, and recent problems from the log. "Show the
+reconciliation report" checks every position's stored figures against the fills they come
+from, and lists positions reopened by older versions, fills that look duplicated, journal
+entries that differ from their position, expired options still open and SQLite's own
+integrity check. It only reads. When a figure is wrong, "Repair from the fills" says what it
+will change, copies the database, and recomputes the figures; it never changes, merges or
+deletes a fill.
+
+**Trade review (2.3).** A closed position's analytics end with what was planned, what was
+done, what was known at entry (from a snapshot taken at the time or from the prior day's
+close, never from later data), whether the thesis was invalidated or the targets reached,
+the result after fees and borrow costs, and what is missing. It describes what happened; it
+does not claim to know why.
+
 The database is upgraded in place the first time a new version starts. Since 2.1.1 the app
 copies it to `data/backups/` before any upgrade (the newest ten copies are kept), so there is
 always a way back.
@@ -420,6 +452,16 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
   and flat stretches, cutting the history at any day never changed anything computed
   for the days before. Every structure event falls on the day its swing was
   recognised.
+
+- Since 2.1.1 (details and test names in `docs/IMPROVEMENTS.md`): a closed position cannot
+  be reopened; unknown prices, risks and losses are never counted as zero; the ledger replays
+  random fill sequences (property tests) to the same figures; databases from 0.4.0, 2.0.0
+  and 2.1.0 upgrade with their records intact; snapshots never use data after their fill;
+  betas, correlations and bad-day figures skip missing days instead of filling them; borrow
+  fees and dividends stay apart from trading profit; signal intervals allow for overlapping
+  cases; the same research inputs give the same results; reconciliation finds a planted
+  mismatch, repair fixes it after a copy without touching a fill, and running it twice
+  changes nothing; the log and the data health screen never show a credential.
 
 Not checked, because this build environment could not reach any of these services:
 
@@ -493,6 +535,12 @@ tradeassist/
   features.py              version 2 feature switches (FEATURE_... in .env)
   migrations.py schema_v2.py   numbered database upgrades
   positions.py desk.py     unified positions: accounting from fills, marks, snapshots
+  snapshots.py             lifecycle snapshots: when and how each was made, rebuilding
+  freshness.py             how fresh and complete each price is; data-source health
+  reconcile.py             stored figures checked against the fills; repair after a copy
+  runs.py                  settings and data fingerprints of research runs
+  events.py                structured log lines, with credentials redacted
+  backup.py                copies of the database before upgrades and repairs
   dataquality.py           checks on daily bars; finished versus unfinished bars
   trend.py regime.py       trend engine and market regime
   reversal.py              potential bottoms and tops, and confirmed reversals
@@ -506,6 +554,8 @@ tradeassist/
   versions.py              version labels recorded with every result
   static/                  the web page (app.js classic screens, v2.js version 2 screens)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.3 engineering record: defects found, tests, reports
+docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```
 

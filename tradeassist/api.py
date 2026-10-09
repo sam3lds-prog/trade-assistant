@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
 from .config import Settings, load_settings
+from .events import emit
 from .journal import JournalError
 from .positions import PositionError
 from .providers.base import DataError
@@ -141,8 +143,26 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
     @app.exception_handler(PositionError)
-    async def _position_error(_: Request, exc: PositionError):
+    async def _position_error(request: Request, exc: PositionError):
+        # Expected: the user asked for something the records do not allow. Logged without a stack trace.
+        emit("invalid_transition", path=request.url.path, error=exc)
         return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @app.exception_handler(sqlite3.IntegrityError)
+    async def _integrity(_: Request, exc: sqlite3.IntegrityError):
+        emit("integrity_refused", logging.WARNING, error=exc)
+        return JSONResponse(status_code=409, content={"error": "That would break a rule the database keeps (" + str(exc) +
+                                                               "). Nothing was saved. Check the values, or the record "
+                                                               "it refers to."})
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def _db_busy(_: Request, exc: sqlite3.OperationalError):
+        emit("database_error", logging.WARNING, error=exc)
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            return JSONResponse(status_code=503, content={"error": "The database is busy with another request. Nothing was "
+                                                                   "saved; try again in a moment."})
+        return JSONResponse(status_code=500, content={"error": f"The database could not complete that ({exc}). Nothing was "
+                                                               "saved. The data health screen can check the file."})
 
     @app.exception_handler(HTTPException)
     async def _http_error(_: Request, exc: HTTPException):

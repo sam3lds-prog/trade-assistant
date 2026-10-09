@@ -35,3 +35,23 @@ def random_walk(n=900, seed=1, start=100.0, vol=0.015, drift=0.0003):
 @pytest.fixture
 def walk():
     return random_walk()
+
+
+@pytest.fixture(autouse=True)
+def _close_databases(monkeypatch):
+    """Close every database a test opened, so no test leaves a connection for the garbage
+    collector (the app itself keeps one connection open for its whole life)."""
+    from tradeassist import db as dbmod
+    opened = []
+    real_init = dbmod.Database.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        opened.append(self)
+    monkeypatch.setattr(dbmod.Database, "__init__", tracking_init)
+    yield
+    for d in opened:
+        try:
+            d.close()
+        except Exception:  # noqa: BLE001 - already closed
+            pass

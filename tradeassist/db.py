@@ -121,8 +121,17 @@ class Database:
                     self.migrated = migrate(self._conn)
                 finally:
                     self._conn.isolation_level = previous
-        except BaseException:
+            if self.migrated:
+                from .events import emit
+                emit("migration_applied", versions=",".join(map(str, self.migrated)),
+                     backup=self.backup_before_migration.name if self.backup_before_migration else None)
+        except BaseException as exc:
             self._conn.close()               # a failed open must not leave the file held open
+            if isinstance(exc, Exception):
+                import logging as _logging
+                from .events import emit
+                emit("migration_failed", _logging.ERROR, error=exc,
+                     backup=self.backup_before_migration.name if self.backup_before_migration else None)
             raise
 
     def schema_version(self) -> int:

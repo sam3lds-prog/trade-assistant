@@ -74,14 +74,18 @@ function buildPositions() {
 
 function positionSummary(rows, which) {
   if (!rows.length) return el("div");
+  // A position whose figure is unknown is left out of the sum and counted, never added in as $0.
   const sum = key => rows.reduce((a, p) => a + (isNum(p.pnl[key]) ? p.pnl[key] : 0), 0);
+  const unknown = key => rows.filter(p => p.status !== "PLANNED" && !isNum(p.pnl[key])).length;
+  const total = key => unknown(key) ? el("span", {}, signedMoney(sum(key)), el("span", { class: "small muted", text: " + unknown" })) : signedMoney(sum(key));
+  const counted = rows.filter(p => p.status !== "PLANNED").length;
   const invalid = rows.filter(p => p.thesis_check.status === "INVALIDATED").length;
   const longs = rows.filter(p => p.bias > 0 && p.status !== "PLANNED").length, shorts = rows.filter(p => p.bias < 0 && p.status !== "PLANNED").length;
   return el("div", { class: "metrics", style: "margin-bottom:12px" },
     metric(String(rows.length), which === "all" ? "Positions" : `${which[0].toUpperCase()}${which.slice(1)} positions`),
     metric(`${longs} / ${shorts}`, "Gain if the stock rises / falls"),
-    metric(signedMoney(sum("unrealized")), "Unrealized profit or loss"),
-    metric(signedMoney(sum("realized")), "Realized, after fees"),
+    metric(total("unrealized"), `Unrealized profit or loss${partialNote(unknown("unrealized"), counted)}`),
+    metric(total("realized"), "Realized, after fees"),
     metric(String(invalid), "Through their invalidation price"));
 }
 
@@ -114,6 +118,8 @@ function positionDetail(p, onChange) {
     metric(money(led.average_entry_price), "Average entry price"),
     metric(isNum(led.average_exit_price) ? money(led.average_exit_price) : "n/a", "Average exit price"),
     metric(isNum(mk.price) ? money(mk.price) : "n/a", mk.source ? `Now · ${mk.source}` : "Now"),
+    led.open_quantity > 0 ? metric(isNum(led.cost_basis) ? money(led.cost_basis * led.open_quantity * p.multiplier, 0) : "n/a", p.direction === "SHORT" ? "Received for the open position" : "Cost of the open position") : null,
+    led.open_quantity > 0 ? metric(isNum(pnl.market_value) ? money(Math.abs(pnl.market_value), 0) : unknownText(mk.error || ""), p.direction === "SHORT" ? "To buy it back at the mark" : "Worth at the mark") : null,
     metric(signedMoney(pnl.unrealized), "Unrealized"),
     metric(signedMoney(pnl.realized), "Realized, after fees"),
     metric(money(pnl.fees), "Fees paid"),
@@ -330,12 +336,12 @@ function freshTag(obs, quiet = false) {
   if (!obs || !obs.freshness) return null;
   if (quiet && (obs.freshness === "FRESH" || obs.freshness === "LAST_SESSION")) return null;
   const [lvl, word] = FRESH_TAG[obs.freshness] || ["info", obs.freshness];
-  const age = isNum(obs.age_seconds) ? ageText(obs.age_seconds) : "";
+  const age = isNum(obs.age_seconds) ? ageShort(obs.age_seconds) : "";
   const tag = statusTag(lvl, word + (age && obs.freshness !== "LAST_SESSION" ? `, ${age}` : ""));
   tag.title = [obs.observed_at ? `price time ${timeText(obs.observed_at)}` : "", `from ${obs.provider || "the source"}`, ...(obs.warnings || [])].filter(Boolean).join(" · ");
   return tag;
 }
-const ageText = s => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${(s / 3600).toFixed(1)} h` : `${(s / 86400).toFixed(1)} days`;
+const ageShort = s => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${(s / 3600).toFixed(1)} h` : `${(s / 86400).toFixed(1)} days`;
 
 const SNAP_METHOD = { LIVE: "Live", PRIOR_BAR: "Rebuilt: last close before the fill", END_OF_DAY: "Rebuilt: fill day's close", JOURNAL_QUOTE: "Journal ticket quote" };
 function snapshotSource(s) {
@@ -899,8 +905,8 @@ function dailyLossPanel(dl) {
 function renderPortfolio(r) {
   const frag = el("div"), t = r.totals, dl = r.daily_loss, u = t.unknown_counts || {}, n = r.count;
   if (r.data_source === "demo") frag.append(banner("warn", "Demo data: the prices are made up."));
-  // The daily-stop panel below explains an incomplete day itself; a reached or near stop still leads the page.
-  for (const w of r.warnings) if (w.code !== "DAILY_LOSS_INCOMPLETE" && w.code !== "OPEN_RISK_UNKNOWN") frag.append(banner(w.level === "fail" ? "fail" : w.level === "warn" ? "warn" : "info", w.text));
+  if (r.count) frag.append(portfolioStrip(r));
+  if (r.warnings.length) frag.append(groupedWarnings(r.warnings));
   if (!r.count) { frag.append(el("div", { class: "panel" }, el("p", { class: "muted", text: "No open positions. Add them on the Positions screen (option-journal trades appear there automatically)." }))); }
   const acct = r.account_size, share = v => acct ? ` (${pct(100 * v / acct, 0)} of the account)` : "";
   const cov = r.coverage || { status: "COMPLETE" };
@@ -959,6 +965,38 @@ function renderPortfolio(r) {
   frag.append(stressPanel(r));
   for (const n of r.notes || []) frag.append(banner("info", n));
   return frag;
+}
+
+// The page's headline figures in one row; anything not measured says so instead of adding in as $0.
+function portfolioStrip(r) {
+  const t = r.totals, dl = r.daily_loss, n = r.count, u = t.unknown_counts || {};
+  const stale = r.positions.filter(x => ["STALE", "UNKNOWN"].includes(x.quote_freshness)).length;
+  const unpriced = r.positions.filter(x => x.priced === false).length;
+  const riskUnknown = t.open_risk_unknown || 0;
+  return el("div", { class: "panel" }, el("div", { class: "metrics" },
+    metric(String(n), "Open positions"),
+    metric(money(t.gross_exposure, 0), `Gross exposure, net ${signedMoney(t.net_exposure)}${partialNote(u.exposure, n)}`),
+    metric(riskUnknown ? el("span", {}, money(t.open_risk, 0), el("span", { class: "small muted", text: " + unknown" })) : money(t.open_risk, 0),
+      riskUnknown ? `Open risk (${riskUnknown} of ${n} not measured)` : `Open risk${isNum(t.open_risk_limit) ? ` of ${money(t.open_risk_limit, 0)} allowed` : ""}`),
+    dl ? metric(el("span", {}, signedMoney(dl.known_total ?? dl.counted), dl.status === "OK" ? "" : el("span", { class: "small muted", text: dl.status === "INCOMPLETE" ? " so far" : "" })),
+      `Today: ${(LOSS_TAG[dl.status] || ["", dl.status])[1].toLowerCase()} (${money(dl.stop, 0)})`) : null,
+    metric(unpriced || stale ? statusTag("warn", `${n - unpriced - stale} of ${n} current`) : statusTag("pass", "All current"),
+      unpriced || stale ? `Prices: ${[unpriced ? `${unpriced} missing` : "", stale ? `${stale} stale or undated` : ""].filter(Boolean).join(", ")}` : "Prices")));
+}
+
+// Every warning on the page, most serious first, so nothing that matters sits below the fold.
+const WARNING_GROUPS = [["fail", "Critical"], ["warn", "Warning"], ["info", "For information"]];
+function groupedWarnings(list) {
+  const box = el("div", { class: "panel" }, el("h3", { text: "Warnings" }));
+  for (const [level, title] of WARNING_GROUPS) {
+    const items = list.filter(w => (w.level === "fail" ? "fail" : w.level === "warn" ? "warn" : "info") === level);
+    if (!items.length) continue;
+    const body = el("div", {}, items.map(w => banner(level, w.text)));
+    box.append(level === "info" && items.length > 2
+      ? el("details", {}, el("summary", {}, statusTag(level, `${title} (${items.length})`)), body)
+      : el("div", {}, el("h4", {}, statusTag(level, `${title} (${items.length})`)), body));
+  }
+  return box;
 }
 
 const RISK_BASIS_WORDS = { INVALIDATION: "to invalidation", PREMIUM: "premium", CONFIGURED: "your dollar risk", BEYOND_INVALIDATION: "past invalidation", UNKNOWN: "unknown" };
@@ -1097,11 +1135,34 @@ function positionAnalyticsBox(p) {
     if (x.available) box.append(el("p", { class: "small", text: `The stock went ${signedPct(x.mfe_pct, 1)} the trade's way at best${isNum(x.mfe_r) ? ` (${rText(x.mfe_r)})` : ""} and ${signedPct(x.mae_pct, 1)} at worst${isNum(x.mae_r) ? ` (${rText(x.mae_r)})` : ""}, over ${x.days} daily bars from ${money(x.underlying_entry)}.` + (x.closed_beyond_invalidation ? " It closed through the invalidation price on one of those days." : "") + (x.reached_target_1 ? " It reached target 1." : "") }));
     else box.append(el("p", { class: "small muted", text: `No excursions yet: ${x.reason || "no daily bars since the entry"}.` }));
     if (a.behaviour.length) box.append(el("ul", { class: "plain small" }, a.behaviour.map(b => el("li", {}, statusTag("warn", "Habit"), ` ${b.label}`))));
+    if (a.review && p.status !== "PLANNED" && p.status !== "CANCELLED") box.append(reviewBlock(a.review, p));
     if (a.compare.length && a.compared_with) box.append(el("h4", { text: `At entry and at the ${a.compared_with.toLowerCase()} snapshot` }), table([
       { label: "", cell: c => FIELD_WORDS[c.field] || c.field.replaceAll("_", " ") },
       { label: "Entry", cell: c => fieldValue(c.field, c.entry) },
       { label: a.compared_with[0] + a.compared_with.slice(1).toLowerCase(), cell: c => fieldValue(c.field, c.latest) }], a.compare));
   }).catch(e => box.replaceChildren(el("p", { class: "small error", text: e.message })));
+  return box;
+}
+
+// A trade explained from the records: plan, fills, what was known at entry, what happened, the result, what is missing.
+const yesNo = (v, yes, no) => v === true ? statusTag("warn", yes) : v === false ? statusTag("pass", no) : statusTag("info", "Not known");
+function reviewBlock(rv, p) {
+  const pl = rv.planned, ex = rv.executed, at = rv.at_entry, res = rv.result, closed = p.status === "CLOSED";
+  const habits = Object.values(rv.habits || {});
+  const box = el("div", {}, el("h4", { text: closed ? "Trade review" : "Trade review so far" }));
+  box.append(el("dl", { class: "pairs small" },
+    el("dt", { text: "Planned" }), el("dd", { text: [pl.thesis || "no thesis written", pl.setup ? `${pl.setup} setup` : "", isNum(pl.invalidation_price) ? `wrong beyond ${money(pl.invalidation_price)}` : "no invalidation", isNum(pl.target_1) ? `target ${money(pl.target_1)}${isNum(pl.target_2) ? ` then ${money(pl.target_2)}` : ""}` : "no target", isNum(pl.initial_risk) ? `risking ${money(pl.initial_risk, 0)}` : ""].filter(Boolean).join(" · ") }),
+    el("dt", { text: "Done" }), el("dd", { text: `${ex.fills} fill${ex.fills === 1 ? "" : "s"}, in at ${money(ex.average_entry_price)}${isNum(ex.average_exit_price) ? `, out at ${money(ex.average_exit_price)}` : ""}${isNum(ex.days_held) ? ` over ${ex.days_held} day${ex.days_held === 1 ? "" : "s"}` : ""}${ex.corrections ? `; ${ex.corrections} fill correction${ex.corrections === 1 ? "" : "s"} recorded` : ""}` }),
+    el("dt", { text: "Known at entry" }), el("dd", { text: at.available ? [at.trend_state ? `trend ${at.trend_state.replaceAll("_", " ").toLowerCase()}` : "", at.market_regime ? `${at.market_regime.replaceAll("_", " ").toLowerCase()} market` : "", isNum(at.rsi_14) ? `RSI ${num(at.rsi_14, 0)}` : "", at.method === "PRIOR_BAR" ? "(from the prior day's close)" : at.method === "LIVE" ? "(taken at the time)" : ""].filter(Boolean).join(", ") || "a snapshot with no readings" : `not available: ${at.reason}` }),
+    rv.signals_at_entry.length ? el("dt", { text: "Signals at entry" }) : null, rv.signals_at_entry.length ? el("dd", { text: rv.signals_at_entry.join(", ") }) : null,
+    el("dt", { text: "Thesis" }), el("dd", {}, !isNum(pl.invalidation_price) ? statusTag("info", "No invalidation set") : yesNo(rv.thesis_invalidated, "Invalidated", "Not invalidated")),
+    el("dt", { text: "Targets" }), el("dd", {}, !isNum(pl.target_1) ? statusTag("info", "No target set") : yesNo(rv.target_1_reached === null ? null : !rv.target_1_reached, "Target 1 not reached", "Target 1 reached"),
+      rv.target_2_reached === null ? "" : " ", rv.target_2_reached === null ? "" : yesNo(!rv.target_2_reached, "Target 2 not reached", "Target 2 reached")),
+    el("dt", { text: "Result" }), el("dd", { text: `${isNum(res.net) ? signedMoney(res.net) : "unknown"} net${res.financing ? ` (trading ${signedMoney(res.trading)}, financing ${signedMoney(res.financing)})` : ""}, after ${money(res.fees)} in fees${isNum(res.r_multiple) ? ` · ${rText(res.r_multiple)}` : ""}${!closed && isNum(res.unrealized) ? ` · includes ${signedMoney(res.unrealized)} not yet realized` : ""}` }),
+    el("dt", { text: "Habits" }), el("dd", { text: `${habits.filter(v => v === true).length} of ${habits.filter(v => v !== null).length} checked happened; ${habits.filter(v => v === null).length} could not be checked` })));
+  if (rv.what_happened.length) box.append(el("ul", { class: "small" }, rv.what_happened.map(t => el("li", { text: t }))));
+  if (rv.missing.length) box.append(el("div", { class: "small" }, el("strong", { text: "Missing: " }), rv.missing.join(" ")));
+  box.append(el("p", { class: "small muted", text: rv.note }));
   return box;
 }
 
@@ -1603,4 +1664,175 @@ function reversalScanPanel(view) {
   };
 }
 
-Object.assign(BUILDERS, { portfolio: buildPortfolio });
+/* ---------- view: data health (2.3) ---------- */
+const SOURCE_TAG = { OK: ["pass", "Working"], DEGRADED: ["warn", "Failing"], PAUSED: ["fail", "Paused after repeated failures"], NOT_USED_YET: ["info", "Not used yet"] };
+const FRESH_WORDS = { FRESH: "Live", DELAYED: "Delayed", LAST_SESSION: "Latest session", STALE: "Stale", UNKNOWN: "Time unknown", NONE: "No price" };
+const BARS_TAG = { FRESH: ["pass", "Up to date"], LAST_SESSION: ["pass", "Up to date"], DELAYED: ["pass", "Up to date"], STALE: ["warn", "Stale"], UNKNOWN: ["warn", "Time unknown"], NOT_LOADED: ["info", "Not loaded yet"] };
+const RECON_WORDS = {
+  ledger_mismatches: "Stored figures that differ from the fills", lifecycle_issues: "Positions opened again after closing",
+  invalid_states: "Positions whose fills no longer add up", possible_duplicate_fills: "Fills that look duplicated",
+  journal_mismatches: "Journal entries whose position differs", unresolved_options: "Options past expiration with contracts open",
+  market_data_gaps: "Open positions with no price history", rule_breaks: "Rows the database rules would refuse",
+  missing_snapshots: "Snapshots a position should have", hindsight_snapshots: "Snapshots built from later data",
+  unavailable_snapshots: "Snapshots the price history cannot rebuild" };
+// What each finding means for the numbers on the other screens, in order of how much it matters.
+const RECON_LEVEL = { ledger_mismatches: "fail", invalid_states: "fail", rule_breaks: "fail", journal_mismatches: "warn",
+  lifecycle_issues: "warn", possible_duplicate_fills: "warn", unresolved_options: "warn", market_data_gaps: "warn",
+  hindsight_snapshots: "info", missing_snapshots: "info", unavailable_snapshots: "info" };
+
+function buildHealth() {
+  const error = el("div", { class: "error", role: "alert" });
+  const out = el("div", {}, el("p", { class: "muted", text: "Loading…" }));
+  const refresh = el("button", { class: "plain", text: "Check again" });
+  // `done` is a line to keep on top after an action reloads the screen.
+  async function load(done) {
+    out.classList.add("refetching");
+    try { out.replaceChildren(typeof done === "string" ? banner("pass", done) : "", renderHealth(await api("/v2/health/data"), load)); error.textContent = ""; }
+    catch (e) { error.textContent = e.message; }
+    finally { out.classList.remove("refetching"); }
+  }
+  refresh.addEventListener("click", () => withBusy(refresh, error, () => load()));
+  const view = el("section", {}, el("div", { class: "panel-head" }, el("h2", { text: "Data health" }), refresh),
+    el("p", { class: "lede", text: "Whether the numbers on the other screens can be trusted: the data source, how fresh the prices are, which positions could not be valued, the saved price history, the lifecycle snapshots, and the database itself. Nothing here shows a token or a password." }),
+    error, out);
+  view.onShow = load;
+  return view;
+}
+
+function renderHealth(h, reload) {
+  const frag = el("div"), src = h.source, q = h.quotes, rc = h.reconciliation;
+  // One line on top that says whether anything needs a look.
+  const problems = [];
+  if (src.status === "PAUSED" || src.status === "DEGRADED") problems.push(["fail", `The data source is ${src.status === "PAUSED" ? "paused after repeated failures" : "failing"}: ${src.last_error || "no detail given"}.`]);
+  if (h.positions_missing_valuations.length) problems.push(["warn", `${h.positions_missing_valuations.length} open position${h.positions_missing_valuations.length === 1 ? "" : "s"} could not be valued, so totals that include them are incomplete.`]);
+  if (q.stale) problems.push(["warn", `${q.stale} open position${q.stale === 1 ? " is" : "s are"} priced from a stale quote or one with no time.`]);
+  if (rc && rc.needs_repair) problems.push(["fail", "Some stored figures differ from the fills they come from. Read the reconciliation report below before repairing."]);
+  if (rc && !rc.database_ok) problems.push(["fail", "SQLite's own integrity check found a problem. Copy the database file somewhere safe before changing anything."]);
+  frag.append(problems.length ? el("div", {}, problems.map(([lvl, t]) => banner(lvl, t))) : banner("pass", "No problems found with the data source, the prices of open positions or the stored figures."));
+
+  frag.append(el("div", { class: "panel" }, el("h3", {}, "Data source ", tagOf(SOURCE_TAG, src.status)),
+    el("div", { class: "metrics" },
+      metric(src.label, src.realtime ? "Real-time quotes" : src.mode === "demo" ? "Made-up prices" : "Delayed quotes"),
+      metric(src.last_success ? timeText(src.last_success) : "never", "Last good answer"),
+      metric(src.last_failure ? timeText(src.last_failure) : "none", "Last failure"),
+      metric(`${src.successes} / ${src.failures}`, "Requests answered / failed since the app started"),
+      src.paused_for_seconds ? metric(`${num(src.paused_for_seconds, 0)} s`, "Paused for") : null),
+    src.last_error ? el("p", { class: "small error", text: `Last error: ${src.last_error}` }) : null,
+    el("p", { class: "small muted", text: "After three failures in a row the app waits 30 seconds before asking again. Position and portfolio screens may then show the last price received, marked stale; pricing an option and writing a ticket never use a saved price." })));
+
+  const fresh = Object.entries(q.by_freshness || {});
+  frag.append(el("div", { class: "panel" }, el("h3", { text: "Prices of open positions" }),
+    el("div", { class: "metrics" }, metric(String(q.open_positions), "Open positions"),
+      ...fresh.map(([k, n]) => metric(String(n), FRESH_WORDS[k] || k))),
+    h.positions_missing_valuations.length ? el("div", {}, el("h4", { text: "Could not be valued" }),
+      el("ul", { class: "small" }, h.positions_missing_valuations.map(m => el("li", { text: `${m.description}: ${m.error || "no price"}` })))) : null,
+    h.missing_option_chains.length ? el("p", { class: "small", text: `${h.missing_option_chains.length === 1 ? "One is an option" : `${h.missing_option_chains.length} are options`} whose chain did not include the contract: check the strike and expiration, or whether the contract was adjusted.` }) : null,
+    !q.open_positions ? el("p", { class: "small muted", text: "No open positions." }) : null));
+
+  // Stocks not loaded yet are listed in one line, so the table shows only what is saved.
+  const loaded = h.history.filter(b => b.status !== "NOT_LOADED"), notLoaded = h.history.filter(b => b.status === "NOT_LOADED");
+  if (h.history.length) frag.append(el("div", { class: "panel" }, el("h3", { text: "Saved daily price history" }), !loaded.length ? el("p", { class: "small muted", text: "None saved yet." }) : table([
+    { label: "Stock", cell: b => el("span", {}, el("strong", { text: b.symbol }), b.held ? el("span", { class: "small muted", text: " · held" }) : null) },
+    { label: "Status", cell: b => tagOf(BARS_TAG, b.status) },
+    { label: "Last finished day", cell: b => b.last_finished_bar ? shortDate(b.last_finished_bar) : "" },
+    { label: "Fetched", cell: b => b.fetched_at ? timeText(b.fetched_at) : "" },
+    { label: "", cell: b => b.refresh_failed ? el("span", { class: "small error", text: `Refresh failed: ${b.refresh_failed}` }) : "" }], loaded),
+    notLoaded.length ? el("p", { class: "small", text: `Not loaded yet: ${notLoaded.map(b => b.symbol + (b.held ? " (held)" : "")).join(", ")}.` }) : null,
+    el("p", { class: "small muted", text: "Stocks you hold and your watchlist. A stock not loaded yet loads the first time a screen needs it." })));
+
+  if (h.snapshots) {
+    const s = h.snapshots;
+    const rebuild = el("button", { class: "plain small", text: "Rebuild missing snapshots" });
+    const err = el("div", { class: "error", role: "alert" });
+    rebuild.addEventListener("click", () => withBusy(rebuild, err, async () => {
+      const r = await api("/v2/snapshots/backfill", { dry_run: false, upgrade_hindsight: true });
+      await reload(`Snapshots rebuilt: ${r.created} added, ${r.superseded} replaced, ${r.unavailable} not available from the price history.`);
+    }));
+    frag.append(el("div", { class: "panel" }, el("h3", {}, "Lifecycle snapshots ", s.status === "OK" ? statusTag("pass", "Complete") : statusTag("warn", "Needs a look")),
+      el("div", { class: "metrics" }, metric(String(s.missing.length), "Missing"), metric(String(s.hindsight.length), "Built from later data"),
+        metric(String(s.unavailable.length), "Cannot be rebuilt")),
+      el("p", { class: "small muted", text: "A snapshot records what the market looked like at a plan, an entry or an exit. One built after the fact from the daily close is labelled; one built from data after the fill is never used to judge the entry. Rebuilding uses the saved price history only and never overwrites a snapshot taken at the time." }),
+      el("p", { class: "small" }, rebuild), err));
+  }
+
+  const m = h.migration;
+  const dbPanel = el("div", { class: "panel" }, el("h3", {}, "Database ", rc ? (rc.database_ok ? statusTag("pass", "Integrity check passed") : statusTag("fail", "Integrity problem")) : ""),
+    el("div", { class: "metrics" }, metric(String(m.schema_version), "Schema version"),
+      m.latest ? metric(timeText(m.latest.applied_at), "Latest migration applied") : null),
+    el("p", { class: "small muted", text: `${m.latest ? `Latest migration: ${m.latest.name}. ` : ""}${m.backup_before_last_migration ? `A copy of the database was saved as ${m.backup_before_last_migration} before migrating at this start.` : "No copy was taken at this start: no migration ran on existing data, or the database was new."}` }));
+  if (rc) dbPanel.append(reconciliationBlock(rc, reload));
+  if (h.repairs.length) dbPanel.append(el("h4", { text: "Repairs" }), el("ul", { class: "small" }, h.repairs.map(r => el("li", { text: `${timeText(r.at)}: ${r.action.toLowerCase()}, copy saved as ${(r.backup_path || "").split(/[\\/]/).pop() || "none"}` }))));
+  frag.append(dbPanel);
+
+  frag.append(el("div", { class: "panel" }, el("h3", { text: "Recent problems" }),
+    h.recent_problems.length ? table([
+      { label: "When", cell: e => el("span", { class: "nowrap", text: timeText(e.at) }) },
+      { label: "What", cell: e => e.event.replaceAll("_", " ") },
+      { label: "Detail", cell: e => el("span", { class: "small", text: Object.entries(e).filter(([k]) => !["at", "event", "level"].includes(k)).map(([k, v]) => `${k.replaceAll("_", " ")}: ${v}`).join(" · ") }) }], h.recent_problems)
+      : el("p", { class: "small muted", text: "None since the app started." }),
+    el("p", { class: "small muted", text: "Warnings the app logged since it started (data-source failures, snapshots that could not be taken, repairs). The full log is in the terminal running the app." })));
+  return frag;
+}
+
+function reconciliationBlock(summary, reload) {
+  const box = el("div");
+  const err = el("div", { class: "error", role: "alert" });
+  const details = el("div");
+  const counts = Object.entries(summary.summary || {}).filter(([, n]) => n);
+  box.append(el("h4", { text: "Stored figures against the fills" }),
+    counts.length ? el("ul", { class: "plain small" }, counts.map(([k, n]) => el("li", {}, statusTag(RECON_LEVEL[k] || "info", String(n)), ` ${RECON_WORDS[k] || k}`)))
+      : el("p", { class: "small", text: "Every position's figures match its fills." }));
+  const show = el("button", { class: "plain small", text: "Show the reconciliation report" });
+  show.addEventListener("click", () => withBusy(show, err, async () => details.replaceChildren(reconciliationDetail(await api("/v2/diagnostics/reconciliation"), reload))));
+  box.append(el("p", { class: "small" }, show), err, details,
+    el("p", { class: "small muted", text: "The report only reads. Fills are the record; status, open quantity, average prices, realized profit and fees are worked out from them and can be recomputed." }));
+  return box;
+}
+
+function reconciliationDetail(r, reload) {
+  const box = el("div");
+  const rows = [];
+  for (const key of Object.keys(RECON_WORDS)) for (const item of r[key] || []) rows.push({ key, item });
+  // Money as money, quantities as quantities, times as times; never a raw float like 209.99999999999997.
+  const figure = (f, v) => v === null || v === undefined ? "none" : f.endsWith("_at") ? timeText(v)
+    : f === "status" ? String(v) : f === "open_quantity" ? qtyText(v) : isNum(v) ? money(v) : String(v);
+  const what = ({ key, item }) => {
+    if (key === "ledger_mismatches") return Object.entries(item.differences).map(([f, d]) => `${f.replaceAll("_", " ")}: stored ${figure(f, d.stored)}, from the fills ${figure(f, d.from_fills)}`).join("; ");
+    if (key === "lifecycle_issues") return `bought or sold again on ${timeText(item.executed_at)} after closing; ${item.action}`;
+    if (key === "possible_duplicate_fills") return `${item.count} × ${SIDE_WORDS[item.side] || item.side} ${qtyText(item.quantity)} at ${money(item.price)} on ${timeText(item.executed_at)}. ${item.note}`;
+    if (key === "journal_mismatches") return item.problem || "the journal's prices differ from the position's fills";
+    if (key === "unresolved_options") return `expired ${shortDate(item.expiration)} with ${qtyText(item.open_contracts)} open: record how it ended`;
+    if (key === "hindsight_snapshots") return `${(item.kind || "").toLowerCase()} snapshot made from ${(item.method || "later").toLowerCase().replaceAll("_", " ")} data after the fill`;
+    if (key.endsWith("_snapshots")) return `${(item.kind || item.snapshot_type || "").toLowerCase()}: ${item.reason || ""}`;
+    return item.problem || "";
+  };
+  box.append(rows.length ? table([
+    { label: "", cell: x => statusTag(RECON_LEVEL[x.key] || "info", "") },
+    { label: "Finding", cell: x => RECON_WORDS[x.key] },
+    { label: "Position", cell: x => { const i = x.item; const id = i.id ?? i.position_id; return `${i.symbol || ""}${id ? ` (${id})` : i.trade_id ? ` journal ${i.trade_id}` : ""}`; } },
+    { label: "Detail", cell: x => el("span", { class: "small", text: what(x) }) }], rows) : el("p", { class: "small", text: "Nothing to report." }));
+  box.append(el("p", { class: "small muted", text: `Checked ${timeText(r.checked_at)}: ${r.counts.positions} positions (${r.counts.open} open, ${r.counts.closed} closed, ${r.counts.planned} planned, ${r.counts.cancelled} cancelled), ${r.counts.journal_mirrors} from the option journal. Schema version ${r.schema_version}.` }));
+  if (r.needs_repair) box.append(repairControl(r, reload));
+  return box;
+}
+
+// Repair asks twice: the first press says exactly what will change, the second does it.
+function repairControl(r, reload) {
+  const err = el("div", { class: "error", role: "alert" });
+  const start = el("button", { class: "plain", text: "Repair from the fills…" });
+  const n = r.ledger_mismatches.length, j = r.journal_mismatches.length;
+  const go = el("button", { class: "primary", text: "Copy the database, then repair" });
+  const cancel = el("button", { class: "plain", text: "Cancel" });
+  const ask = el("div", { class: "panel hidden" },
+    el("p", { text: `This recomputes ${n} position${n === 1 ? "'s figures from its" : "s' figures from their"} fills${j ? ` and re-reads ${j} journal entr${j === 1 ? "y" : "ies"}` : ""}. A copy of the database is saved first. No fill is changed, nothing is merged or deleted, and positions opened again after closing stay as recorded.` }),
+    el("div", { class: "row" }, go, cancel));
+  start.addEventListener("click", () => { ask.classList.remove("hidden"); start.disabled = true; });
+  cancel.addEventListener("click", () => { ask.classList.add("hidden"); start.disabled = false; });
+  go.addEventListener("click", () => withBusy(go, err, async () => {
+    const done = await api("/v2/diagnostics/repair", { confirm: true });
+    await reload(`Repaired ${done.recomputed.length} position${done.recomputed.length === 1 ? "" : "s"} and ${done.journal_resynced.length} journal entr${done.journal_resynced.length === 1 ? "y" : "ies"} from the fills. The copy taken first is ${(done.backup || "").split(/[\\/]/).pop() || "not needed (in-memory database)"}.`);
+  }));
+  return el("div", {}, el("p", {}, start), ask, err);
+}
+
+Object.assign(BUILDERS, { portfolio: buildPortfolio, health: buildHealth });

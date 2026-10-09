@@ -22,6 +22,8 @@ V2_WRITES = {
     "/v2/positions/{position_id}/adjustments", "/v2/positions/{position_id}/adjustments/{adjustment_id}/void",
     "/v2/positions/{position_id}/option/expire", "/v2/positions/{position_id}/option/exercise",
     "/v2/positions/{position_id}/option/adjust",
+    # 2.3: recompute stored figures from the fills, after a backup. Records only; no orders.
+    "/v2/diagnostics/repair",
 }
 
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."

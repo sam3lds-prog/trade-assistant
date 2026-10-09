@@ -323,3 +323,12 @@ select:disabled, input:disabled { opacity: 0.6; }
 .neg-text { color: var(--fail); }
 .chart text.small-label { fill: var(--muted); font-size: 10.5px; }
 .nowrap { white-space: nowrap; }
+
+/* Trade review: label and value pairs, side by side on a wide screen and stacked on a phone. */
+dl.pairs { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 6px 0 10px; }
+dl.pairs dt { color: var(--muted); }
+dl.pairs dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  dl.pairs { grid-template-columns: 1fr; gap: 0; }
+  dl.pairs dd { margin-bottom: 6px; }
+}

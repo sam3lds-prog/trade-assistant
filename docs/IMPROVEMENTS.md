@@ -205,3 +205,144 @@ Tests: 468 passed, 2 skipped.
 
 Known limitations: MAE and MFE use daily bars, so the entry day's own range is not counted.
 Calibration and signal histories built before 2.3 keep their old intervals until rebuilt.
+
+### Sprint 7: diagnostics, data health, logging and release (2.3)
+
+Migration 8 adds the database rules (triggers) and `maintenance_log`.
+
+| Requirement | Done | Where | Tests (`test_diagnostics.py` unless noted) |
+| --- | --- | --- | --- |
+| 6.1 Database integrity | Triggers refuse a planned quantity or multiplier at or below zero, an option leg without a positive strike and multiplier or a date for its expiration, a fill without a full time stamp, and a split without a positive ratio. An update is refused only when it makes a good row bad, so rows from before 2.3 can still be recomputed; they are reported under `rule_breaks`. Foreign keys checked on | `schema_v2.py`, `reconcile.py` | `test_6_1_*` (2) |
+| 6.2 Reconciliation | `diagnose()`: every position recomputed from its fills and compared field by field; reopened positions, invalid states, possible duplicate fills (not merged), journal mirrors that differ, expired options still open, missing price history, snapshot problems, rule breaks, `PRAGMA integrity_check` and `foreign_key_check` | `reconcile.py`, `GET /v2/diagnostics/reconciliation` | `test_6_4_a_clean_book_reconciles`, `test_6_4_journal_drift_*` |
+| 6.4 Repair | `repair()` only with `{"confirm": true}`; copies the database first and refuses without the copy; re-reads mismatched journal entries; recomputes mismatched positions with `correction=True`; never changes, merges or deletes a fill; leaves reopened positions as recorded; logs to `maintenance_log`; a second run changes nothing | `reconcile.py`, `POST /v2/diagnostics/repair`, Data health screen | `test_6_2_*`, `test_6_4_a_2_1_database_report` |
+| 7.1 Portfolio summary | A headline strip (positions, gross and net exposure, open risk with what is unmeasured, today against the stop, how many prices are current) and every warning in one panel, grouped Critical, Warning and For information. The positions list no longer adds an unknown unrealized figure in as $0 | `v2.js` | `test_static_assets.py`, screenshots |
+| 7.2 Position detail | Cost (or proceeds) of the open position and its worth at the mark; unknown when there is no price | `v2.js` | screenshots |
+| 7.3 Trade review | `analytics.review()`: planned, executed, known at entry (never hindsight), thesis invalidated, targets reached, result after fees and financing, habits checked and not checked, what happened, what is missing; descriptive, not causal | `analytics.py`, `v2.js` | `test_7_3_*` |
+| 7.4 Data health | `GET /v2/health/data` and a Data health screen: source health, price freshness of open positions, positions not valued, option chains missing the contract, saved history, snapshots (with rebuild), schema and backups, reconciliation summary and report, repairs, recent problems; no credentials | `api_v2.py`, `v2.js`, `index.html` | `test_7_4_*`, `test_static_assets.py` |
+| 7.5 Error messages | Refused changes stay plain 400s; database rule or uniqueness clashes are 409 "Nothing was saved"; a busy database is 503; a stale option quote says "The quote for this contract is stale. Refresh the chain before evaluating it." | `api.py`, `service.py` | `test_7_5_*`, `test_position_errors_stay_plain` |
+| 8.3 Logging | `events.py`: `event=NAME key=value` lines for provider failures, stale data, missing valuations, risk failures, snapshot failures, migrations (with the backup), refused transitions, corrections and repairs; credential-shaped values redacted, also in every other module's log lines; recent warnings kept for the health screen | `events.py`, `market.py`, `desk.py`, `db.py`, `api.py`, `analysis.py`, `run.py` | `test_8_3_*` (2) |
+| 8.4 Release validation | Checklist below | | |
+
+Found and fixed during this sprint:
+
+| Finding | Status |
+| --- | --- |
+| **2.2.0 (Sprint 5) shipped a page script that the browser rejected.** `v2.js` declared `const ageText`, which `app.js` already declares as a function; scripts share one global scope, so the browser refused all of `v2.js`. The Analyze, Positions and Portfolio risk buttons were hidden and the Version 2 additions to the Journal, Pattern lab and Backtest screens did not appear. The classic screens kept working, which is why the API tests did not notice. | **Confirmed and fixed** (renamed to `ageShort`). New `test_static_assets.py`: no top-level name in both scripts, every navigation button has a screen, both scripts compile as one page (Node), and every screen opens in Chromium without a script error (Playwright; skipped where not installed). All three fail on the 2.2.0 code |
+| The positions list added positions with no price into the unrealized total as $0 | **Confirmed and fixed**: left out, counted, and the total marked "+ unknown" |
+| A trigger that refused any update to a row that broke a rule would have frozen rows written by older versions | Fixed before release: updates are refused only when they make a good row bad |
+| Test databases left open for the garbage collector | `conftest.py` closes every database a test opens |
+
+Version set to 2.3.0. Tests: 484 passed, 2 skipped.
+
+Known limitations: the database rules cover new writes only; existing rows that break them
+are reported, not changed. Duplicate-looking fills are reported, never merged, because two
+real orders can fill alike. The recent-problems list is kept in memory and starts empty when
+the app restarts; the full log is in the terminal running the app.
+
+## Test evidence (deliverable C)
+
+Run on Python 3.13.16 with pandas 3.0.5, numpy 2.5.3, FastAPI 0.143.0 and pydantic 2.13.5:
+`python -m pytest --cov=tradeassist`.
+
+| Point | Passed | Skipped |
+| --- | --- | --- |
+| Baseline, 2.1.0 (`d614c7a`) | 348 | 2 |
+| Sprint 0 | 355 | 2 |
+| Sprint 1 | 394 | 2 |
+| Sprint 2 (2.1.1) | 415 | 2 |
+| Sprint 3 | 429 | 2 |
+| Sprint 4 | 443 | 2 |
+| Sprint 5 (2.2.0) | 454 | 2 |
+| Sprint 6 | 468 | 2 |
+| **Sprint 7 (2.3.0)** | **484** | **2** |
+
+The two skips are the same as at the baseline (`test_optionmath.py`: implied volatility
+cannot be solved from a near-zero price). The one warning is the test client's own
+deprecation notice.
+
+New test files in this programme: `test_migrations.py` (7), `test_p0_defects.py` (35),
+`test_ledger_properties.py` (4, property-based with hypothesis, derandomized),
+`test_history_integrity.py` (21), `test_risk_models.py` (14), `test_short_and_options.py`
+(14), `test_freshness.py` (11), `test_validation.py` (14), `test_diagnostics.py` (12),
+`test_static_assets.py` (4). Test names begin with the requirement they prove
+(`test_1_2_*`, `test_6_4_*`, ...).
+
+Line coverage of the package: **93%** (10,609 statements). The modules this programme
+changed most:
+
+| Module | Coverage |
+| --- | --- |
+| `positions.py` | 93% |
+| `portfolio.py` | 96% |
+| `snapshots.py` | 90% |
+| `analytics.py` | 93% |
+| `signalbook.py` | 95% |
+| `freshness.py` | 88% |
+| `market.py` | 94% |
+| `desk.py` | 87% |
+| `reconcile.py` | 90% |
+| `events.py` | 92% |
+| `runs.py` | 92% |
+| `backup.py` | 97% |
+| `db.py` | 99% |
+| `schema_v2.py` | 94% |
+| `api_v2.py` | 95% |
+
+Lint: `ruff check .` passes (rules in `ruff.toml`). Screens were checked in Chromium at
+1280 and 390 pixels wide: no horizontal scroll and no script errors (the only console
+messages are the web font, which this build environment cannot reach, and a missing
+favicon).
+
+## Migration and reconciliation report (deliverable D)
+
+Each fixture is a database written by the released code of that version
+(`tests/fixtures/make_legacy_dbs.py`), with journal entries in every state and, from 2.0.0
+on, unified positions including one reopened after closing. Each was opened by 2.3.0, which
+migrated it, then reconciled and repaired:
+
+| | 0.4.0 | 2.0.0 | 2.1.0 |
+| --- | --- | --- | --- |
+| Schema | none → 8 | 3 → 8 | 4 → 8 |
+| Copy taken before migrating | yes (`…-before-migration-1-…`) | yes (`…-before-migration-4-…`) | yes (`…-before-migration-5-…`) |
+| Journal entries / attempts kept | 5 / 4 | 5 / 4 | 5 / 4 |
+| Fills | 0 → 5 (journal mirrored) | 12, unchanged | 12, unchanged |
+| Positions (open, closed, planned, cancelled) | 5 (1, 2, 1, 1) | 10 (3, 3, 2, 2) | 10 (3, 3, 2, 2) |
+| Stored figures that differ from the fills | 0 | 0 | 0 |
+| Reopened after closing | 0 | 1 (KO, position 8) | 1 (KO, position 8) |
+| Snapshots built with hindsight | 0 | 5 | 5 |
+| Snapshots missing | 10 | 10 | 10 |
+| Open positions without saved history | 1 | 3 | 3 |
+| Rule breaks, duplicates, journal drift, invalid states | 0 | 0 | 0 |
+| SQLite integrity and foreign keys | ok | ok | ok |
+| Repair | nothing to change; copy taken | nothing to change; copy taken | nothing to change; copy taken |
+
+What this means for a real database:
+
+- Upgrading changes no fill and loses no journal entry; the copy in `data/backups/` is the
+  way back.
+- A position reopened by an older version is kept exactly as recorded, flagged on its
+  screen and in the report, and its figures still add up its fills. New trades in the same
+  stock now go on a new position.
+- Snapshots that 2.0 and 2.1 built from the fill day's close (defect 2.3) are marked as
+  hindsight and are not used to judge an entry; "Rebuild missing snapshots" replaces them
+  from the prior session's close where the saved history allows, and records the ones it
+  cannot rebuild.
+- Missing snapshots and history gaps in these fixtures are because the test has no price
+  history; on a real database the first rebuild fills most of them.
+
+## Release validation checklist (8.4)
+
+| Check | Result |
+| --- | --- |
+| Full test suite | 484 passed, 2 skipped |
+| Lint | `ruff check .` clean |
+| Migrations from 0.4.0, 2.0.0 and 2.1.0 databases, with a copy first | pass (`test_migrations.py`, report above) |
+| A failed migration rolls back and leaves the copy | pass (`test_migrations.py`) |
+| Ledger property tests | pass (`test_ledger_properties.py`) |
+| No endpoint places, changes or cancels an order; Robinhood tools are read-only | unchanged and re-checked by `test_robinhood.py` (order and account tools refused) |
+| No made-up historical option prices | option backtests stay off (`options_backtest` flag) and refuse to run |
+| Unknown never shown as zero | portfolio totals, daily loss, open risk, analytics and the positions list (tests in `test_p0_defects.py`, `test_risk_models.py`, `test_validation.py`) |
+| No credential in logs, health endpoints or the health screen | pass (`test_8_3_*`, `test_7_4_*`, `test_freshness.py`) |
+| Every screen opens without a script error, desktop and phone width | pass (`test_static_assets.py`; screenshots) |
+| Version numbers | `tradeassist.__version__` 2.3.0; the page warns when it was loaded from an older version |
+| CI | the workflow is in `.github/workflows/tests.yml`, but GitHub Actions has not run on this repository (no runs recorded; it appears to be switched off in the repository's settings) |
