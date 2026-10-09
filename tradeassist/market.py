@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from datetime import time as clock_time
 from typing import Any
 
@@ -12,11 +13,15 @@ import pandas as pd
 from .chain import ChainAnalysis, analyze_chain
 from .config import Settings
 from .db import Database
+from .freshness import SourceHealth, observe, quote_completeness, session_state
 from .indicators import enrich
 from .optionmath import NY
 from .providers.base import BAR_COLUMNS, DataError, MarketData, display_symbol
 
+log = logging.getLogger(__name__)
+
 BAR_REFRESH_SECONDS = 4 * 3600
+QUOTE_CACHE_SECONDS = 3 * 86400     # the oldest saved quote shown (marked stale) when the source fails
 PARTIAL_REFRESH_SECONDS = 15 * 60   # today's unfinished bar is refetched this often when it is wanted
 SUSPECT_MOVE = 0.40  # a one-day move this large usually means an unadjusted split
 # A daily bar counts as finished only when it was fetched after this time on its own date. The
@@ -57,18 +62,66 @@ class Market:
         self.db = db
         self.settings = settings
         self._clock: tuple[float, dict[str, Any]] | None = None
+        self.health = SourceHealth()
+        self._last_quotes: dict[str, tuple[dict[str, Any], float]] = {}
+        self._stale_bars: dict[str, str] = {}
 
     @property
     def info(self):
         return self.provider.info
 
+    def _limits(self) -> dict[str, float]:
+        return getattr(self.settings, "freshness", None) or {}
+
+    def _call(self, what: str, fn):
+        """One request to the data source, counted for its health. While the source is paused after
+        repeated failures, nothing is sent and the request fails at once with the reason."""
+        left = self.health.paused()
+        if left:
+            raise DataError(f"{self.info.label} failed {self.health.consecutive_failures} times in a row; requests "
+                            f"are paused for {left:.0f} more seconds (last error: {self.health.last_error})")
+        try:
+            out = fn()
+        except DataError as exc:
+            self.health.failure(what, str(exc))
+            log.warning("Data source failure (%s): %s", what, exc)
+            raise
+        self.health.success()
+        return out
+
+    def observe_quote(self, symbol: str, q: dict[str, Any], kind: str = "STOCK_QUOTE",
+                      retrieved: datetime | None = None, from_cache: bool = False, reason: str = "") -> dict[str, Any]:
+        complete, warnings = quote_completeness(q)
+        return observe(kind, symbol, self.info.label, q.get("trade_time") or q.get("bid_time"),
+                       retrieved_at=retrieved, session=session_state(self.clock(), datetime.now(timezone.utc)),
+                       realtime=self.info.realtime, limits=self._limits(), completeness=complete, warnings=warnings,
+                       from_cache=from_cache, cache_reason=reason)
+
     # --- quotes ----------------------------------------------------------
-    def quote(self, symbol: str) -> dict[str, Any]:
+    def quote(self, symbol: str, allow_stale: bool = False) -> dict[str, Any]:
+        """The source's quote for `symbol`, with its freshness in `_meta` (freshness.observe).
+
+        With `allow_stale`, a failed request falls back to the last quote received in this session
+        (up to QUOTE_CACHE_SECONDS old), marked STALE with the reason. Pricing and tickets never
+        allow that; read-only views of positions do, and say so."""
         symbol = display_symbol(symbol)
-        quotes = self.provider.quotes([symbol])
+        try:
+            quotes = self._call(f"quote {symbol}", lambda: self.provider.quotes([symbol]))
+        except DataError as exc:
+            cached = self._last_quotes.get(symbol)
+            if allow_stale and cached and time.time() - cached[1] < QUOTE_CACHE_SECONDS:
+                q = dict(cached[0])
+                q["_meta"] = self.observe_quote(symbol, q, retrieved=datetime.fromtimestamp(cached[1], timezone.utc),
+                                                from_cache=True, reason=f"the source failed: {exc}")
+                return q
+            raise
         q = quotes.get(symbol)
         if not q:
             raise DataError(f"No quote found for {symbol}. Check the ticker.")
+        q = dict(q)
+        now = time.time()
+        q["_meta"] = self.observe_quote(symbol, q, retrieved=datetime.fromtimestamp(now, timezone.utc))
+        self._last_quotes[symbol] = (q, now)
         return q
 
     def spot(self, symbol: str) -> float:
@@ -117,9 +170,18 @@ class Market:
             elif not complete and now - meta["fetched_at"] > PARTIAL_REFRESH_SECONDS:
                 fresh = False
         if not fresh:
-            frame = self.provider.history(symbol, start, end)
-            if frame.empty:
-                raise DataError(f"No price history returned for {symbol}")
+            try:
+                frame = self._call(f"history {symbol}", lambda: self.provider.history(symbol, start, end))
+                if frame.empty:
+                    raise DataError(f"No price history returned for {symbol}")
+            except DataError as exc:
+                if meta is None or meta["source"] != self.info.mode:
+                    raise
+                # Keep using what is saved, and say it could not be refreshed (bar_info, bars_freshness).
+                self._stale_bars[symbol] = str(exc)
+                fresh, frame = True, None
+        if not fresh:
+            self._stale_bars.pop(symbol, None)
             rows = [(symbol, d.strftime("%Y-%m-%d"), o, h, l, c, v) for d, o, h, l, c, v in
                     frame[BAR_COLUMNS].itertuples(index=False, name=None)]
             with self.db.tx() as cur:
@@ -157,7 +219,23 @@ class Market:
                 "fetched_at": when.isoformat(timespec="seconds"),
                 "fetched_text": f"{when:%H:%M} New York time on {when:%b} {when.day}",
                 "last_date": meta["last_date"], "last_bar_status": "PARTIAL" if partial else "COMPLETE",
-                "settled_through": settled}
+                "settled_through": settled, "refresh_failed": self._stale_bars.get(display_symbol(symbol))}
+
+    def bars_freshness(self, symbol: str, kind: str = "DAILY_BARS") -> dict[str, Any]:
+        """Whether the cached daily bars reach the latest finished session (freshness.observe). The
+        last finished bar is observed at that day's close."""
+        symbol = display_symbol(symbol)
+        meta = self.db.one("SELECT * FROM bars_meta WHERE symbol = ?", (symbol,))
+        if meta is None:
+            return observe(kind, symbol, self.info.label, None, completeness="MISSING", warnings=["no bars saved"])
+        last = min(meta["last_date"], settled_through(meta["fetched_at"]).isoformat())
+        observed = datetime.combine(date.fromisoformat(last), clock_time(16, 0), tzinfo=NY)
+        failed = self._stale_bars.get(symbol)
+        out = observe(kind, symbol, self.info.label, observed.isoformat(), session="CLOSED",
+                      from_cache=bool(failed), cache_reason=f"refreshing them failed: {failed}" if failed else "")
+        out["fetched_at"] = datetime.fromtimestamp(meta["fetched_at"], timezone.utc).isoformat(timespec="seconds")
+        out["last_finished_bar"] = last
+        return out
 
     @staticmethod
     def data_warnings(symbol: str, bars: pd.DataFrame) -> list[str]:
@@ -180,7 +258,7 @@ class Market:
 
     def chain(self, symbol: str, expiration: str) -> ChainAnalysis:
         symbol = display_symbol(symbol)
-        contracts = self.provider.chain(symbol, expiration)
+        contracts = self._call(f"chain {symbol} {expiration}", lambda: self.provider.chain(symbol, expiration))
         if not contracts:
             raise DataError(f"No option chain returned for {symbol} {expiration}")
         return analyze_chain(symbol, expiration, contracts, self.spot(symbol), self.settings.risk_free_rate)

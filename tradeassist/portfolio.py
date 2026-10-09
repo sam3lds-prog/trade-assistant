@@ -237,6 +237,11 @@ def exposure(view: dict[str, Any], beta: float | None) -> dict[str, Any]:
         out["missing"].append(mark.get("error") or "no current price")
         out["risk_reason"] = "no current price"
         return out
+    fresh = mark.get("freshness") or {}
+    out["quote_freshness"] = fresh.get("freshness")
+    if fresh.get("freshness") in ("STALE", "UNKNOWN"):
+        out["missing"].append(f"price is {'stale' if fresh['freshness'] == 'STALE' else 'of unknown age'}"
+                              + (f" ({'; '.join(fresh.get('warnings', [])[:2])})" if fresh.get("warnings") else ""))
     liq = finite(mark.get("liquidation_price"))
     out["liquidation_value"] = sign * liq * mult * qty if liq is not None else None
     out["notional"] = abs(qty * mult * under)
@@ -354,6 +359,8 @@ def coverage(exps: list[dict[str, Any]]) -> dict[str, Any]:
     unpriced = [{"id": x["id"], "description": x["description"], "symbol": x["symbol"], "reasons": x["missing"][:1],
                  "missing_fields": x["missing_fields"]} for x in exps if not x["priced"]]
     no_exposure = [x["description"] for x in exps if x["priced"] and x["dollar_delta"] is None]
+    stale = [{"id": x["id"], "description": x["description"], "freshness": x.get("quote_freshness")}
+             for x in exps if x["priced"] and x.get("quote_freshness") in ("STALE", "UNKNOWN")]
     n, k = len(exps), len(exps) - len(unpriced)
     status = "COMPLETE" if not unpriced and not no_exposure else ("UNAVAILABLE" if n and k == 0 else "PARTIAL")
     if status == "COMPLETE":
@@ -369,8 +376,12 @@ def coverage(exps: list[dict[str, Any]]) -> dict[str, Any]:
             parts.append(f"no delta, so no exposure, for {'; '.join(no_exposure)}")
         text = ("Portfolio risk is incomplete because " + "; and ".join(parts) + ". The totals cover the other "
                 f"{n - len(unpriced) - len(no_exposure)} of {n} positions only, so they understate or overstate the whole.")
+    stale_text = ""
+    if stale:
+        stale_text = (f"{len(stale)} position{'s are' if len(stale) != 1 else ' is'} priced from a stale or undated quote ("
+                      + "; ".join(x["description"] for x in stale) + "): their figures use that older price.")
     return {"status": status, "positions": n, "priced": k, "unpriced": unpriced, "no_exposure": no_exposure,
-            "text": text}
+            "stale": stale, "stale_text": stale_text, "text": text}
 
 
 def reprice_option(x: dict[str, Any], underlying: float, iv_shift: float, now: datetime) -> float | None:
@@ -607,6 +618,8 @@ def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_
     warnings: list[dict[str, str]] = []
     if cov_["status"] != "COMPLETE":
         warnings.append({"level": "warn", "code": "INCOMPLETE_PRICES", "text": cov_["text"]})
+    if cov_["stale"]:
+        warnings.append({"level": "warn", "code": "STALE_PRICES", "text": cov_["stale_text"]})
     if rc["within_limit"] is False:
         warnings.append({"level": "fail", "code": "OPEN_RISK", "text": rc["conclusion"]})
     elif rc["within_limit"] is None:
@@ -627,6 +640,8 @@ def analyse(views: list[dict[str, Any]], bars: dict[str, pd.DataFrame], account_
             warnings.append({"level": "warn", "text": f"{x['description']} expires in {x['dte']} days: time decay is fastest now."})
         if x["priced"]:                            # unpriced positions are named in the coverage warning
             for m in x["missing"]:
+                if m.startswith("price is stale") or m.startswith("price is of unknown age"):
+                    continue                       # named in the stale-prices warning
                 warnings.append({"level": "info", "text": f"{x['description']}: {m}."})
     for sym in held:
         q = quality.get(sym)
