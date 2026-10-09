@@ -486,6 +486,17 @@ def _reopenings(led: Ledger) -> set[Any]:
     return {i.get("execution_id") for i in led.lifecycle_issues}
 
 
+def _longest_replay(direction: str, multiplier: float, fills: list[Fill]) -> Ledger:
+    """The ledger of the longest run of fills, from the first, that still accounts."""
+    best = account(direction, multiplier, [], allow_reopen=True)
+    for k in range(1, len(fills) + 1):
+        try:
+            best = account(direction, multiplier, fills[:k], allow_reopen=True)
+        except PositionError:
+            break
+    return best
+
+
 CORRECTABLE = ("side", "quantity", "price", "fees", "executed_at")
 CORRECTION_SOURCES = ("USER", "JOURNAL_SYNC", "REPAIR")
 
@@ -566,14 +577,16 @@ def correct_execution(cur: sqlite3.Cursor, position_id: int, execution_id: int, 
     try:
         led_before: Ledger | None = account(pos["direction"], pos["multiplier"], adjusted_fills(raw, units),
                                             allow_reopen=True)
+        known_reopenings = _reopenings(led_before)
     except PositionError:
         led_before = None                  # the fills no longer account: correcting the wrong one is how that is fixed
+        # The reopenings already recorded are those in the fills that still account, up to the first that does not.
+        known_reopenings = _reopenings(_longest_replay(pos["direction"], pos["multiplier"], adjusted_fills(raw, units)))
     fills_after = sorted([Fill(new["side"], new["quantity"], new["price"], new["fees"], new["executed_at"], f.id)
                           if f.id == execution_id else f for f in raw],
                          key=lambda f: (f.executed_at, f.id or 10**12))
     led_after = account(pos["direction"], pos["multiplier"], adjusted_fills(fills_after, units), allow_reopen=True)
-    if (led_before is None and led_after.lifecycle_issues) or \
-            (led_before is not None and not _reopenings(led_after) <= _reopenings(led_before)):
+    if not _reopenings(led_after) <= known_reopenings:
         raise PositionError("With that correction the position would close completely before a later fill, which "
                             "would make it two trades. Record the later fills on a new position instead.")
     cur.execute("UPDATE executions SET side = ?, quantity = ?, price = ?, fees = ?, executed_at = ? WHERE id = ?",
@@ -949,7 +962,9 @@ def financing(pos: dict[str, Any], now: datetime | None = None) -> dict[str, Any
         through = max((datetime.fromisoformat(a["period_end"] or a["effective_at"]) for a in fees), default=None)
         gaps, nights = _uncovered_nights(start, end, fees)
         if not nights:
-            status, text = "RECORDED", "Covered the same day: no night was borrowed, so no borrow fee is due."
+            status = "RECORDED"
+            text = ("Covered the same day: no night was borrowed, so no borrow fee is due." if pos["ledger"].get("closed_at")
+                    else "Sold short today: no night has been borrowed yet, so no borrow fee is due yet.")
         elif not fees:
             status, text = "UNKNOWN", "No borrow fees are recorded, so the cost of borrowing these shares is not known."
         elif gaps:

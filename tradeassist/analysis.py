@@ -521,7 +521,8 @@ class Analyst:
         then None and `view["prev_reason"]` says why (set by the caller from `self._prev_reason`)."""
         self._prev_reason = None
         try:
-            bars = self.market.bars(view["symbol"], 1)
+            # Finished bars only: a bar saved during a session is not that day's close.
+            bars = self.market.bars(view["symbol"], 1, complete=True)
             failed = self.market.bar_info(view["symbol"]).get("refresh_failed")
             before = bars[bars["date"] < pd.Timestamp(today)]
             stock_prev = float(before["close"].iloc[-1]) if len(before) else None

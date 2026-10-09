@@ -623,3 +623,31 @@ def test_followup_uvicorns_access_lines_keep_their_arguments():
                           ("127.0.0.1:5", "GET", "/cb?code=abc123", "1.1", 200), None)
     events.RedactingFilter().filter(r)
     assert len(r.args) == 5 and "abc123" not in r.getMessage()
+
+
+def test_followup_an_older_reopened_position_with_a_bad_fill_can_be_corrected(db):
+    pid = stock(db)
+    with db.tx() as cur:                           # as 2.0 or 2.1 could record: reopened, then a sale too large
+        for i, (side, q) in enumerate((("BUY", 10), ("SELL", 10), ("BUY", 5), ("SELL", 8))):
+            cur.execute("INSERT INTO executions (position_id, side, quantity, price, fees, executed_at, created_at) "
+                        "VALUES (?, ?, ?, 100, 0, ?, 'x')", (pid, side, q, f"2026-06-0{i + 1}T14:00:00+00:00"))
+    eid = db.one("SELECT MAX(id) FROM executions")[0]
+    from tradeassist.positions import correct_execution
+    with db.tx() as cur:
+        correct_execution(cur, pid, eid, {"quantity": 5}, "the broker statement says 5")
+    led = get(db, pid)["ledger"]
+    assert led["open_quantity"] == 0 and len(led["lifecycle_issues"]) == 1     # the old reopening, kept as recorded
+
+
+def test_followup_yesterdays_close_is_never_a_half_finished_bar(app, monkeypatch):
+    c, svc = app
+    c.post("/v2/positions", json={"symbol": "KO", "quantity": 10, "entry": {"price": 60, "executed_at": "2026-09-01T10:00"}})
+    seen = []
+    real = svc.market.bars
+
+    def spy(symbol, years=3.0, complete=False):
+        seen.append(complete)
+        return real(symbol, years, complete)
+    monkeypatch.setattr(svc.market, "bars", spy)
+    svc.analyst.daily_loss()
+    assert seen and all(seen)
