@@ -274,25 +274,32 @@ class SnapshotService:
 def status(db: Any) -> dict[str, Any]:
     """Counts for the data health view: positions missing a lifecycle snapshot they should have,
     hindsight snapshots in use, and what could not be rebuilt."""
-    missing, hindsight = [], []
+    missing, hindsight, stale, unreadable = [], [], [], []
     tried = {(r["position_id"], r["snapshot_type"], r["execution_id"])
              for r in db.query("SELECT position_id, snapshot_type, execution_id FROM snapshot_reconstruction "
                                "WHERE status = 'UNAVAILABLE'")}
     for (pid,) in db.query("SELECT id FROM positions ORDER BY id"):
-        with db.tx() as cur:
-            pos = read(cur, pid)
+        try:
+            with db.tx() as cur:
+                pos = read(cur, pid)
+        except PositionError as exc:        # its fills no longer account: listed, and the rest still checked
+            unreadable.append({"position_id": pid, "reason": str(exc)})
+            continue
         for n in needs(pos):
             ex = (n.get("execution") or {}).get("id") or 0
             if n["action"] in ("CREATE", "REPLACE") and (pid, n["kind"], ex) not in tried:
                 missing.append({"position_id": pid, "symbol": pos["symbol"], "kind": n["kind"], "reason": n["reason"]})
+            elif n["action"] == "SUPERSEDE":
+                stale.append({"position_id": pid, "symbol": pos["symbol"], "kind": n["kind"], "reason": n["reason"]})
         for kind in ("ENTRY", "EXIT"):
             s = effective(pos, kind)
             if s is not None and s.get("uses_later_data"):
                 hindsight.append({"position_id": pid, "symbol": pos["symbol"], "kind": kind, "method": s.get("method")})
     unavailable = [dict(r) for r in db.query("SELECT position_id, snapshot_type, execution_id, reason, attempts, updated_at "
                                              "FROM snapshot_reconstruction WHERE status = 'UNAVAILABLE' ORDER BY position_id")]
-    return {"missing": missing, "hindsight": hindsight, "unavailable": unavailable,
-            "status": "OK" if not missing and not hindsight else "ATTENTION"}
+    return {"missing": missing, "hindsight": hindsight, "unavailable": unavailable, "stale": stale,
+            "unreadable": unreadable,
+            "status": "OK" if not (missing or hindsight or stale or unreadable) else "ATTENTION"}
 
 
 __all__ = ["SnapshotService", "anchors", "effective", "needs", "cutoff_session", "close_of", "LIVE_WINDOW", "status"]

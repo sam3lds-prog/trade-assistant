@@ -67,9 +67,16 @@ def excursions(pos: dict[str, Any], bars: pd.DataFrame | None, until: str | None
     if bars is None or bars.empty or not pos.get("opened_at"):
         return {"available": False}
     start = _date(pos["opened_at"])
-    end = _date(until or pos.get("closed_at")) or datetime.now(NY).date()
+    closed_at = until or pos.get("closed_at")
+    end = _date(closed_at) or datetime.now(NY).date()
     d = pd.to_datetime(bars["date"]).dt.date
-    window = bars[(d > start) & (d <= end)]
+    # The exit day's high and low may come after an exit made during the session, so that day's range is
+    # left out (it would credit the trade with a target reached after it was sold); the entry day's range is
+    # left out for the same reason. An exit at or after the close keeps its day.
+    # Only an actual exit: an open position measured up to now keeps today's bar so far.
+    exited = pos.get("closed_at") if until is None or until == pos.get("closed_at") else None
+    exit_in_session = bool(exited) and datetime.fromisoformat(exited).astimezone(NY).hour < 16
+    window = bars[(d > start) & ((d < end) if exit_in_session else (d <= end))]
     entry_snap = entry_context(pos)[0] or {}
     if pos["instrument_type"] == "STOCK":
         entry, basis = pos["ledger"]["average_entry_price"], "average entry price"

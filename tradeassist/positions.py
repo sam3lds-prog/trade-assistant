@@ -23,7 +23,7 @@ import json
 import math
 import sqlite3
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
 INSTRUMENTS = ("STOCK", "OPTION", "OPTION_SPREAD")
@@ -76,8 +76,9 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def parse_time(value: str | None) -> str:
-    """An ISO timestamp in UTC. Empty means now; a plain date means that day's close in New York."""
+def parse_time(value: str | None, day_start: bool = False) -> str:
+    """An ISO timestamp in UTC. Empty means now; a plain date means that day's close in New York,
+    or with `day_start` the start of that day (a split applies to every fill on its ex-date)."""
     if not value:
         return now_iso()
     text = str(value).strip()
@@ -85,7 +86,7 @@ def parse_time(value: str | None) -> str:
         if len(text) == 10:
             from .optionmath import NY
             day = datetime.fromisoformat(text).date()
-            moment = datetime.combine(day, datetime.min.time().replace(hour=16), tzinfo=NY)
+            moment = datetime.combine(day, datetime.min.time().replace(hour=0 if day_start else 16), tzinfo=NY)
             if day == datetime.now(NY).date() and moment > datetime.now(NY):
                 moment = datetime.now(NY).replace(microsecond=0)     # today, before the close: now
         else:
@@ -132,6 +133,12 @@ class Ledger:
     # Fills that came after the position had closed completely. Only older databases can hold these
     # (versions before 2.1.1 allowed it); they are reported, never created now.
     lifecycle_issues: list[dict[str, Any]] = field(default_factory=list)
+    # A remainder smaller than the smallest recordable fill (MIN_QUANTITY), left by a broker's
+    # rounding or a split's fraction, could never be sold. If it is still open after the last
+    # fill it is closed at the last closing fill's price instead of staying open for ever (a
+    # later fill before that is an addition to it, as it was when recorded); this is how much
+    # was closed that way, together with any over-close below MIN_QUANTITY.
+    rounded_off: float = 0.0
 
     @property
     def sign(self) -> int:
@@ -180,6 +187,7 @@ def account(direction: str, multiplier: float, fills: Iterable[Fill], allow_reop
         raise PositionError("direction must be LONG or SHORT")
     multiplier = number("multiplier", multiplier, above=0)
     led = Ledger(direction=direction, multiplier=multiplier)
+    last_close: Fill | None = None
     open_cost = 0.0                       # sum of price x quantity for the open quantity, at average cost
     entry_value = exit_value = 0.0
     for f in fills:
@@ -214,19 +222,35 @@ def account(direction: str, multiplier: float, fills: Iterable[Fill], allow_reop
             led.max_open_quantity = max(led.max_open_quantity, led.open_quantity)
             led.closed_at = None
         else:
-            if f.quantity > led.open_quantity + EPS:
-                have = f"{led.open_quantity:g}" if led.open_quantity > EPS else "nothing"
-                raise PositionError(f"That closes {f.quantity:g} but only {have} is open at that time")
+            qty = f.quantity
+            if qty > led.open_quantity + EPS:
+                # Closing a hair more than is open (a split's fraction, a broker's rounding) closes what is open;
+                # anything more is a mistake.
+                if led.open_quantity > EPS and qty - led.open_quantity < MIN_QUANTITY:
+                    led.rounded_off += qty - led.open_quantity
+                    qty = led.open_quantity
+                else:
+                    have = f"{led.open_quantity:g}" if led.open_quantity > EPS else "nothing"
+                    raise PositionError(f"That closes {f.quantity:g} but only {have} is open at that time")
             basis = led.cost_basis if led.cost_basis is not None else 0.0
-            led.gross_realized += led.sign * (f.price - basis) * f.quantity * multiplier
-            led.open_quantity -= f.quantity
-            led.closed_quantity += f.quantity
-            exit_value += f.price * f.quantity
+            last_close = f
+            led.gross_realized += led.sign * (f.price - basis) * qty * multiplier
+            led.open_quantity -= qty
+            led.closed_quantity += qty
+            exit_value += f.price * qty
             open_cost = basis * led.open_quantity
             if led.open_quantity <= EPS:
                 led.open_quantity = 0.0
                 open_cost = 0.0
                 led.closed_at = f.executed_at or None
+    if last_close is not None and EPS < led.open_quantity < MIN_QUANTITY:
+        dust, basis = led.open_quantity, led.cost_basis if led.cost_basis is not None else 0.0
+        led.gross_realized += led.sign * (last_close.price - basis) * dust * multiplier
+        led.closed_quantity += dust
+        exit_value += last_close.price * dust
+        led.rounded_off += dust
+        led.open_quantity = 0.0
+        led.closed_at = last_close.executed_at or None
     led.realized_pnl = led.gross_realized - led.fees
     led.average_entry_price = entry_value / led.opened_quantity if led.opened_quantity > EPS else None
     led.average_exit_price = exit_value / led.closed_quantity if led.closed_quantity > EPS else None
@@ -446,13 +470,31 @@ def add_execution(cur: sqlite3.Cursor, position_id: int, *, side: str, quantity:
     before = account(pos["direction"], pos["multiplier"], adjusted_fills(raw, units), allow_reopen=True)
     fills = adjusted_fills(sorted(raw + [candidate], key=lambda f: (f.executed_at, f.id or 10**12)), units)
     after = account(pos["direction"], pos["multiplier"], fills, allow_reopen=True)   # raises before anything is written
-    if len(after.lifecycle_issues) > len(before.lifecycle_issues):
+    if not _reopenings(after) <= _reopenings(before):
         raise PositionError("That fill would close the position completely before a later fill opens it again, and a "
                             "closed position is finished. Record a new trade as a new position, or correct the history.")
     cur.execute("INSERT INTO executions (position_id, side, quantity, price, fees, executed_at, source, note, created_at, "
                 "external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (position_id, side, quantity, price, fees, stamp, source, str(note or "").strip(), now_iso(), external_id))
     return recompute(cur, position_id)
+
+
+def _reopenings(led: Ledger) -> set[Any]:
+    """The fills that open a position again after it closed (only older databases hold any). A change
+    may remove one, never add or move one: a new fill in the gap of a reopened position would make
+    yet another trade of it."""
+    return {i.get("execution_id") for i in led.lifecycle_issues}
+
+
+def _longest_replay(direction: str, multiplier: float, fills: list[Fill]) -> Ledger:
+    """The ledger of the longest run of fills, from the first, that still accounts."""
+    best = account(direction, multiplier, [], allow_reopen=True)
+    for k in range(1, len(fills) + 1):
+        try:
+            best = account(direction, multiplier, fills[:k], allow_reopen=True)
+        except PositionError:
+            break
+    return best
 
 
 CORRECTABLE = ("side", "quantity", "price", "fees", "executed_at")
@@ -532,20 +574,29 @@ def correct_execution(cur: sqlite3.Cursor, position_id: int, execution_id: int, 
         raise PositionError("Those are the values already recorded")
     raw = _raw_fills(cur, position_id)
     units = unit_adjustments(cur, position_id)
-    led_before = account(pos["direction"], pos["multiplier"], adjusted_fills(raw, units), allow_reopen=True)
+    try:
+        led_before: Ledger | None = account(pos["direction"], pos["multiplier"], adjusted_fills(raw, units),
+                                            allow_reopen=True)
+        known_reopenings = _reopenings(led_before)
+    except PositionError:
+        led_before = None                  # the fills no longer account: correcting the wrong one is how that is fixed
+        # The reopenings already recorded are those in the fills that still account, up to the first that does not.
+        known_reopenings = _reopenings(_longest_replay(pos["direction"], pos["multiplier"], adjusted_fills(raw, units)))
     fills_after = sorted([Fill(new["side"], new["quantity"], new["price"], new["fees"], new["executed_at"], f.id)
                           if f.id == execution_id else f for f in raw],
                          key=lambda f: (f.executed_at, f.id or 10**12))
     led_after = account(pos["direction"], pos["multiplier"], adjusted_fills(fills_after, units), allow_reopen=True)
-    if len(led_after.lifecycle_issues) > len(led_before.lifecycle_issues):
+    if not _reopenings(led_after) <= known_reopenings:
         raise PositionError("With that correction the position would close completely before a later fill, which "
                             "would make it two trades. Record the later fills on a new position instead.")
     cur.execute("UPDATE executions SET side = ?, quantity = ?, price = ?, fees = ?, executed_at = ? WHERE id = ?",
                 (new["side"], new["quantity"], new["price"], new["fees"], new["executed_at"], execution_id))
     after = recompute(cur, position_id, correction=True)
     status_after = _row(cur, position_id)["status"]
+    before = _ledger_summary(led_before, pos["status"]) if led_before is not None else \
+        {"status": pos["status"], "problem": "its fills did not account"}
     cid = record_correction(cur, position_id, execution_id, "UPDATE", previous, new, reason, source,
-                            _ledger_summary(led_before, pos["status"]), _ledger_summary(after, status_after))
+                            before, _ledger_summary(after, status_after))
     return {"correction_id": cid, "execution_id": execution_id, "previous": previous, "new": new,
             "status_before": pos["status"], "status_after": status_after,
             "time_changed": previous["executed_at"] != new["executed_at"]}
@@ -711,11 +762,45 @@ def adjustments(cur: sqlite3.Cursor, position_id: int) -> list[dict[str, Any]]:
     return out
 
 
+REOPEN_BY_ADJUSTMENT = ("This position is closed. With this {what}, {open:g} {unit} would be open again, so it would no "
+                        "longer be closed. If that is right (the closing fill was recorded in the other units), send it "
+                        "again with confirm_reopen and a reason: it is recorded as a correction. Otherwise correct the "
+                        "fills instead.")
+
+
+def _guard_reopen(cur: sqlite3.Cursor, pos: dict[str, Any], multiplier: float, what: str, confirm: bool, reason: str,
+                  details: dict[str, Any], before: Ledger) -> None:
+    """After a split, a voided split or a contract adjustment has been written (inside the caller's
+    transaction), with `before` the ledger as it was: if a CLOSED position would no longer be
+    closed, or the position would close completely before a later fill opens it again, refuse,
+    so the transaction rolls back, unless the caller confirmed it; a confirmed change is recorded
+    as an audited correction."""
+    after = account(pos["direction"], multiplier, _fills(cur, pos["id"]), allow_reopen=True)
+    reopened = pos["status"] == "CLOSED" and after.status() != "CLOSED"
+    split_in_two = not _reopenings(after) <= _reopenings(before)
+    if not reopened and not split_in_two:
+        return
+    unit = "contracts" if pos["instrument_type"] == "OPTION" else "shares"
+    if not confirm:
+        if reopened:
+            raise PositionError(REOPEN_BY_ADJUSTMENT.format(what=what, open=after.open_quantity, unit=unit))
+        raise PositionError(f"With this {what} the position would close completely before a later fill opens it again, "
+                            "which would make it two trades. Correct the fills instead, or, if that is right, send it "
+                            "again with confirm_reopen and a reason: it is recorded as a correction.")
+    reason = str(reason or "").strip()
+    if len(reason) < 3:
+        raise PositionError("Say why the closed position is being opened again (the reason is kept with the change)")
+    record_correction(cur, pos["id"], None, "UPDATE", {"status": pos["status"]}, {"adjustment": what, **details}, reason,
+                      "USER", _ledger_summary(before, pos["status"]), _ledger_summary(after, after.status()))
+    from .events import emit
+    emit("position_reopened", position_id=pos["id"], by=what, open_quantity=after.open_quantity)
+
+
 def add_adjustment(cur: sqlite3.Cursor, position_id: int, kind: str, *, amount: float | None = None,
                    effective_at: str | None = None, rate_pct: float | None = None, quantity: float | None = None,
                    per_share: float | None = None, ratio: float | None = None, period_start: str | None = None,
                    period_end: str | None = None, note: str = "", source: str = "MANUAL",
-                   external_id: str | None = None) -> int:
+                   external_id: str | None = None, confirm_reopen: bool = False) -> int:
     """Record money that moved outside the fills, or a stock split.
 
     BORROW_FEE      a fee charged for borrowing shares sold short: a cost (amount below zero),
@@ -727,7 +812,10 @@ def add_adjustment(cur: sqlite3.Cursor, position_id: int, kind: str, *, amount: 
     CASH_ADJUSTMENT any other cash the broker booked against the position (either sign)
     SPLIT           a stock split: `ratio` new shares per old (2 for 2-for-1, 0.1 for 1-for-10);
                     fills before it are replayed in post-split units and the plan's price
-                    levels are rescaled, with the old levels kept in `details`
+                    levels are rescaled, with the old levels kept in `details`. A plain date
+                    is the ex-date: every fill on that date is already in post-split units.
+                    A split that would leave shares open on a closed position is refused
+                    unless `confirm_reopen` (with the reason in `note`)
 
     Amounts come from the broker; nothing is estimated here. A broker's id (`external_id`) makes
     importing the same entry twice a no-op."""
@@ -747,7 +835,9 @@ def add_adjustment(cur: sqlite3.Cursor, position_id: int, kind: str, *, amount: 
         raise PositionError("Record a split on the stock position; for an option, record the contract adjustment")
     if pos.get("legacy_trade_id"):
         raise PositionError("This position mirrors an entry in the option journal; record adjustments on its own positions")
-    stamp = parse_time(effective_at)
+    stamp = parse_time(effective_at, day_start=kind == "SPLIT")
+    led_before = account(pos["direction"], pos["multiplier"], _fills(cur, position_id), allow_reopen=True) \
+        if kind == "SPLIT" else None
     vals: dict[str, Any] = {"rate_pct": None, "quantity": None, "per_share": None, "ratio": None}
     for name, value in (("rate_pct", rate_pct), ("quantity", quantity), ("per_share", per_share), ("ratio", ratio)):
         if value is not None:
@@ -778,9 +868,11 @@ def add_adjustment(cur: sqlite3.Cursor, position_id: int, kind: str, *, amount: 
             raise PositionError("Enter the split ratio: new shares per old share")
         amount = 0.0
         levels = {k: pos.get(k) for k in ("invalidation_price", "target_1", "target_2") if pos.get(k) is not None}
+        # The planned size is in pre-split shares if the plan, or the first fill it was sized for, came first.
+        first = min(x for x in (pos["created_at"], pos.get("opened_at")) if x)
         details = {"plan_levels_before": levels,
                    "plan_levels_after": {k: v / vals["ratio"] for k, v in levels.items()},
-                   "planned_quantity_before": pos["quantity"]}
+                   "planned_quantity_before": pos["quantity"], "quantity_rescaled": first < stamp}
     if period_start is not None:
         period_start = parse_time(period_start)
     if period_end is not None:
@@ -803,31 +895,45 @@ def add_adjustment(cur: sqlite3.Cursor, position_id: int, kind: str, *, amount: 
     aid = int(cur.lastrowid)
     if kind == "SPLIT":
         account(pos["direction"], pos["multiplier"], _fills(cur, position_id), allow_reopen=True)   # still accounts
+        _guard_reopen(cur, pos, pos["multiplier"], f"{vals['ratio']:g}-for-1 split", confirm_reopen, note,
+                      {"adjustment_id": aid, "ratio": vals["ratio"], "effective_at": stamp}, led_before)
         sets = {k: v for k, v in details["plan_levels_after"].items()}
-        # The planned size was in pre-split shares if the position was planned before the split.
-        sets["quantity"] = pos["quantity"] * vals["ratio"] if pos["created_at"] < stamp else pos["quantity"]
+        sets["quantity"] = pos["quantity"] * vals["ratio"] if details["quantity_rescaled"] else pos["quantity"]
         cur.execute(f"UPDATE positions SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?", (*sets.values(), position_id))
         recompute(cur, position_id, correction=True)
     return aid
 
 
-def void_adjustment(cur: sqlite3.Cursor, position_id: int, adjustment_id: int, reason: str) -> None:
-    """Mark a mistaken adjustment void. It stays on record with the reason; a voided split's plan
-    levels are put back."""
+def void_adjustment(cur: sqlite3.Cursor, position_id: int, adjustment_id: int, reason: str,
+                    confirm_reopen: bool = False) -> None:
+    """Mark a mistaken adjustment void. It stays on record with the reason. Voiding a split undoes
+    its own rescaling of today's plan levels and planned size (so later splits and plan edits are
+    kept), and is refused if it would reopen a closed position unless `confirm_reopen`."""
     reason = str(reason or "").strip()
     if not reason:
         raise PositionError("Say why the entry is being voided")
-    row = cur.execute("SELECT kind, voided_at, details_json FROM position_adjustments WHERE id = ? AND position_id = ?",
+    row = cur.execute("SELECT kind, voided_at, details_json, ratio FROM position_adjustments WHERE id = ? AND position_id = ?",
                       (adjustment_id, position_id)).fetchone()
     if row is None:
         raise PositionError(f"Position {position_id} has no adjustment {adjustment_id}")
     if row[1]:
         raise PositionError("That entry is already void")
+    pos = _row(cur, position_id)
+    led_before = account(pos["direction"], pos["multiplier"], _fills(cur, position_id), allow_reopen=True) \
+        if row[0] == "SPLIT" else None
     cur.execute("UPDATE position_adjustments SET voided_at = ?, void_reason = ? WHERE id = ?", (now_iso(), reason, adjustment_id))
     if row[0] == "SPLIT":
-        details = json.loads(row[2] or "{}")
-        sets = {**details.get("plan_levels_before", {}), "quantity": details.get("planned_quantity_before")}
-        sets = {k: v for k, v in sets.items() if v is not None}
+        account(pos["direction"], pos["multiplier"], _fills(cur, position_id), allow_reopen=True)   # still accounts
+        ratio, details = float(row[3]), json.loads(row[2] or "{}")
+        _guard_reopen(cur, pos, pos["multiplier"], f"voided {ratio:g}-for-1 split", confirm_reopen, reason,
+                      {"adjustment_id": adjustment_id, "ratio": ratio}, led_before)
+        sets = {k: pos[k] * ratio for k in ("invalidation_price", "target_1", "target_2") if pos.get(k) is not None}
+        rescaled = details.get("quantity_rescaled")
+        if rescaled is None:            # entries from 2.2 and 2.3.0 did not say; they rescaled when the plan came first
+            rescaled = details.get("planned_quantity_before") is not None and \
+                abs(pos["quantity"] - details["planned_quantity_before"] * ratio) < 1e-9
+        if rescaled:
+            sets["quantity"] = pos["quantity"] / ratio
         if sets:
             cur.execute(f"UPDATE positions SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?", (*sets.values(), position_id))
         recompute(cur, position_id, correction=True)
@@ -854,17 +960,25 @@ def financing(pos: dict[str, Any], now: datetime | None = None) -> dict[str, Any
         end = datetime.fromisoformat(pos["ledger"]["closed_at"]) if pos["ledger"].get("closed_at") else now
         start = datetime.fromisoformat(pos["ledger"]["opened_at"]) if pos["ledger"].get("opened_at") else end
         through = max((datetime.fromisoformat(a["period_end"] or a["effective_at"]) for a in fees), default=None)
-        if not fees:
+        gaps, nights = _uncovered_nights(start, end, fees)
+        if not nights:
+            status = "RECORDED"
+            text = ("Covered the same day: no night was borrowed, so no borrow fee is due." if pos["ledger"].get("closed_at")
+                    else "Sold short today: no night has been borrowed yet, so no borrow fee is due yet.")
+        elif not fees:
             status, text = "UNKNOWN", "No borrow fees are recorded, so the cost of borrowing these shares is not known."
-        elif through is not None and (end - through).days >= 1:
-            status, text = "PARTIAL", f"Borrow fees are recorded through {through.date():%b %d, %Y}; later days are not known."
+        elif gaps:
+            status = "PARTIAL"
+            text = (f"Borrow fees are not recorded for {len(gaps)} of the {nights} nights the shares were borrowed "
+                    f"(first {gaps[0]:%b %d, %Y}); the cost of those nights is not known. A fee without a period covers "
+                    "only its own date.")
         else:
-            status, text = "RECORDED", "Borrow fees are recorded for the whole time the shares were borrowed."
+            status, text = "RECORDED", "Borrow fees are recorded for every night the shares were borrowed."
         rates = [a for a in active if a["kind"] == "BORROW_RATE" or (a["kind"] == "BORROW_FEE" and a.get("rate_pct"))]
         estimate = None
         if status != "RECORDED" and rates and pos["ledger"].get("cost_basis"):
             rate = rates[-1]["rate_pct"]
-            days = max((end - (through or start)).total_seconds() / 86400, 0.0)
+            days = float(len(gaps)) if gaps else float(nights)          # the nights not covered
             shares = pos["ledger"]["open_quantity"] or pos["ledger"]["max_open_quantity"]
             estimate = -rate / 100 * shares * pos["ledger"]["cost_basis"] * days / 360
         out.update({"borrow_status": status, "borrow_text": text, "borrow_recorded_through": through.isoformat() if through else None,
@@ -873,6 +987,22 @@ def financing(pos: dict[str, Any], now: datetime | None = None) -> dict[str, Any
                                             "fee, at cost. Not a charge, and not included in any profit figure."
                     if estimate is not None else None})
     return out
+
+
+def _uncovered_nights(start: datetime, end: datetime, fees: list[dict[str, Any]]) -> tuple[list[Any], int]:
+    """The nights from `start` to `end` (New York dates; borrow accrues every night, weekends
+    included; each is named by the date it starts) that no recorded fee's period covers, and how
+    many nights there were. The night of the cover date, or of today for a short still open, is
+    not counted: nothing is owed for it yet. A fee without a period covers its own date."""
+    from .optionmath import NY
+    covered = set()
+    for a in fees:
+        lo = datetime.fromisoformat(a.get("period_start") or a["effective_at"]).astimezone(NY).date()
+        hi = datetime.fromisoformat(a.get("period_end") or a["effective_at"]).astimezone(NY).date()
+        covered.update(lo + timedelta(days=i) for i in range((hi - lo).days + 1))
+    first, last = start.astimezone(NY).date(), end.astimezone(NY).date()
+    nights = [first + timedelta(days=i) for i in range((last - first).days)]
+    return [n for n in nights if n not in covered], len(nights)
 
 
 def _events(cur: sqlite3.Cursor, column: str, position_id: int) -> list[dict[str, Any]]:
@@ -947,6 +1077,10 @@ def expire_worthless(cur: sqlite3.Cursor, position_id: int, *, underlying_price:
             raise PositionError(f"At {underlying_price:,.2f} this option was ${itm:,.2f} in the money at expiration, and "
                                 "brokers normally exercise that automatically. Record the exercise, or give the reason "
                                 "it expired worthless (for example, you told the broker not to exercise).")
+    elif not str(reason or "").strip():
+        raise PositionError(f"The stock's closing price on {leg['expiration']} is not saved here, so the app cannot check "
+                            "that the option finished out of the money. Enter the stock price at expiration, or give "
+                            "the reason you know it expired worthless.")
     stamp = close.astimezone(timezone.utc).isoformat(timespec="seconds")
     add_execution(cur, position_id, side="SELL", quantity=led.open_quantity, price=0.0, executed_at=stamp,
                   note="expired worthless")
@@ -1017,7 +1151,8 @@ def exercise(cur: sqlite3.Cursor, position_id: int, *, underlying_price: float, 
 
 
 def adjust_contract(cur: sqlite3.Cursor, position_id: int, *, effective_at: str, new_strike: float, new_multiplier: float,
-                    quantity_factor: float = 1.0, new_option_symbol: str | None = None, reason: str) -> dict[str, Any]:
+                    quantity_factor: float = 1.0, new_option_symbol: str | None = None, reason: str,
+                    confirm_reopen: bool = False) -> dict[str, Any]:
     """Record a contract adjustment after a split or other corporate action: the strike, the
     multiplier (shares delivered per contract) and how many contracts each old one became. The
     original terms are kept in the event; fills before it are replayed in the new units, so
@@ -1029,7 +1164,7 @@ def adjust_contract(cur: sqlite3.Cursor, position_id: int, *, effective_at: str,
     strike = number("new strike", new_strike, above=0)
     mult = number("new multiplier", new_multiplier, above=0)
     factor = number("contracts per old contract", quantity_factor, above=0)
-    stamp = parse_time(effective_at)
+    stamp = parse_time(effective_at, day_start=True)         # a plain date is the ex-date: that day's fills are adjusted
     previous = {"strike": leg["strike"], "multiplier": pos["multiplier"], "option_symbol": leg["option_symbol"],
                 "planned_quantity": pos["quantity"]}
     new = {"strike": strike, "multiplier": mult, "option_symbol": new_option_symbol or leg["option_symbol"],
@@ -1042,6 +1177,7 @@ def adjust_contract(cur: sqlite3.Cursor, position_id: int, *, effective_at: str,
     after = account(pos["direction"], mult, _fills(cur, position_id), allow_reopen=True)
     if after.open_quantity != int(round(after.open_quantity, 6)):
         raise PositionError("That adjustment leaves a fraction of a contract open; check the contracts per old contract")
+    _guard_reopen(cur, pos, mult, "contract adjustment", confirm_reopen, reason, {"event_id": ev, **new}, led)
     recompute(cur, position_id, correction=True)
     return {"event_id": ev, "previous": previous, "new": new}
 
@@ -1110,14 +1246,23 @@ def sync_legacy_trade(cur: sqlite3.Cursor, trade_id: int) -> int | None:
         wanted.append(("BUY", float(t["contracts"]), float(t["entry_price"]), t.get("entry_at") or t["created_at"]))
         if t.get("exit_price") is not None:
             wanted.append(("SELL", float(t["contracts"]), float(t["exit_price"]), t.get("exit_at") or now_iso()))
-    have = {r[1]: r for r in cur.execute("SELECT id, side, quantity, price, fees, executed_at FROM executions "
-                                         "WHERE position_id = ? ORDER BY executed_at, id", (pid,)).fetchall()}
+    have: dict[str, list[Any]] = {}
+    for r in cur.execute("SELECT id, side, quantity, price, fees, executed_at FROM executions WHERE position_id = ? "
+                         "ORDER BY executed_at, id", (pid,)).fetchall():
+        have.setdefault(r[1], []).append(r)
     audit = _has_table(cur, "execution_corrections")
     pos = _row(cur, pid)
-    led_before = account(pos["direction"], pos["multiplier"], _fills(cur, pid), allow_reopen=True)
+    try:
+        led_before: Ledger | None = account(pos["direction"], pos["multiplier"], _fills(cur, pid), allow_reopen=True)
+    except PositionError:
+        led_before = None                    # the mirror's fills no longer account; the journal puts them right
     changes = []
     for side, qty, price, at in wanted:
-        old = have.pop(side, None)
+        rows = have.get(side) or []
+        # Keep the fill that already matches, if any, so its id and what is tied to it stay valid.
+        old = next((r for r in rows if (r[2], r[3], r[4], r[5]) == (qty, price, 0.0, at)), rows[0] if rows else None)
+        if old is not None:
+            rows.remove(old)
         if old is None:
             cur.execute("INSERT INTO executions (position_id, side, quantity, price, fees, executed_at, source, note, "
                         "created_at) VALUES (?, ?, ?, ?, 0, ?, 'IMPORT', 'from the option journal', ?)",
@@ -1128,18 +1273,21 @@ def sync_legacy_trade(cur: sqlite3.Cursor, trade_id: int) -> int | None:
             changes.append(("UPDATE", old[0], {"side": side, "quantity": old[2], "price": old[3], "fees": old[4],
                                                "executed_at": old[5]},
                             {"side": side, "quantity": qty, "price": price, "fees": 0.0, "executed_at": at}))
-    for side, old in have.items():                     # the journal no longer has this fill
-        cur.execute("DELETE FROM executions WHERE id = ?", (old[0],))
-        changes.append(("DELETE", old[0], {"side": side, "quantity": old[2], "price": old[3], "fees": old[4],
-                                           "executed_at": old[5]}, {}))
+    for side, rows in have.items():                    # the journal does not have these fills
+        for old in rows:
+            cur.execute("DELETE FROM executions WHERE id = ?", (old[0],))
+            changes.append(("DELETE", old[0], {"side": side, "quantity": old[2], "price": old[3], "fees": old[4],
+                                               "executed_at": old[5]}, {}))
     if t["status"] == "cancelled" and pos["status"] == "PLANNED" and not wanted:
         cur.execute("UPDATE positions SET status = 'CANCELLED' WHERE id = ?", (pid,))
     led = recompute(cur, pid, correction=bool(changes))
     if changes and audit:
         after = _row(cur, pid)["status"]
+        before = _ledger_summary(led_before, pos["status"]) if led_before is not None else \
+            {"status": pos["status"], "problem": "its fills did not account"}
         for action, eid, previous, new in changes:
             record_correction(cur, pid, eid, action, previous, new, "The option journal entry changed", "JOURNAL_SYNC",
-                              _ledger_summary(led_before, pos["status"]), _ledger_summary(led, after))
+                              before, _ledger_summary(led, after))
     if plan.get("stop_loss_pct") and t.get("entry_price"):
         cur.execute("UPDATE positions SET notes = TRIM(notes || ' ' || ?) WHERE id = ? AND notes NOT LIKE '%Exit plan:%'",
                     (f"Exit plan: take profit at +{plan.get('profit_target_pct', 50):g}%, stop at -{plan['stop_loss_pct']:g}% "

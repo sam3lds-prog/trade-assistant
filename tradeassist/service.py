@@ -180,16 +180,19 @@ class TradeAssistant:
         chosen = limit_price if limit_price is not None else _rung(ladder, "balanced")
         validated = self._validated_patterns()
         self._record_iv_if_missing(symbol)
+        book = self.book_risk(symbol)
         card = build_scorecard(row, analysis, enriched, self.settings, chosen, contracts, earnings=earnings,
-                               iv_rank=self.iv_rank(symbol), open_risk=self.journal.committed_risk(),
+                               iv_rank=self.iv_rank(symbol), open_risk=self.journal.committed_risk() + book["total"],
                                today=datetime.now(NY).date(), trend_validated=False,
+                               # Not the Positions screen's risk in this stock: an option on a stock you hold is often
+                               # a hedge, and counting the shares' risk against it would block the trade that cuts risk.
                                symbol_risk=self.journal.committed_risk(symbol))
         events = recent_events(enriched)
         for e in events:
             e["verdicts"] = validated.get(e["key"], [])
             e["supported"] = any(v["verdict"] == "supported" for v in e["verdicts"])
             e["with_trade"] = (e["direction"] == 1) == (option_type == "call")
-        result.update({"scorecard": card, "earnings": earnings, "recent_patterns": events,
+        result.update({"scorecard": card, "earnings": earnings, "recent_patterns": events, "book_risk": book,
                        "assumed_limit": chosen,
                        "bars_as_of": enriched["date"].iloc[-1].strftime("%Y-%m-%d"),
                        "data_warnings": Market.data_warnings(symbol, enriched)})
@@ -394,8 +397,21 @@ class TradeAssistant:
             # A partial measurement is not a pass: say so, and with INCOMPLETE_RISK_POLICY=BLOCK treat it
             # as a limit broken until it is overridden on purpose.
             note = {"key": "daily_loss_incomplete", "label": "Daily loss not fully measured",
-                    "value": f"{today['positions_evaluated']} of {today['positions']} positions measured",
+                    "value": (f"{today['positions_evaluated']} of {today['positions']} positions measured"
+                              if today.get("positions") is not None else "positions could not be read"),
                     "text": today["text"], "overridable": True}
+            if self.settings.incomplete_risk_policy == "BLOCK":
+                violations.append(note)
+            else:
+                risk_notes.append(note)
+        unknown_risk = (priced.get("book_risk") or {}).get("unknown") or []
+        if unknown_risk:
+            n = len(unknown_risk)
+            note = {"key": "open_risk_incomplete", "label": "Open risk not fully measured",
+                    "value": f"{n} position{'s' if n != 1 else ''} not measured",
+                    "text": "Total risk above counts only what could be measured. Not measured: "
+                            + "; ".join(f"{u['description']} ({u['reason']})" for u in unknown_risk)
+                            + ". It is not known whether the whole is inside your open-risk limit.", "overridable": True}
             if self.settings.incomplete_risk_policy == "BLOCK":
                 violations.append(note)
             else:
@@ -593,6 +609,44 @@ class TradeAssistant:
                              "Written summaries of filings: open the linked filings to read them"],
         })
 
+    def book_risk(self, symbol: str | None = None) -> dict[str, Any]:
+        """Open risk on the Positions screen that the option journal does not already count: every
+        open position except journal mirrors (their premium is in the journal's own figure), each
+        on its stated basis (portfolio.exposure). Positions whose risk cannot be measured, or whose
+        fills no longer add up, are listed in `unknown` and never counted as zero."""
+        out: dict[str, Any] = {"total": 0.0, "symbol": 0.0, "positions": 0, "unknown": []}
+        desk = getattr(self, "desk", None)
+        if desk is None or not self.settings.features.get("unified_positions"):
+            return out
+        from .portfolio import exposure
+        try:
+            listing = desk.list("open")
+        except (DataError, ValueError) as exc:
+            out["unknown"].append({"description": "Open positions", "reason": f"could not be read ({exc})"})
+            return out
+        for u in listing.get("invalid", []):
+            if not u.get("legacy_trade_id"):
+                out["unknown"].append({"id": u["id"], "description": u["description"], "reason": "its fills no longer add up"})
+        for v in listing["positions"]:
+            if v.get("legacy_trade_id"):
+                continue
+            out["positions"] += 1
+            fresh = (v.get("mark") or {}).get("freshness") or {}
+            if fresh.get("from_cache"):
+                # A saved quote from before the source failed can make the risk look smaller (or larger) than it is.
+                out["unknown"].append({"id": v["id"], "description": v["description"],
+                                       "reason": "its price is a saved copy from before the data source failed"})
+                continue
+            x = exposure(v, None)
+            if x["open_risk"] is None:
+                out["unknown"].append({"id": v["id"], "description": v["description"],
+                                       "reason": x.get("risk_reason") or "not measured"})
+                continue
+            out["total"] += x["open_risk"]
+            if symbol and v["symbol"] == symbol:
+                out["symbol"] += x["open_risk"]          # reported, not counted toward the per-trade limit
+        return out
+
     def daily_loss_status(self) -> dict[str, Any]:
         """Today's result for the daily loss stop, with how much of it could be measured. With
         portfolio risk on, it covers every position and follows DAILY_LOSS_MODE (portfolio.daily_loss);
@@ -608,10 +662,24 @@ class TradeAssistant:
                 d["counted_as"] = how
                 return d
             except (DataError, ValueError) as exc:
-                log.warning("Daily loss from positions unavailable, using the journal: %s", exc)
+                log.warning("Daily loss from positions unavailable, using the journal only: %s", exc)
+                failed = str(exc)
+        else:
+            failed = None
         realized = self.journal.realized_today()
         cap = self.settings.account_size * self.settings.daily_loss_stop_pct / 100.0
         loss = "STOP" if realized <= -cap else "WARN" if realized <= -0.75 * cap else "OK"
+        if failed is not None:
+            # The positions could not be read, so only the journal's closed trades are known: never a complete day.
+            status = loss if loss != "OK" else "INCOMPLETE"
+            return {"mode": "REALIZED_ONLY", "counted": realized, "known_total": realized,
+                    "counted_as": "closed option-journal trades only; positions could not be read",
+                    "loss_status": loss, "coverage_status": "UNAVAILABLE", "status": status, "positions": None,
+                    "positions_evaluated": 0, "missing": [{"id": None, "description": "Positions", "reason": failed}],
+                    "unknown": ["Positions"],
+                    "text": f"Today's result could not be measured: the positions could not be read ({failed}). Closed "
+                            f"option-journal trades alone come to {'+' if realized >= 0 else '-'}${abs(realized):,.0f}, so "
+                            "it is not known whether the account is within the daily stop."}
         return {"mode": "REALIZED_ONLY", "counted": realized, "known_total": realized, "counted_as": "closed trades",
                 "loss_status": loss, "coverage_status": "COMPLETE", "status": loss, "positions": 0,
                 "positions_evaluated": 0, "missing": [], "unknown": [],

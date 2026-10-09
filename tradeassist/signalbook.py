@@ -24,9 +24,9 @@ lab's verdicts were found on the same history and would leak it.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -86,22 +86,33 @@ def block_span(horizon: int) -> int:
     return max(1, round(horizon * 7 / 5))
 
 
-def effective_interval(wins: int, n: int, blocks: int) -> tuple[float | None, float | None]:
+def effective_interval(wins: int, n: int, blocks: int | Sequence[int]) -> tuple[float | None, float | None]:
     """A 95% interval for a frequency whose cases are not independent.
 
     Cases whose holding windows overlap, or that come from several stocks on the same dates,
     move together, so N of them carry less information than N separate coin flips. The
-    frequency itself uses every case; the interval is a Wilson interval on the number of
-    separate periods (non-overlapping blocks of the horizon) instead of on N, which is wider
-    and honest about the dependence. With one case per period the two agree."""
+    frequency itself uses every case; the interval is a Wilson interval on an effective number
+    of separate periods (non-overlapping blocks of the horizon) instead of on N, which is wider
+    and honest about the dependence. With one case per period the two agree.
+
+    `blocks` is either the number of periods (all assumed the same size) or the number of cases
+    in each period. With sizes, the effective number is (sum of sizes)^2 / (sum of squared
+    sizes): equal periods give their count, and one period holding most of the cases counts
+    as little more than one, because those cases are close to a single observation."""
     if n <= 0:
         return None, None
-    n_eff = max(1, min(n, blocks))
+    if isinstance(blocks, (int, np.integer)):
+        count = float(blocks)
+    else:
+        sizes = [float(b) for b in blocks if b > 0]
+        count = (sum(sizes) ** 2 / sum(b * b for b in sizes)) if sizes else 0.0
+    n_eff = max(1.0, min(float(n), count))
     return wilson(wins / n * n_eff, n_eff)
 
 
-INTERVAL_METHOD = ("95% Wilson interval on the number of separate periods (non-overlapping blocks of the horizon), "
-                   "not on the number of cases, because overlapping cases are not independent")
+INTERVAL_METHOD = ("95% Wilson interval on the effective number of separate periods (non-overlapping blocks of the "
+                   "horizon, weighted by how many cases each holds), not on the number of cases, because overlapping "
+                   "cases are not independent")
 
 
 # --- collecting occurrences -------------------------------------------------------------------
@@ -215,7 +226,7 @@ def score_days(symbol: str, df: pd.DataFrame, states: pd.DataFrame, spy: pd.Data
 def summarize(rows: Iterable[dict[str, Any]], direction: int, horizon: int = MAIN_HORIZON) -> dict[str, Any]:
     """How the past occurrences in `rows` turned out over `horizon` days, the signal's way round."""
     sign = direction if direction != 0 else 1
-    fwd, excess, best, worst, blocks = [], [], [], [], set()
+    fwd, excess, best, worst, blocks = [], [], [], [], Counter()
     for r in rows:
         f = r.get(f"fwd_{horizon}")
         if f is None or not math.isfinite(f):
@@ -229,10 +240,10 @@ def summarize(rows: Iterable[dict[str, Any]], direction: int, horizon: int = MAI
             best.append(hi if sign > 0 else -lo)
             worst.append(lo if sign > 0 else -hi)
         d = datetime.fromisoformat(str(r["date"])[:10]).toordinal()
-        blocks.add(d // block_span(horizon))
+        blocks[d // block_span(horizon)] += 1
     n = len(fwd)
     wins = sum(1 for x in fwd if x > 0)
-    lo_, hi_ = effective_interval(wins, n, len(blocks))
+    lo_, hi_ = effective_interval(wins, n, list(blocks.values()))
     naive = wilson(wins, n)
     return {"horizon": horizon, "cases": n, "independent_periods": len(blocks),
             "went_the_signal_way": wins, "frequency": wins / n if n else None, "frequency_low": lo_,
@@ -252,14 +263,19 @@ HOLDOUT_SHARE = 0.3              # the latest share of dates kept out to check t
 def calibrate(days: pd.DataFrame, horizon: int = MAIN_HORIZON) -> dict[str, Any]:
     """Frequency of a gain after each range of net score; and whether the score is calibrated.
 
+    The check is made on the earlier 70% of dates only (less the last horizon before the cut,
+    whose outcomes reach into the held-out dates): there, higher ranges must have been
+    followed by gains more often, in order, with the gap between the lowest and highest
+    significant on time blocks. The latest 30% of dates are then held out: never used to choose
+    the ranges or to test them, only to see whether the same ranges point the same way.
+
     `calibration_status`:
-      CALIBRATED                  higher ranges were followed by gains more often, in order, the gap
-                                  between the lowest and highest is significant on time blocks, and the
-                                  latest 30% of dates (held out) shows the same direction on its own
-      CALIBRATED_IN_SAMPLE_ONLY   the full history passes but the held-out dates do not confirm it
-      NOT_CALIBRATED              the full history does not pass
-      INSUFFICIENT_DATA           too few cases in the score ranges
-    `calibrated` is true only for CALIBRATED."""
+      CALIBRATED                  the earlier dates pass and the held-out dates confirm it
+      CALIBRATED_IN_SAMPLE_ONLY   the earlier dates pass but the held-out dates do not confirm it
+      NOT_CALIBRATED              the earlier dates do not pass
+      INSUFFICIENT_DATA           too few cases in the score ranges of the earlier dates
+    `calibrated` is true only for CALIBRATED. The bucket frequencies shown use every date; they
+    describe the history, they are not the test."""
     col = f"fwd_{horizon}"
     d = days[np.isfinite(days["net"]) & np.isfinite(days[col])]
     blocks_all = pd.to_datetime(d["date"]).map(pd.Timestamp.toordinal) // block_span(horizon) if len(d) else d["net"]
@@ -269,7 +285,7 @@ def calibrate(days: pd.DataFrame, horizon: int = MAIN_HORIZON) -> dict[str, Any]
         sel = d[mask]
         n = len(sel)
         up = int((sel[col] > 0).sum())
-        a, b = effective_interval(up, n, int(blocks_all[mask].nunique()) if n else 0)
+        a, b = effective_interval(up, n, blocks_all[mask].value_counts().tolist() if n else 0)
         spy = sel[f"spy_{horizon}"]
         ex = (sel[col] - spy)[np.isfinite(spy)]
         by_regime = {}
@@ -282,15 +298,25 @@ def calibrate(days: pd.DataFrame, horizon: int = MAIN_HORIZON) -> dict[str, Any]
                         "independent_periods": int(blocks_all[mask].nunique()) if n else 0,
                         "mean_return": float(sel[col].mean()) if n else None,
                         "mean_excess_vs_spy": float(ex.mean()) if len(ex) else None, "by_regime": by_regime})
-    usable = [b for b in buckets if b["cases"] >= MIN_CASES]
+    dates = pd.to_datetime(d["date"])
+    cut = dates.quantile(1 - HOLDOUT_SHARE) if len(d) else None
+    # The outcomes of cases in the last horizon before the cut are measured on held-out prices, so they are
+    # left out of the check (an embargo of one horizon).
+    early = d[dates < cut - pd.Timedelta(days=block_span(horizon))] if cut is not None else d
+    usable = []
+    for lo, hi in SCORE_BUCKETS:
+        sel = early[(early["net"] >= lo) & (early["net"] < hi)]
+        if len(sel) >= MIN_CASES:
+            usable.append({"low": lo, "high": min(hi, 100.0), "cases": int(len(sel)),
+                           "frequency": float((sel[col] > 0).mean())})
     ordered = len(usable) >= 3 and all(x["frequency"] <= y["frequency"] + 0.02 for x, y in zip(usable, usable[1:]))
     p_value = None
     if len(usable) >= 2:
-        p_value = block_gap_test(d, col, (usable[0]["low"], usable[0]["high"]),
+        p_value = block_gap_test(early, col, (usable[0]["low"], usable[0]["high"]),
                                  (usable[-1]["low"], usable[-1]["high"] + (0.01 if usable[-1]["high"] >= 100 else 0)),
                                  horizon)
     in_sample = bool(ordered and p_value is not None and p_value < 0.05)
-    holdout = _holdout(d, col, usable)
+    holdout = _holdout(d, col, usable, cut)
     if not usable:
         status = "INSUFFICIENT_DATA"
     elif not in_sample:
@@ -300,31 +326,33 @@ def calibrate(days: pd.DataFrame, horizon: int = MAIN_HORIZON) -> dict[str, Any]
     else:
         status = "CALIBRATED_IN_SAMPLE_ONLY"
     calibrated = status == "CALIBRATED"
+    early_words = f"the earlier {100 * (1 - HOLDOUT_SHARE):.0f}% of dates"
     if calibrated:
-        verdict = ("On this data, higher net scores have been followed by gains more often, in order, the gap "
-                   "between the lowest and highest ranges is unlikely to be chance, and the latest dates, held out, "
-                   "show the same. The frequencies below can be read as how often similar readings were followed by a "
-                   "gain here; they are still not forecasts.")
+        verdict = (f"In {early_words}, higher net scores were followed by gains more often, in order, and the gap "
+                   "between the lowest and highest ranges is unlikely to be chance; the latest dates, held out from "
+                   "that check, show the same. The frequencies below can be read as how often similar readings were "
+                   "followed by a gain here; they are still not forecasts.")
     elif status == "INSUFFICIENT_DATA":
-        verdict = "Not enough history to check the score against outcomes."
+        verdict = f"Not enough history in {early_words} to check the score against outcomes."
     elif status == "CALIBRATED_IN_SAMPLE_ONLY":
-        verdict = ("Across the whole history higher net scores were followed by gains more often, but the latest "
+        verdict = (f"In {early_words} higher net scores were followed by gains more often, but the latest "
                    f"{100 * HOLDOUT_SHARE:.0f}% of dates, held out, do not show it ({holdout.get('reason')}). Treat the "
                    "score as a count of evidence only.")
     else:
-        verdict = ("On this data, higher net scores have not reliably been followed by gains more often. Treat the "
-                   "score as a count of evidence only.")
+        verdict = (f"In {early_words}, higher net scores have not reliably been followed by gains more often. Treat "
+                   "the score as a count of evidence only.")
     return {"horizon": horizon, "buckets": buckets, "calibrated": calibrated, "calibration_status": status,
             "in_sample_calibrated": in_sample, "ordered": ordered, "p_value": p_value, "holdout": holdout,
+            "checked_before": cut.strftime("%Y-%m-%d") if cut is not None else None,
             "verdict": verdict, "days": int(len(d)), "interval_method": INTERVAL_METHOD}
 
 
-def _holdout(d: pd.DataFrame, col: str, usable: list[dict[str, Any]]) -> dict[str, Any]:
-    """The lowest and highest usable score ranges compared again on the latest dates only."""
-    if len(usable) < 2 or d.empty:
+def _holdout(d: pd.DataFrame, col: str, usable: list[dict[str, Any]], cut: Any) -> dict[str, Any]:
+    """The lowest and highest score ranges chosen on the earlier dates, compared on the latest
+    dates (from `cut` on), which the check itself never saw."""
+    if len(usable) < 2 or d.empty or cut is None:
         return {"confirms": False, "reason": "too few score ranges to compare"}
     dates = pd.to_datetime(d["date"])
-    cut = dates.quantile(1 - HOLDOUT_SHARE)
     late = d[dates >= cut]
     low, high = usable[0], usable[-1]
 

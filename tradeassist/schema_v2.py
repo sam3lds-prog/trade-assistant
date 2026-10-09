@@ -359,3 +359,25 @@ def integrity_rules(cur: sqlite3.Cursor) -> None:
         backup_path  TEXT,                          -- the copy taken first
         details_json TEXT NOT NULL DEFAULT '{}'
     )""")
+
+
+@migration(9, "one database rule per option-leg field")
+def option_leg_rules(cur: sqlite3.Cursor) -> None:
+    """2.3.1: migration 8 checked an option leg's strike, multiplier and expiration in one rule, and
+    an update is refused only when it makes a good row bad. So a leg written before 2.3 with a
+    malformed expiration could still have its strike set to a negative number. Each field now has
+    its own rule (migration 8 itself is left as shipped)."""
+    for op in ("insert", "update"):
+        cur.execute(f"DROP TRIGGER IF EXISTS check_option_contracts_{op}")
+    rules = {
+        "strike": ("NEW.strike IS NULL OR NEW.strike <= 0", "an option leg needs a strike above zero"),
+        "multiplier": ("NEW.multiplier IS NULL OR NEW.multiplier <= 0", "an option leg needs a multiplier above zero"),
+        "expiration": ("NEW.expiration IS NULL OR length(NEW.expiration) != 10",
+                       "an option leg needs an expiration like 2026-11-20"),
+    }
+    for name, (condition, message) in rules.items():
+        quoted = message.replace("'", "''")
+        was_bad = condition.replace("NEW.", "OLD.")
+        for op, when in (("INSERT", condition), ("UPDATE", f"({condition}) AND NOT ({was_bad})")):
+            cur.execute(f"CREATE TRIGGER IF NOT EXISTS check_option_{name}_{op.lower()} BEFORE {op} ON option_contracts "
+                        f"WHEN {when} BEGIN SELECT RAISE(ABORT, '{quoted}'); END")

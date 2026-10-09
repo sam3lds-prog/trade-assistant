@@ -21,9 +21,9 @@ def main() -> None:
                         help="Delete the Robinhood sign-in stored on this computer")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    from tradeassist.events import RedactingFilter
-    for handler in logging.getLogger().handlers:
-        handler.addFilter(RedactingFilter())          # no credential reaches the log, from any module
+    from tradeassist.events import protect_logging
+    # No credential reaches the log, from any module or from uvicorn, in a message or a traceback.
+    protect_logging("uvicorn", "uvicorn.error", "uvicorn.access", "tradeassist")
     settings = load_settings()
     if args.robinhood_signout:
         from tradeassist.providers.mcp_bridge import FileTokenStorage

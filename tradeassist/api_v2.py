@@ -102,10 +102,13 @@ class AdjustmentCreate(Strict):
     note: str = ""
     source: Literal["MANUAL", "IMPORT", "ROBINHOOD"] = "MANUAL"
     external_id: str | None = Field(None, min_length=1, max_length=200)
+    # A split that would leave shares open on a closed position is refused unless confirmed (reason in `note`).
+    confirm_reopen: bool = False
 
 
 class Void(Strict):
     reason: str = Field(..., min_length=3, max_length=500)
+    confirm_reopen: bool = False
 
 
 class OptionExpire(Strict):
@@ -128,6 +131,7 @@ class OptionAdjust(Strict):
     quantity_factor: float = Field(1.0, gt=0)
     new_option_symbol: str | None = None
     reason: str = Field(..., min_length=3, max_length=500)
+    confirm_reopen: bool = False
 
 
 class RepairRequest(Strict):
@@ -307,9 +311,10 @@ def build_router(svc: Any) -> APIRouter:
         from .snapshots import status as snapshot_status
         info, health = svc.market.info, svc.market.health.summary()
         out: dict[str, Any] = {"source": {"label": info.label, "mode": info.mode, "realtime": info.realtime, **health}}
-        positions = []
+        positions, unreadable = [], []
         if svc.settings.features.get("unified_positions"):
-            positions = desk.list("open")["positions"]
+            listed = desk.list("open")
+            positions, unreadable = listed["positions"], listed.get("invalid", [])
         fresh_counts: dict[str, int] = {}
         missing, chains = [], []
         for p in positions:
@@ -339,6 +344,8 @@ def build_router(svc: Any) -> APIRouter:
             "quotes": {"open_positions": len(positions), "by_freshness": fresh_counts,
                        "stale": fresh_counts.get("STALE", 0) + fresh_counts.get("UNKNOWN", 0)},
             "positions_missing_valuations": missing, "missing_option_chains": chains, "history": bars,
+            "unreadable_positions": [{"id": u["id"], "description": u["description"], "error": u["error"]}
+                                     for u in unreadable],
             "snapshots": snapshot_status(svc.db) if svc.settings.features.get("unified_positions") else None,
             "migration": {"schema_version": svc.db.schema_version(), "latest": dict(last) if last else None,
                           "backup_before_last_migration": svc.db.backup_before_migration.name
@@ -612,7 +619,7 @@ def build_router(svc: Any) -> APIRouter:
     @router.post("/positions/{position_id}/adjustments/{adjustment_id}/void")
     def void_adjustment(position_id: int, adjustment_id: int, req: Void):
         need("unified_positions")
-        return clean(desk.void_adjustment(position_id, adjustment_id, req.reason))
+        return clean(desk.void_adjustment(position_id, adjustment_id, req.reason, req.confirm_reopen))
 
     @router.post("/positions/{position_id}/option/expire")
     def expire_option(position_id: int, req: OptionExpire):

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -245,33 +245,35 @@ class Analyst:
         if len(names) > 60:
             raise ValueError("At most 60 symbols per run")
         years = max(1.5, min(float(years), 10.0))
-        regimes = self._regime_by_date(years)
-        try:
-            spy = self.market.bars("SPY", years, complete=True)
-        except DataError:
-            spy = None
-        built, warnings, days, total = [], [], [], 0
-        loaded: dict[str, pd.DataFrame] = {"SPY": spy}
-        for sym in dict.fromkeys(names):
+        # Every set of bars read (the stocks, SPY, sector funds, the regime's indexes) is fingerprinted.
+        with self.market.recording() as seen:
+            regimes = self._regime_by_date(years)
             try:
-                df = self.market.enriched(sym, years, complete=True)
-                loaded[sym] = df
-                sector = self.sector(sym)
-                bench = {"SPY": spy}
-                if sector:
-                    try:
-                        bench[sector] = self.market.bars(sector, years, complete=True)
-                    except DataError:
-                        pass
-                # Without the validated-pattern points: the lab found those on this same history.
-                states = trend_engine.state_series(df, bench, sector, None)
-                rows = signalbook.collect(sym, df, spy, regimes, states)
-                signalbook.store(self.svc.db, source, sym, rows)
-                days.append(signalbook.score_days(sym, df, states, spy, regimes))
-                total += len(rows)
-                built.append(sym)
-            except (DataError, ValueError) as exc:
-                warnings.append(f"{sym}: {exc}")
+                spy = self.market.bars("SPY", years, complete=True)
+            except DataError:
+                spy = None
+            built, warnings, days, total = [], [], [], 0
+            loaded: dict[str, pd.DataFrame] = {"SPY": spy}
+            for sym in dict.fromkeys(names):
+                try:
+                    df = self.market.enriched(sym, years, complete=True)
+                    loaded[sym] = df
+                    sector = self.sector(sym)
+                    bench = {"SPY": spy}
+                    if sector:
+                        try:
+                            bench[sector] = self.market.bars(sector, years, complete=True)
+                        except DataError:
+                            pass
+                    # Without the validated-pattern points: the lab found those on this same history.
+                    states = trend_engine.state_series(df, bench, sector, None)
+                    rows = signalbook.collect(sym, df, spy, regimes, states)
+                    signalbook.store(self.svc.db, source, sym, rows)
+                    days.append(signalbook.score_days(sym, df, states, spy, regimes))
+                    total += len(rows)
+                    built.append(sym)
+                except (DataError, ValueError) as exc:
+                    warnings.append(f"{sym}: {exc}")
         if not built:
             raise ValueError("No price history could be loaded for those symbols")
         all_days = pd.concat(days, ignore_index=True)
@@ -281,8 +283,8 @@ class Analyst:
                 "signal_engine_version": SIGNAL_ENGINE_VERSION, "trend_engine_version": TREND_ENGINE_VERSION,
                 "calibration": calibration}
         from . import runs
-        runs.attach(self.svc.db, meta, "SIGNAL_HISTORY", {"symbols": built, "years": years}, loaded, source, None,
-                    ("occurrences", "symbols"))
+        runs.attach(self.svc.db, meta, "SIGNAL_HISTORY", {"symbols": built, "years": years}, {**loaded, **seen}, source,
+                    None, ("occurrences", "symbols"))
         self.svc.db.cache_put(f"signals:history:{source}", meta)
         return meta
 
@@ -501,23 +503,42 @@ class Analyst:
         return out
 
     # --- portfolio risk ----------------------------------------------------------------------------------
-    def _views(self, status: str) -> list[dict[str, Any]]:
+    def _listing(self, status: str) -> dict[str, Any]:
         desk = getattr(self.svc, "desk", None)
         if desk is None:
             from .desk import Desk
             desk = self.svc.desk = Desk(self.svc)
-        return desk.list(status)["positions"]
+        return desk.list(status)
+
+    def _views(self, status: str) -> list[dict[str, Any]]:
+        return self._listing(status)["positions"]
 
     def _previous_close(self, view: dict[str, Any], today: Any) -> tuple[float | None, str | None]:
         """Yesterday's closing value of what a position holds: for stock, the last daily close before
         today; for an option, the chain's previous close, or else an estimate from today's price, its
-        delta and theta, and the stock's move since yesterday's close."""
+        delta and theta, and the stock's move since yesterday's close. Saved history that could not
+        be refreshed may end days ago, so its last close is not used as yesterday's: the source is
+        then None and `view["prev_reason"]` says why (set by the caller from `self._prev_reason`)."""
+        self._prev_reason = None
         try:
-            bars = self.market.bars(view["symbol"], 1)
+            # Finished bars only: a bar saved during a session is not that day's close.
+            bars = self.market.bars(view["symbol"], 1, complete=True)
+            failed = self.market.bar_info(view["symbol"]).get("refresh_failed")
             before = bars[bars["date"] < pd.Timestamp(today)]
             stock_prev = float(before["close"].iloc[-1]) if len(before) else None
-        except DataError:
+            if failed and stock_prev is not None:
+                # Saved history that could not be refreshed is still right if it reaches the weekday before today
+                # (no holiday calendar here: after a holiday it is treated as unknown, the safe side).
+                prior = today - timedelta(days=1)
+                while prior.weekday() >= 5:
+                    prior -= timedelta(days=1)
+                if before["date"].iloc[-1].date() < prior:
+                    stock_prev = None
+                    self._prev_reason = (f"the saved price history ends {before['date'].iloc[-1].date():%b %d} and could "
+                                         f"not be refreshed ({failed})")
+        except DataError as exc:
             stock_prev = None
+            self._prev_reason = f"no price history ({exc})"
         if view["instrument_type"] == "STOCK":
             return stock_prev, "previous daily close" if stock_prev is not None else None
         mark = view.get("mark")
@@ -533,9 +554,12 @@ class Analyst:
             return None, None
         return max(0.0, price - delta * (under - stock_prev) - (theta or 0.0)), "estimated from delta and theta"
 
-    def daily_loss(self, views: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def daily_loss(self, views: list[dict[str, Any]] | None = None,
+                   unreadable: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         from . import portfolio
-        views = self._views("all") if views is None else views
+        if views is None:
+            listing = self._listing("all")
+            views, unreadable = listing["positions"], listing.get("invalid", [])
         today = datetime.now(NY).date()
         start = datetime.now(NY).replace(hour=0, minute=0, second=0, microsecond=0)
         relevant = []
@@ -549,13 +573,20 @@ class Analyst:
             if held_overnight:
                 v = {**v}
                 v["prev_close"], v["prev_source"] = self._previous_close(v, today)
+                v["prev_reason"] = self._prev_reason
             relevant.append(v)
         s = self.svc.settings
-        return portfolio.daily_loss(relevant, s.daily_loss_mode, s.account_size, s.daily_loss_stop_pct)
+        # An unreadable position counts against today only if it is open or had a fill today.
+        start_utc = start.astimezone(timezone.utc).isoformat()
+        today_unreadable = [u for u in unreadable or [] if u["status"] in ("OPEN", "PARTIALLY_CLOSED")
+                            or (u["status"] == "CLOSED" and any(e["executed_at"] >= start_utc for e in u["executions"]))]
+        return portfolio.daily_loss(relevant, s.daily_loss_mode, s.account_size, s.daily_loss_stop_pct,
+                                    unreadable=today_unreadable)
 
     def portfolio(self, scenarios: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         from . import portfolio
-        views = self._views("all")
+        listing = self._listing("all")
+        views, unreadable = listing["positions"], listing.get("invalid", [])
         open_views = [v for v in views if v["status"] in ("OPEN", "PARTIALLY_CLOSED")]
         bars: dict[str, pd.DataFrame] = {}
         notes = []
@@ -567,8 +598,9 @@ class Analyst:
                 from .events import emit
                 emit("risk_calculation_failed", logging.WARNING, symbol=sym, part="beta and correlation", error=exc)
         s = self.svc.settings
-        out = portfolio.analyse(open_views, bars, s.account_size, s.max_open_risk_pct, self.daily_loss(views), self.sector,
-                                scenarios)
+        out = portfolio.analyse(open_views, bars, s.account_size, s.max_open_risk_pct, self.daily_loss(views, unreadable),
+                                self.sector, scenarios,
+                                unreadable=[u for u in unreadable if u["status"] in ("OPEN", "PARTIALLY_CLOSED")])
         out["notes"] = notes
         out["data_source"] = self.market.info.mode
         out["limits"] = {"account_size": s.account_size, "max_open_risk_pct": s.max_open_risk_pct,
@@ -688,7 +720,8 @@ class Analyst:
         years = max(1.0, min(float(req.get("years") or 3.0), 10.0))
         strategy = self._strategy(req)
         backtest_v2.validate(strategy)
-        frames, states, regimes, warnings = self._backtest_inputs(req.get("symbols"), years)
+        with self.market.recording() as seen:          # benchmarks and regime indexes too, for the fingerprint
+            frames, states, regimes, warnings = self._backtest_inputs(req.get("symbols"), years)
         start = (datetime.now(NY).date() - pd.Timedelta(days=int(years * 365.25))).isoformat()
         params = self._bt_params(req.get("params"))
         out = backtest_v2.run(frames, states, regimes, strategy, params, start,
@@ -702,7 +735,7 @@ class Analyst:
                     {"strategy": strategy, "params": asdict(params), "symbols": sorted(frames), "years": years,
                      "start": start, "monte_carlo": bool(req.get("monte_carlo", True)),
                      "n_trials": int(req.get("n_trials") or 1)},
-                    frames, self.market.info.mode, backtest_v2.MC_SEED,
+                    {**frames, **seen}, self.market.info.mode, backtest_v2.MC_SEED,
                     ("total_return_pct", "sharpe", "max_drawdown_pct", "num_trades", "start_date", "end_date"))
         if len(out["trades"]) > 500:
             out["trades_truncated"] = len(out["trades"])
@@ -718,7 +751,8 @@ class Analyst:
             raise ValueError("Training window must be 60 to 1000 days and test window 20 to 500 days")
         strategy = self._strategy(req)
         backtest_v2.validate(strategy)
-        frames, states, regimes, warnings = self._backtest_inputs(req.get("symbols"), years)
+        with self.market.recording() as seen:
+            frames, states, regimes, warnings = self._backtest_inputs(req.get("symbols"), years)
         params = self._bt_params(req.get("params"))
         out = backtest_v2.run_walk_forward(frames, states, regimes, strategy, params,
                                            req.get("grid"), train, test, bool(req.get("anchored")))
@@ -730,7 +764,8 @@ class Analyst:
                            {"strategy": strategy, "params": asdict(params), "symbols": sorted(frames), "years": years,
                             "grid": req.get("grid"), "train_days": train, "test_days": test,
                             "anchored": bool(req.get("anchored"))},
-                           frames, self.market.info.mode, None, ("out_of_sample", "avg_train_sharpe", "avg_test_sharpe"))
+                           {**frames, **seen}, self.market.info.mode, None,
+                           ("out_of_sample", "avg_train_sharpe", "avg_test_sharpe"))
 
     # --- alerts ---------------------------------------------------------------------------------------
     def alerts(self) -> dict[str, Any]:

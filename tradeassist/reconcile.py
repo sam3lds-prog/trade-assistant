@@ -10,6 +10,7 @@ person should look at before trusting the history:
     lifecycle_issues         positions opened again after closing (allowed before 2.1.1)
     invalid_states           a status the fills cannot produce, or a fill that no longer accounts
     missing_snapshots        lifecycle snapshots a position should have (snapshots.status)
+    stale_snapshots          effective snapshots that no longer apply (an exit on a position open again)
     hindsight_snapshots      effective snapshots built from data after their fill
     possible_duplicate_fills fills with the same position, side, size, price and time and no broker id
     journal_mismatches       classic journal entries whose mirror's fills differ from them
@@ -18,11 +19,13 @@ person should look at before trusting the history:
     rule_breaks              rows that the 2.3 database rules would refuse
     database                 SQLite's own integrity and foreign-key checks
 
-`repair()` changes only derived figures, never a fill: it first copies the database
-(backup.py; no copy, no repair), re-syncs journal mirrors, recomputes each mismatched
-position from its fills, and records what it changed in `maintenance_log`. Positions opened
-again after closing are reported and left as they are. Running it twice changes nothing the
-second time.
+`repair()` changes derived figures, never a fill you recorded: it first copies the database
+(backup.py; no copy, no repair), re-reads journal mirrors from the journal (their record; each
+fill changed that way is kept as a JOURNAL_SYNC correction), recomputes each mismatched
+position from its fills, and records what it changed in `maintenance_log`. Each item is
+repaired in its own transaction, so one that cannot be (its fills no longer account) is
+reported in `failed` and the rest go ahead. Positions opened again after closing are reported
+and left as they are. Running it twice changes nothing the second time.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
@@ -116,18 +120,22 @@ def diagnose(db: Any, market: Any = None) -> dict[str, Any]:
             if t["pid"] is None:
                 out["journal_mismatches"].append({"trade_id": t["trade_id"], "problem": "no mirror position"})
                 continue
-            fills = {r["side"]: r for r in db.query("SELECT side, quantity, price FROM executions WHERE position_id = ?",
-                                                    (t["pid"],))}
-            want = {}
+            # Compared as lists, so an extra fill on either side is seen, not folded into one.
+            have = sorted((r["side"], r["quantity"], r["price"], r["fees"]) for r in db.query(
+                "SELECT side, quantity, price, fees FROM executions WHERE position_id = ?", (t["pid"],)))
+            want = []
             if t["entry_price"] is not None:
-                want["BUY"] = (float(t["contracts"]), float(t["entry_price"]))
+                want.append(("BUY", float(t["contracts"]), float(t["entry_price"]), 0.0))
                 if t["exit_price"] is not None:
-                    want["SELL"] = (float(t["contracts"]), float(t["exit_price"]))
-            have = {k: (v["quantity"], v["price"]) for k, v in fills.items()}
+                    want.append(("SELL", float(t["contracts"]), float(t["exit_price"]), 0.0))
+            want.sort()
             if have != want:
                 out["journal_mismatches"].append({"trade_id": t["trade_id"], "position_id": t["pid"], "journal": want,
                                                   "mirror": have})
+    unreadable = {x["id"] for x in out["invalid_states"]}
     for pid in ids:
+        if pid in unreadable:
+            continue                        # listed under invalid_states; nothing else about it can be read
         with db.tx() as cur:
             pos = read(cur, pid)
         if lifecycle(pos).get("state") == "UNRESOLVED":
@@ -144,7 +152,7 @@ def diagnose(db: Any, market: Any = None) -> dict[str, Any]:
     fk = [dict(zip(("table", "rowid", "parent", "fkid"), tuple(r))) for r in db.query("PRAGMA foreign_key_check")]
     report = {"checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "counts": counts, **out,
               "missing_snapshots": snap["missing"], "hindsight_snapshots": snap["hindsight"],
-              "unavailable_snapshots": snap["unavailable"],
+              "unavailable_snapshots": snap["unavailable"], "stale_snapshots": snap.get("stale", []),
               "database": {"integrity": integrity, "foreign_key_problems": fk,
                            "ok": integrity == ["ok"] and not fk},
               "schema_version": db.schema_version()}
@@ -152,7 +160,8 @@ def diagnose(db: Any, market: Any = None) -> dict[str, Any]:
     report["needs_repair"] = bool(out["ledger_mismatches"] or out["journal_mismatches"])
     report["needs_attention"] = any(report["summary"].get(k) for k in (
         "ledger_mismatches", "lifecycle_issues", "invalid_states", "possible_duplicate_fills", "journal_mismatches",
-        "unresolved_options", "missing_snapshots", "hindsight_snapshots", "rule_breaks")) or not report["database"]["ok"]
+        "unresolved_options", "missing_snapshots", "hindsight_snapshots", "stale_snapshots", "rule_breaks")) \
+        or not report["database"]["ok"]
     return report
 
 
@@ -163,29 +172,46 @@ def repair(db: Any, market: Any = None, label: str = "before-repair") -> dict[st
     except Exception as exc:                  # noqa: BLE001 - no copy, no repair
         raise RuntimeError(f"The database could not be copied first, so nothing was repaired: {exc}") from exc
     before = diagnose(db, market)
-    changed, resynced = [], []
-    with db.tx() as cur:
+    changed, resynced, failed = [], [], []
+    # Each item in its own transaction: one that cannot be repaired (its fills do not account, or a database
+    # rule refuses it) is reported and the rest go ahead; what was done is logged whatever happens.
+    try:
         for m in before["journal_mismatches"]:
-            if m.get("trade_id") is not None:
-                sync_legacy_trade(cur, m["trade_id"])
+            if m.get("trade_id") is None:
+                continue
+            try:
+                with db.tx() as cur:
+                    sync_legacy_trade(cur, m["trade_id"])
                 resynced.append(m["trade_id"])
+            except (PositionError, sqlite3.Error) as exc:
+                failed.append({"trade_id": m["trade_id"], "problem": str(exc)})
         for m in before["ledger_mismatches"]:
-            recompute(cur, m["id"], correction=True)
-            changed.append({"id": m["id"], "symbol": m["symbol"], "differences": m["differences"]})
-        if _has_table(cur, "maintenance_log"):
-            cur.execute("INSERT INTO maintenance_log (action, at, backup_path, details_json) VALUES (?, ?, ?, ?)",
-                        ("REPAIR", datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                         str(backup) if backup else None,
-                         json.dumps({"recomputed": changed, "journal_resynced": resynced}, default=str)))
+            try:
+                with db.tx() as cur:
+                    recompute(cur, m["id"], correction=True)
+                changed.append({"id": m["id"], "symbol": m["symbol"], "differences": m["differences"]})
+            except (PositionError, sqlite3.Error) as exc:
+                failed.append({"id": m["id"], "symbol": m["symbol"], "problem": str(exc)})
+    finally:
+        with db.tx() as cur:
+            if _has_table(cur, "maintenance_log"):
+                cur.execute("INSERT INTO maintenance_log (action, at, backup_path, details_json) VALUES (?, ?, ?, ?)",
+                            ("REPAIR", datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                             str(backup) if backup else None,
+                             json.dumps({"recomputed": changed, "journal_resynced": resynced, "failed": failed},
+                                        default=str)))
     after = diagnose(db, market)
     if changed or resynced:
         emit("repair_applied", logging.WARNING, positions=len(changed), journal_entries=len(resynced),
              backup=backup.name if backup else None)
     return {"backup": str(backup) if backup else None, "recomputed": changed, "journal_resynced": resynced,
-            "left_as_recorded": before["lifecycle_issues"], "before": before["summary"], "after": after["summary"],
+            "failed": failed, "left_as_recorded": before["lifecycle_issues"], "invalid_states": before["invalid_states"],
+            "before": before["summary"], "after": after["summary"],
             "remaining": {k: v for k, v in after["summary"].items() if v},
-            "note": "Only figures worked out from the fills were changed; no fill was changed. Positions opened again "
-                    "after closing are reported and kept as recorded."}
+            "note": "Figures worked out from the fills were recomputed. Fills you recorded were not changed. A position "
+                    "mirrored from the option journal had its fills re-read from the journal, which is its record; each "
+                    "fill changed that way is kept as a JOURNAL_SYNC correction. Positions opened again after closing "
+                    "are kept as recorded, and positions whose fills no longer add up are listed for you to correct."}
 
 
 __all__ = ["diagnose", "repair", "expected"]

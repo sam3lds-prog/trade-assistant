@@ -114,7 +114,7 @@ def test_1_1_portfolio_with_an_unpriced_holding_returns_and_says_it_is_incomplet
 def test_1_1_nothing_priced_is_unavailable_and_complete_portfolios_say_so():
     daily = portfolio.daily_loss([], "REALIZED_PLUS_UNREALIZED", 10_000, 3.0, NOW)
     none = portfolio.analyse([no_price("A", pid=1), no_price("B", pid=2)], {}, 10_000, 10.0, daily, lambda s: None)
-    assert none["coverage"]["status"] == "UNAVAILABLE" and none["totals"]["gross_exposure"] == 0
+    assert none["coverage"]["status"] == "UNAVAILABLE" and none["totals"]["gross_exposure"] is None   # unknown, not $0
     assert none["totals"]["complete"] is False and all(not s["complete"] for s in none["stress"])
     full = portfolio.analyse([view("A", invalidation=90.0)], {}, 10_000, 10.0, daily, lambda s: None)
     assert full["coverage"]["status"] == "COMPLETE" and full["totals"]["complete"] and full["totals"]["open_risk_complete"]

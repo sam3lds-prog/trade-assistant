@@ -20,7 +20,7 @@ from .optionmath import NY, days_to_expiry
 from .market import complete_only
 from .positions import (DIRECTIONS, OptionLeg, PositionError, add_adjustment, add_execution, adjust_contract, cancel,
                         correct_execution, create, exercise, expiration_close, expire_worthless, list_ids, now_iso, parse_time,
-                        read, update_plan, void_adjustment)
+                        read, update_plan, void_adjustment, _row)
 from .events import emit
 from .providers.base import DataError
 from .snapshots import LIVE_WINDOW, SnapshotService, close_of, cutoff_session, when
@@ -136,7 +136,8 @@ class Desk:
         bid, ask = finite(row.get("bid")), finite(row.get("ask"))
         occ = leg.get("option_symbol") or f"{symbol} {leg['expiration']} {leg['strike']:g} {leg['option_type']}"
         fresh = self.market.observe_quote(occ, {"bid": bid, "ask": ask, "last": finite(row.get("last")), "mid": row.get("mid"),
-                                                "bid_time": row.get("bid_time"), "trade_time": row.get("trade_time")},
+                                                "bid_time": row.get("bid_time"), "ask_time": row.get("ask_time"),
+                                                "trade_time": row.get("trade_time")},
                                           kind="OPTION_QUOTE")
         if price is not None and row.get("mid") is None:
             fresh["warnings"].append("valued with the model: no two-sided quote")
@@ -230,7 +231,33 @@ class Desk:
             raise PositionError("status must be open, planned, closed, cancelled or all")
         with self.db.tx() as cur:
             ids = list_ids(cur, groups[status])
-        return {"positions": [self.view(pid) for pid in ids]}
+        # One position whose fills no longer add up (data from an older version, say) must not hide the
+        # rest: it is listed apart, with its fills, so it can be corrected, and every total that would
+        # include it says it is missing.
+        out, invalid = [], []
+        for pid in ids:
+            try:
+                out.append(self.view(pid))
+            except PositionError as exc:
+                invalid.append(self.unreadable(pid, exc))
+        return {"positions": out, "invalid": invalid}
+
+    def unreadable(self, position_id: int, exc: Exception) -> dict[str, Any]:
+        """What can be shown of a position whose fills no longer account: its stored row and fills."""
+        with self.db.tx() as cur:
+            row = _row(cur, position_id)
+            legs = [dict(r) for r in self.db.query("SELECT * FROM option_contracts WHERE position_id = ? ORDER BY leg",
+                                                   (position_id,))]
+        fills = [dict(r) for r in self.db.query("SELECT id, side, quantity, price, fees, executed_at, source, note "
+                                                "FROM executions WHERE position_id = ? ORDER BY executed_at, id",
+                                                (position_id,))]
+        emit("invalid_position", logging.WARNING, position_id=position_id, symbol=row["symbol"], error=exc)
+        return {"id": position_id, "symbol": row["symbol"], "status": row["status"], "direction": row["direction"],
+                "instrument_type": row["instrument_type"], "multiplier": row["multiplier"],
+                "legacy_trade_id": row.get("legacy_trade_id"), "description": describe({**row, "legs": legs}),
+                "executions": fills, "error": str(exc),
+                "text": f"Its fills no longer add up ({exc}), so it is left out of every figure. Correct the fill "
+                        "that is wrong; the reconciliation report on the Data health screen lists it."}
 
     # --- changes -------------------------------------------------------------------------
     def create(self, req: dict[str, Any]) -> dict[str, Any]:
@@ -313,13 +340,15 @@ class Desk:
                            rate_pct=req.get("rate_pct"), quantity=req.get("quantity"), per_share=req.get("per_share"),
                            ratio=req.get("ratio"), period_start=req.get("period_start"), period_end=req.get("period_end"),
                            note=req.get("note") or "", source=req.get("source") or "MANUAL",
-                           external_id=req.get("external_id"))
+                           external_id=req.get("external_id"), confirm_reopen=bool(req.get("confirm_reopen")))
         self._reconcile(position_id)
         return self.view(position_id)
 
-    def void_adjustment(self, position_id: int, adjustment_id: int, reason: str) -> dict[str, Any]:
+    def void_adjustment(self, position_id: int, adjustment_id: int, reason: str,
+                        confirm_reopen: bool = False) -> dict[str, Any]:
         with self.db.tx() as cur:
-            void_adjustment(cur, position_id, adjustment_id, reason)
+            void_adjustment(cur, position_id, adjustment_id, reason, confirm_reopen)
+        self._reconcile(position_id)               # an exit snapshot may no longer apply
         return self.view(position_id)
 
     def _stock_close(self, symbol: str, day: date) -> float | None:
@@ -386,7 +415,9 @@ class Desk:
         with self.db.tx() as cur:
             done = adjust_contract(cur, position_id, effective_at=req["effective_at"], new_strike=req["new_strike"],
                                    new_multiplier=req["new_multiplier"], quantity_factor=req.get("quantity_factor") or 1.0,
-                                   new_option_symbol=req.get("new_option_symbol"), reason=req.get("reason") or "")
+                                   new_option_symbol=req.get("new_option_symbol"), reason=req.get("reason") or "",
+                                   confirm_reopen=bool(req.get("confirm_reopen")))
+        self._reconcile(position_id)
         out = self.view(position_id)
         out["event"] = done
         return out
@@ -402,6 +433,11 @@ class Desk:
     def update(self, position_id: int, changes: dict[str, Any]) -> dict[str, Any]:
         with self.db.tx() as cur:
             pos = read(cur, position_id)
+            if pos.get("legacy_trade_id") and any(k in changes and (changes[k] or "").strip() != (pos.get(k) or "").strip()
+                                                  for k in ("thesis", "notes")):
+                # The journal entry is the record for these, and re-reading it would overwrite an edit made here.
+                raise PositionError("This position mirrors an entry in the option journal: change its thesis and notes "
+                                    "there. Levels, targets, risk and setup can be changed here.")
             basis = pos["ledger"]["cost_basis"]
             if pos["instrument_type"] == "STOCK" and basis and pos["ledger"]["open_quantity"] > 0:
                 merged = {k: changes.get(k, pos.get(k)) for k in ("invalidation_price", "target_1", "target_2")}

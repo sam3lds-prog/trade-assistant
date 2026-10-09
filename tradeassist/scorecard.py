@@ -96,9 +96,10 @@ def build_scorecard(row: dict[str, Any], analysis: ChainAnalysis, enriched: pd.D
                     iv_rank: dict[str, Any] | None = None, open_risk: float = 0.0,
                     today: date | None = None, trend_validated: bool = False,
                     symbol_risk: float = 0.0) -> dict[str, Any]:
-    """`open_risk` is premium already committed across the whole journal; `symbol_risk` is the
-    part of it in this underlying, which counts toward the per-trade limit so that one idea
-    cannot be split across several small tickets."""
+    """`open_risk` is risk already committed: the journal's open premium and plans, and the open
+    risk of other positions (TradeAssistant.book_risk); `symbol_risk` is the part of it in this
+    underlying, which counts toward the per-trade limit so that one idea cannot be split across
+    several small tickets."""
     th = THRESHOLDS
     checks: list[dict[str, Any]] = []
     spot, forward, t = analysis.spot, analysis.forward, analysis.t
@@ -257,7 +258,8 @@ def build_scorecard(row: dict[str, Any], analysis: ChainAnalysis, enriched: pd.D
     checks.append(_check(
         "Sizing", "open_risk", "Total premium at risk", status,
         f"${open_risk + premium:,.0f} with this trade",
-        f"Open positions and saved plans in your journal, plus this trade. Your limit is "
+        f"Open journal trades and saved plans, open risk on the Positions screen (where it can be measured), plus "
+        f"this trade. Your limit is "
         f"{settings.max_open_risk_pct:g}% of the account (${open_cap:,.0f}).", blocking=True))
 
     counts = {s: sum(1 for c in checks if c["status"] == s) for s in ("pass", "warn", "fail", "info")}

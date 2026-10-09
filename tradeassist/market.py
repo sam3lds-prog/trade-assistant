@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as clock_time
 from typing import Any
@@ -13,8 +15,8 @@ import pandas as pd
 from .chain import ChainAnalysis, analyze_chain
 from .config import Settings
 from .db import Database
-from .events import emit
-from .freshness import SourceHealth, observe, quote_completeness, session_state
+from .events import emit, redact
+from .freshness import SourceHealth, observe, quote_completeness, quote_time, session_state
 from .indicators import enrich
 from .optionmath import NY
 from .providers.base import BAR_COLUMNS, DataError, MarketData, display_symbol
@@ -66,6 +68,7 @@ class Market:
         self.health = SourceHealth()
         self._last_quotes: dict[str, tuple[dict[str, Any], float]] = {}
         self._stale_bars: dict[str, str] = {}
+        self._recorder = threading.local()
 
     @property
     def info(self):
@@ -87,14 +90,36 @@ class Market:
             self.health.failure(what, str(exc))
             emit("provider_failure", logging.WARNING, source=self.info.label, request=what, error=exc,
                  consecutive=self.health.consecutive_failures)
+            clean = redact(str(exc))
+            if clean != str(exc):
+                # A source's error can quote a request with its credentials; nothing downstream (screens,
+                # error replies, marks, logs) gets that text.
+                try:
+                    replacement = type(exc)(clean)
+                except Exception:                     # noqa: BLE001 - a subclass with another signature
+                    replacement = DataError(clean)
+                raise replacement from None
             raise
         self.health.success()
         return out
 
+    @contextmanager
+    def recording(self):
+        """Inside this block, every set of daily bars read is collected (symbol -> frame), so a
+        research run can fingerprint all of its inputs: the benchmarks and regime indexes as well
+        as the stocks it trades (runs.py)."""
+        seen: dict[str, pd.DataFrame] = {}
+        previous = getattr(self._recorder, "seen", None)
+        self._recorder.seen = seen
+        try:
+            yield seen
+        finally:
+            self._recorder.seen = previous
+
     def observe_quote(self, symbol: str, q: dict[str, Any], kind: str = "STOCK_QUOTE",
                       retrieved: datetime | None = None, from_cache: bool = False, reason: str = "") -> dict[str, Any]:
         complete, warnings = quote_completeness(q)
-        return observe(kind, symbol, self.info.label, q.get("trade_time") or q.get("bid_time"),
+        return observe(kind, symbol, self.info.label, quote_time(q),
                        retrieved_at=retrieved, session=session_state(self.clock(), datetime.now(timezone.utc)),
                        realtime=self.info.realtime, limits=self._limits(), completeness=complete, warnings=warnings,
                        from_cache=from_cache, cache_reason=reason)
@@ -113,8 +138,9 @@ class Market:
             cached = self._last_quotes.get(symbol)
             if allow_stale and cached and time.time() - cached[1] < QUOTE_CACHE_SECONDS:
                 q = dict(cached[0])
-                q["_meta"] = self.observe_quote(symbol, q, retrieved=datetime.fromtimestamp(cached[1], timezone.utc),
-                                                from_cache=True, reason=f"the source failed: {exc}")
+                q["_meta"] = self.observe_quote(symbol, q, retrieved=datetime.now(timezone.utc), from_cache=True,
+                                                reason=f"the source failed: {exc}")
+                q["_meta"]["saved_at"] = datetime.fromtimestamp(cached[1], timezone.utc).isoformat(timespec="seconds")
                 return q
             raise
         q = quotes.get(symbol)
@@ -204,7 +230,15 @@ class Market:
         df = pd.DataFrame([dict(r) for r in stored], columns=BAR_COLUMNS)
         df["date"] = pd.to_datetime(df["date"])
         df["bar_complete"] = complete_mask(df["date"], fetched_at)
-        return complete_only(df) if complete else df
+        out = complete_only(df) if complete else df
+        seen = getattr(getattr(self, "_recorder", None), "seen", None)
+        if seen is not None:
+            key, k = symbol, 1
+            while key in seen and not seen[key].equals(out):
+                k += 1
+                key = f"{symbol}#{k}"
+            seen[key] = out
+        return out
 
     def enriched(self, symbol: str, years: float = 3.0, complete: bool = False) -> pd.DataFrame:
         return enrich(self.bars(symbol, years, complete))

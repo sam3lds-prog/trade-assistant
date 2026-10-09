@@ -44,7 +44,9 @@ when one is wrong. The database itself now refuses impossible rows, a closed tra
 plain-words review, errors say what to do, and the log never carries a credential. 2.3 also
 fixes a 2.2.0 fault that kept the Version 2 part of the page from loading, so the Analyze,
 Positions and Portfolio risk buttons were missing and the Version 2 additions to the other
-screens did not appear. Release notes: `docs/RELEASE_NOTES.md`.
+screens did not appear. Version 2.3.1 fixes what an independent review of 2.1.0 to 2.3.0
+found, among them a ticket open-risk check that ignored the Positions screen and a daily loss
+stop that could report a complete day from a stale price. Release notes: `docs/RELEASE_NOTES.md`.
 
 ## Start it
 
@@ -408,7 +410,8 @@ from, and lists positions reopened by older versions, fills that look duplicated
 entries that differ from their position, expired options still open and SQLite's own
 integrity check. It only reads. When a figure is wrong, "Repair from the fills" says what it
 will change, copies the database, and recomputes the figures; it never changes, merges or
-deletes a fill.
+deletes a fill you recorded (an option-journal trade's fills are re-read from the journal,
+which is their record, and each change is kept as a correction).
 
 **Trade review (2.3).** A closed position's analytics end with what was planned, what was
 done, what was known at entry (from a snapshot taken at the time or from the prior day's
@@ -462,6 +465,9 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
   cases; the same research inputs give the same results; reconciliation finds a planted
   mismatch, repair fixes it after a copy without touching a fill, and running it twice
   changes nothing; the log and the data health screen never show a credential.
+- 2.3.1: two independent reviewers checked 2.1.0 to 2.3.0 for accounting, data loss,
+  look-ahead and security; the 27 findings were reproduced, fixed and given regression tests
+  (`tests/test_review_fixes.py`; listed in `docs/IMPROVEMENTS.md`).
 
 Not checked, because this build environment could not reach any of these services:
 

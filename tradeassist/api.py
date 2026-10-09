@@ -6,15 +6,17 @@ import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
 from .config import Settings, load_settings
-from .events import emit
+from .events import emit, redact
 from .journal import JournalError
 from .positions import PositionError
 from .providers.base import DataError
@@ -120,11 +122,34 @@ class SnapshotRequest(Strict):
     symbols: list[str] | None = None
 
 
+# Host names the app answers to: itself on this computer ("testserver" is the test client's).
+ALLOWED_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]", "testserver")
+
+
 def create_app(settings: Settings | None = None, assistant: TradeAssistant | None = None) -> FastAPI:
     settings = settings or load_settings()
     svc = assistant or TradeAssistant(settings)
     app = FastAPI(title="Trade Assistant", docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.state.assistant = svc
+
+    # The app listens on 127.0.0.1 only. A web page elsewhere can still try to reach it through the
+    # browser: by pointing its own host name at 127.0.0.1 (DNS rebinding), refused by checking the Host
+    # header, or by sending a request from its own page, refused for anything that changes data by
+    # checking the Origin the browser attaches.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(ALLOWED_HOSTS))
+
+    @app.middleware("http")
+    async def _same_origin_writes(request: Request, call_next):
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            site = request.headers.get("sec-fetch-site")
+            foreign = site == "cross-site" or (origin is not None and (
+                origin == "null" or urlsplit(origin).netloc != request.headers.get("host", "")))
+            if foreign:
+                emit("cross_site_refused", logging.WARNING, path=request.url.path, origin=origin)
+                return JSONResponse(status_code=403, content={"error": "Refused: this request came from another web "
+                                                                       "page. Use the app's own page."})
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def _invalid(_: Request, exc: RequestValidationError):
@@ -173,7 +198,7 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
 
     @app.exception_handler(DataError)
     async def _data_error(_: Request, exc: DataError):
-        return JSONResponse(status_code=502, content={"error": str(exc)})
+        return JSONResponse(status_code=502, content={"error": redact(str(exc))})
 
     @app.exception_handler(Exception)
     async def _unexpected(_: Request, exc: Exception):
