@@ -10,6 +10,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .features import FEATURE_DEFAULTS, load_features
+from .freshness import DEFAULT_SECONDS as FRESHNESS_DEFAULTS
+from .freshness import thresholds as freshness_thresholds
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -84,6 +86,8 @@ class Settings:
 
     # V2 areas that can be switched off (see features.py)
     features: dict[str, bool] = field(default_factory=lambda: dict(FEATURE_DEFAULTS))
+    # Seconds a price may age while the market is open before it is called stale (freshness.py)
+    freshness: dict[str, float] = field(default_factory=lambda: dict(FRESHNESS_DEFAULTS))
 
     @property
     def robinhood_signin_path(self) -> Path:
@@ -148,6 +152,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         robinhood_poll_seconds=max(_float("ROBINHOOD_POLL_SECONDS", 3.0), 1.0),
         robinhood_url=(os.getenv("ROBINHOOD_MCP_URL") or "").strip() or "https://agent.robinhood.com/mcp/trading",
         features=load_features(),
+        freshness=freshness_thresholds(),
     )
     for name, value in (("ACCOUNT_SIZE", settings.account_size), ("MAX_RISK_PER_TRADE_PCT", settings.max_risk_per_trade_pct),
                         ("MAX_OPEN_RISK_PCT", settings.max_open_risk_pct),

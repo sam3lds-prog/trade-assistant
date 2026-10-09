@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from .positions import PositionError
+from .providers.base import DataError
 
 
 class Strict(BaseModel):
@@ -268,7 +269,20 @@ def build_router(svc: Any) -> APIRouter:
         from .dataquality import assess
         sym = svc._symbol(symbol)
         bars = svc.market.bars(sym, max(1.0, min(years, 10.0)))
-        return clean(assess(sym, bars, svc.market.bar_info(sym)))
+        out = assess(sym, bars, svc.market.bar_info(sym))
+        out["bars_freshness"] = svc.market.bars_freshness(sym)
+        try:
+            out["quote_freshness"] = svc.market.quote(sym).get("_meta")
+        except DataError as exc:
+            out["quote_freshness"] = {"freshness": "UNKNOWN", "completeness": "MISSING", "warnings": [str(exc)]}
+        return clean(out)
+
+    @router.get("/source/health")
+    def source_health():
+        """The data source's recent successes and failures (freshness.SourceHealth). No credentials."""
+        info = svc.market.info
+        return clean({"source": info.label, "mode": info.mode, "realtime": info.realtime, "note": info.note,
+                      **svc.market.health.summary()})
 
     # --- trend and analysis ------------------------------------------------------------------
     @router.get("/trend/{symbol}")

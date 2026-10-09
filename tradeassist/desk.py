@@ -110,15 +110,16 @@ class Desk:
         symbol = pos["symbol"]
         sign = 1 if pos["direction"] == "LONG" else -1
         if pos["instrument_type"] == "STOCK":
-            q = self.market.quote(symbol)
+            q = self.market.quote(symbol, allow_stale=True)
             price, basis = self.market.spot_and_basis(q, symbol)
             bid, ask, last = finite(q.get("bid")), finite(q.get("ask")), finite(q.get("last"))
             return {"price": price, "mark_basis": basis, "underlying": price, "prev_close": finite(q.get("prevclose")),
                     "as_of": q.get("trade_time") or q.get("bid_time"), "source": self.market.info.label,
-                    "realtime": self.market.info.realtime, **quote_sides(bid, ask, last, sign)}
+                    "realtime": self.market.info.realtime, "freshness": q.get("_meta"),
+                    **quote_sides(bid, ask, last, sign)}
         leg = pos["legs"][0]
         if leg["expiration"] < datetime.now(NY).date().isoformat():
-            q = self.market.quote(symbol)
+            q = self.market.quote(symbol, allow_stale=True)
             spot = self.market.spot_from_quote(q, symbol)
             intrinsic = max((spot - leg["strike"]) if leg["option_type"] == "CALL" else (leg["strike"] - spot), 0.0)
             return {"price": intrinsic, "mark_basis": "intrinsic value at expiration", "underlying": spot, "prev_close": None,
@@ -132,7 +133,13 @@ class Desk:
         if price is None:
             price, source = row.get("model_value"), "model value (no two-sided quote)"
         bid, ask = finite(row.get("bid")), finite(row.get("ask"))
-        return {"price": finite(price), "mark_basis": source, "underlying": analysis.spot,
+        occ = leg.get("option_symbol") or f"{symbol} {leg['expiration']} {leg['strike']:g} {leg['option_type']}"
+        fresh = self.market.observe_quote(occ, {"bid": bid, "ask": ask, "last": finite(row.get("last")), "mid": row.get("mid"),
+                                                "bid_time": row.get("bid_time"), "trade_time": row.get("trade_time")},
+                                          kind="OPTION_QUOTE")
+        if price is not None and row.get("mid") is None:
+            fresh["warnings"].append("valued with the model: no two-sided quote")
+        return {"price": finite(price), "mark_basis": source, "underlying": analysis.spot, "freshness": fresh,
                 "prev_close": finite(row.get("prevclose")),
                 "as_of": row.get("bid_time"), "source": source, "realtime": self.market.info.realtime,
                 **quote_sides(bid, ask, finite(row.get("last")), sign),

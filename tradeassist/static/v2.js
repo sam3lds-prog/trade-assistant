@@ -92,7 +92,7 @@ function positionTable(rows, onRow) {
     { label: "Status", cell: p => tagOf(POS_STATUS, p.status) },
     { label: "Open", num: true, cell: p => qtyText(p.ledger.open_quantity) },
     { label: "Average entry", num: true, cell: p => money(p.ledger.average_entry_price) },
-    { label: "Now", num: true, cell: p => p.mark ? (isNum(p.mark.price) ? money(p.mark.price) : el("span", { class: "muted", title: p.mark.error || "", text: "no price" })) : "" },
+    { label: "Now", num: true, cell: p => p.mark ? (isNum(p.mark.price) ? el("span", {}, money(p.mark.price), freshTag(p.mark.freshness, true) ? " " : "", freshTag(p.mark.freshness, true)) : el("span", { class: "muted", title: p.mark.error || "", text: "no price" })) : "" },
     { label: "Unrealized", num: true, cell: p => p.status === "PLANNED" ? "" : signedMoney(p.pnl.unrealized) },
     { label: "Realized", num: true, cell: p => p.status === "PLANNED" ? "" : signedMoney(p.pnl.realized) },
     { label: "R", num: true, cell: p => isNum(p.pnl.r_multiple) ? `${p.pnl.r_multiple > 0 ? "+" : ""}${num(p.pnl.r_multiple, 2)}R` : "" },
@@ -317,8 +317,25 @@ function markLine(mk, pnl) {
   if (isNum(pnl.liquidation_unrealized)) parts.push(`closing now at ${mk.liquidation_basis ? mk.liquidation_basis.split(":")[0] : "the quote"} would be about ${signedMoney(pnl.liquidation_unrealized)} unrealized, an estimate rather than a fill`);
   else parts.push("no two-sided quote, so no estimate of what closing now would get");
   if (mk.as_of) parts.push(`quote ${timeText(mk.as_of)}`);
-  return el("p", { class: "small muted", text: parts.join("; ") + "." });
+  const line = el("p", { class: "small muted", text: parts.join("; ") + ". " });
+  const tag = freshTag(mk.freshness);
+  if (tag) line.append(tag);
+  if (mk.freshness && mk.freshness.freshness === "STALE") line.append(el("span", { class: "error", text: ` ${(mk.freshness.warnings || []).join("; ")}. Refresh before relying on this price.` }));
+  return line;
 }
+
+// How old a price is, as a tag. FRESH and the latest session's price need no tag in tight spaces (`quiet`).
+const FRESH_TAG = { FRESH: ["pass", "Live"], DELAYED: ["info", "Delayed"], LAST_SESSION: ["info", "Market closed"], STALE: ["warn", "Stale"], UNKNOWN: ["warn", "Time unknown"] };
+function freshTag(obs, quiet = false) {
+  if (!obs || !obs.freshness) return null;
+  if (quiet && (obs.freshness === "FRESH" || obs.freshness === "LAST_SESSION")) return null;
+  const [lvl, word] = FRESH_TAG[obs.freshness] || ["info", obs.freshness];
+  const age = isNum(obs.age_seconds) ? ageText(obs.age_seconds) : "";
+  const tag = statusTag(lvl, word + (age && obs.freshness !== "LAST_SESSION" ? `, ${age}` : ""));
+  tag.title = [obs.observed_at ? `price time ${timeText(obs.observed_at)}` : "", `from ${obs.provider || "the source"}`, ...(obs.warnings || [])].filter(Boolean).join(" · ");
+  return tag;
+}
+const ageText = s => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${(s / 3600).toFixed(1)} h` : `${(s / 86400).toFixed(1)} days`;
 
 const SNAP_METHOD = { LIVE: "Live", PRIOR_BAR: "Rebuilt: last close before the fill", END_OF_DAY: "Rebuilt: fill day's close", JOURNAL_QUOTE: "Journal ticket quote" };
 function snapshotSource(s) {
@@ -494,7 +511,8 @@ function renderAnalysis(d) {
   const q = d.quote || {};
   const head = el("div", { class: "panel" },
     el("div", { class: "price-head" }, el("span", { class: "name", text: `${d.symbol}${q.description ? " " + q.description : ""}` }),
-      isNum(q.last) ? el("span", { text: `${money(q.last)}${isNum(q.prevclose) ? ` (${signedPct(100 * (q.last / q.prevclose - 1))} today)` : ""}` }) : null,
+      isNum(q.last) ? el("span", { text: `${money(q.last)}${isNum(q.prevclose) ? ` (${signedPct(100 * (q.last / q.prevclose - 1))} today)` : ""} ` }) : null,
+      freshTag(q.freshness),
       el("span", { class: "muted small", text: `Trend engine ${t.version}` })),
     el("div", { class: "trend-head" }, el("div", { class: "trend-state" }, trendTag(now.state), " ", statusWord(now.status)),
       t.provisional ? el("p", { class: "small" }, t.changed_today
@@ -538,7 +556,7 @@ function renderAnalysis(d) {
       { label: "Net score", num: true, cell: r => num(r.net_score, 0) }, { label: "Close", num: true, cell: r => money(r.close) }], t.transitions)));
   }
   const dq = d.data_quality;
-  if (dq) frag.append(el("div", { class: "panel" }, el("h3", { text: "Data checks" }),
+  if (dq) frag.append(el("div", { class: "panel" }, el("h3", {}, "Data checks ", dq.bars_freshness ? el("span", { class: "small muted", text: `daily bars through ${dq.bars_freshness.last_finished_bar || "n/a"} ` }) : "", dq.bars_freshness ? freshTag(dq.bars_freshness, true) : ""),
     el("ul", { class: "plain small" }, dq.checks.map(c => el("li", {}, statusTag(c.level, c.level === "info" ? "Note" : c.level === "warn" ? "Caution" : "Problem"), ` ${c.text}`)))));
   const tech = techPanel(d.symbol);
   frag.append(tech.panel, tech.structure);
@@ -906,7 +924,8 @@ function renderPortfolio(r) {
   if (dl) frag.append(dailyLossPanel(dl));
 
   if (r.positions.length) frag.append(el("div", { class: "panel" }, el("h3", { text: "By position" }), table([
-    { label: "Position", cell: x => el("span", {}, x.description, x.priced === false ? el("span", { class: "small error", text: " · no current price" }) : null) },
+    { label: "Position", cell: x => el("span", {}, x.description, x.priced === false ? el("span", { class: "small error", text: " · no current price" }) : null,
+      ["STALE", "UNKNOWN"].includes(x.quote_freshness) ? el("span", { class: "small error", text: x.quote_freshness === "STALE" ? " · stale price" : " · price time unknown" }) : null) },
     { label: "Sector", cell: x => x.sector || "" },
     { label: "Exposure", num: true, cell: x => knownSigned(x.dollar_delta, 0, (x.missing || []).join("; ")) },
     { label: "Beta", num: true, cell: x => isNum(x.beta) ? el("span", { title: `${x.beta_samples} days` }, num(x.beta, 2)) : el("span", { class: "muted", title: "Not enough overlapping history: counted as 1" }, "n/a") },

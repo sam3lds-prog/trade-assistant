@@ -24,6 +24,14 @@ reason, every trade (option-journal ones too) gets entry and exit snapshots that
 data available at the time, and no NaN or infinite number can enter the accounts. The
 engineering record is `docs/IMPROVEMENTS.md`.
 
+Version 2.2 makes the risk figures more accurate: gross and net exposure side by side, open
+risk measured on a stated basis with what is unknown named, bid/ask marks with an estimate
+of what closing would get, betas and correlations that no longer treat missing days as flat
+days, a historical bad-day estimate beside the normal one, borrow fees and dividends for
+shorts (kept apart from trading profit), stock splits, how options ended (expired worthless,
+exercised, adjusted), and a freshness tag on every price so an old quote is never shown as
+current.
+
 ## Start it
 
 Needs Python 3.11 or newer (built and tested on 3.13 with pandas 3 and numpy 2).

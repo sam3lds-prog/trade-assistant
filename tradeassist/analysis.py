@@ -1009,6 +1009,7 @@ class Analyst:
         out: dict[str, Any] = {"symbol": symbol, "data_source": self.market.info.mode}
         bars = self.market.bars(symbol, 3)
         out["data_quality"] = assess(symbol, bars, self.market.bar_info(symbol))
+        out["data_quality"]["bars_freshness"] = self.market.bars_freshness(symbol)
         out["trend"] = self.trend(symbol)
         try:
             out["regime"] = self.regime()
@@ -1019,7 +1020,8 @@ class Analyst:
         try:
             q = self.market.quote(symbol)
             out["quote"] = {"last": q.get("last"), "bid": q.get("bid"), "ask": q.get("ask"),
-                            "prevclose": q.get("prevclose"), "description": q.get("description")}
+                            "prevclose": q.get("prevclose"), "description": q.get("description"),
+                            "freshness": q.get("_meta")}
         except DataError as exc:
             out["quote"] = {"error": str(exc)}
         for extra in getattr(self, "extras", []):

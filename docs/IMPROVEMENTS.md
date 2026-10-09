@@ -172,3 +172,19 @@ Tests: 443 passed, 2 skipped.
 Known limitations: no broker feed for borrow fees or dividends, so they are entered by hand
 (or posted with an import id). Mergers, spin-offs and cash-settled adjustments are not
 modelled. Exercised shares are contracts x multiplier.
+
+### Sprint 5: market-data freshness and failure recovery (2.2)
+
+| Requirement | Done | Where | Tests (`test_freshness.py`) |
+| --- | --- | --- | --- |
+| 4.1 Freshness and quality | `observe()`: instrument, provider, observed and retrieved times, session, FRESH / DELAYED / LAST_SESSION / STALE / UNKNOWN, completeness and warnings; thresholds by kind, configurable; weekends and the latest session are not stale; daily bars checked against the last finished session | `freshness.py`, `market.py`, `config.py` | `test_4_1_*` (5) |
+| 4.2 Failures | Source health with a pause after three consecutive failures (requests are not sent while paused); quotes never silently replaced, stale fallback only for read-only views and always marked; history refresh failures keep saved bars and say so; invalid and crossed quotes flagged | `freshness.py`, `market.py`, `desk.py` | `test_4_2_*` (4) |
+| 4.3 Shown in the UI | Freshness tags on position prices and marks, the positions list, the portfolio (STALE_PRICES warning and per-row tag), the Analyze quote and data checks; `/v2/data/{symbol}` and `/v2/source/health` | `v2.js`, `api_v2.py`, `portfolio.py` | `test_4_3_*` (2) |
+
+Already in place and kept: Tradier retries with backoff on 429 and 5xx and honours its
+rate-limit headers; the Robinhood bridge has call timeouts.
+
+Version set to 2.2.0. Tests: 454 passed, 2 skipped.
+
+Known limitations: no market-holiday calendar (one extra day is tolerated); option chains
+are not cached, so a failed chain shows as no price rather than a stale one.
