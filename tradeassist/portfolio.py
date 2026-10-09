@@ -509,10 +509,10 @@ def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
     if now_led.open_quantity > 0 and price is None:
         err = mark.get("error")
         reasons.append("no current price" + (f" ({err})" if err else ""))
-    elif now_led.open_quantity > 0 and (mark.get("freshness") or {}).get("freshness") == "STALE":
-        # A saved or old quote can say a loss is smaller (or larger) than it is: it never measures today.
-        why = "; ".join((mark.get("freshness") or {}).get("warnings", [])[:1])
-        reasons.append("the price is stale" + (f" ({why})" if why else ""))
+    elif now_led.open_quantity > 0 and (mark.get("freshness") or {}).get("from_cache"):
+        # A saved copy from before the source failed can say a loss is smaller (or larger) than it is: it never
+        # measures today. A quote the source gives now, however long since it changed, is today's market.
+        reasons.append("the price is a saved copy from before the data source failed")
     if prev_led.open_quantity > 0 and prev is None:
         reasons.append("no previous close" + (f" ({view['prev_reason']})" if view.get("prev_reason") else ""))
     if reasons:

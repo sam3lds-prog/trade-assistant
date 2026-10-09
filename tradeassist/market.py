@@ -138,8 +138,9 @@ class Market:
             cached = self._last_quotes.get(symbol)
             if allow_stale and cached and time.time() - cached[1] < QUOTE_CACHE_SECONDS:
                 q = dict(cached[0])
-                q["_meta"] = self.observe_quote(symbol, q, retrieved=datetime.fromtimestamp(cached[1], timezone.utc),
-                                                from_cache=True, reason=f"the source failed: {exc}")
+                q["_meta"] = self.observe_quote(symbol, q, retrieved=datetime.now(timezone.utc), from_cache=True,
+                                                reason=f"the source failed: {exc}")
+                q["_meta"]["saved_at"] = datetime.fromtimestamp(cached[1], timezone.utc).isoformat(timespec="seconds")
                 return q
             raise
         q = quotes.get(symbol)

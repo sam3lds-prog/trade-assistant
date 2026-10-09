@@ -44,8 +44,11 @@ RULES = (
      r"\1\2[redacted]"),
     # A quoted value right after the word token: token 'abc'.
     (re.compile(r"(?i)\b(token\s+)(['\"])[^'\"]+\2"), r"\1\2[redacted]\2"),
+    # The word token, then something shaped like one: "sandbox token Kx9Lm2Np4Qr6".
+    (re.compile(r"(?i)\b(token\s+)(?=[A-Za-z0-9._\-]*\d)(?=[A-Za-z0-9._\-]*[A-Za-z])[A-Za-z0-9._\-]{12,}"),
+     r"\1[redacted]"),
     # Query-string values that are credentials in OAuth and signed URLs.
-    (re.compile(r"(?i)([?&](?:code|key|sig|signature|state)=)[^&\s\"']+"), r"\1[redacted]"),
+    (re.compile(r"(?i)([?&](?:code|key|sig|signature)=)[^&\s\"']+"), r"\1[redacted]"),
     # JSON web tokens.
     (re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]*)?"), "[redacted]"),
     # Long runs of letters and digits mixed: the shape of an API key.
@@ -92,9 +95,19 @@ class RedactingFilter(logging.Filter):
             msg = record.getMessage()
         except Exception:                   # noqa: BLE001 - a bad format string must not stop logging
             return True
-        clean = redact(msg)
-        if clean != msg:
-            record.msg, record.args = clean, ()
+        if redact(msg) != msg:
+            # Redact the arguments in place first, so a formatter that reads them (uvicorn's access log
+            # unpacks five) still finds them; only if the template itself holds the secret is it flattened.
+            if isinstance(record.args, tuple):
+                record.args = tuple(redact(a) if isinstance(a, str) else a for a in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: redact(v) if isinstance(v, str) else v for k, v in record.args.items()}
+            try:
+                still = record.getMessage()
+            except Exception:               # noqa: BLE001
+                still = msg
+            if redact(still) != still:
+                record.msg, record.args = redact(still), ()
         # A traceback quotes the exception's message (and sometimes the request); the formatter uses
         # exc_text when it is already set, so set it to the redacted text.
         if record.exc_info and record.exc_info[0] is not None:

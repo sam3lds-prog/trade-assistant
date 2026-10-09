@@ -433,7 +433,8 @@ class Desk:
     def update(self, position_id: int, changes: dict[str, Any]) -> dict[str, Any]:
         with self.db.tx() as cur:
             pos = read(cur, position_id)
-            if pos.get("legacy_trade_id") and {"thesis", "notes"} & set(changes):
+            if pos.get("legacy_trade_id") and any(k in changes and (changes[k] or "").strip() != (pos.get(k) or "").strip()
+                                                  for k in ("thesis", "notes")):
                 # The journal entry is the record for these, and re-reading it would overwrite an edit made here.
                 raise PositionError("This position mirrors an entry in the option journal: change its thesis and notes "
                                     "there. Levels, targets, risk and setup can be changed here.")

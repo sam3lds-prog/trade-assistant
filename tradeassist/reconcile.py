@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
@@ -172,29 +173,33 @@ def repair(db: Any, market: Any = None, label: str = "before-repair") -> dict[st
         raise RuntimeError(f"The database could not be copied first, so nothing was repaired: {exc}") from exc
     before = diagnose(db, market)
     changed, resynced, failed = [], [], []
-    # Each item in its own transaction: one that cannot be repaired is reported and the rest go ahead.
-    for m in before["journal_mismatches"]:
-        if m.get("trade_id") is None:
-            continue
-        try:
-            with db.tx() as cur:
-                sync_legacy_trade(cur, m["trade_id"])
-            resynced.append(m["trade_id"])
-        except PositionError as exc:
-            failed.append({"trade_id": m["trade_id"], "problem": str(exc)})
-    for m in before["ledger_mismatches"]:
-        try:
-            with db.tx() as cur:
-                recompute(cur, m["id"], correction=True)
-            changed.append({"id": m["id"], "symbol": m["symbol"], "differences": m["differences"]})
-        except PositionError as exc:
-            failed.append({"id": m["id"], "symbol": m["symbol"], "problem": str(exc)})
-    with db.tx() as cur:
-        if _has_table(cur, "maintenance_log"):
-            cur.execute("INSERT INTO maintenance_log (action, at, backup_path, details_json) VALUES (?, ?, ?, ?)",
-                        ("REPAIR", datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                         str(backup) if backup else None,
-                         json.dumps({"recomputed": changed, "journal_resynced": resynced, "failed": failed}, default=str)))
+    # Each item in its own transaction: one that cannot be repaired (its fills do not account, or a database
+    # rule refuses it) is reported and the rest go ahead; what was done is logged whatever happens.
+    try:
+        for m in before["journal_mismatches"]:
+            if m.get("trade_id") is None:
+                continue
+            try:
+                with db.tx() as cur:
+                    sync_legacy_trade(cur, m["trade_id"])
+                resynced.append(m["trade_id"])
+            except (PositionError, sqlite3.Error) as exc:
+                failed.append({"trade_id": m["trade_id"], "problem": str(exc)})
+        for m in before["ledger_mismatches"]:
+            try:
+                with db.tx() as cur:
+                    recompute(cur, m["id"], correction=True)
+                changed.append({"id": m["id"], "symbol": m["symbol"], "differences": m["differences"]})
+            except (PositionError, sqlite3.Error) as exc:
+                failed.append({"id": m["id"], "symbol": m["symbol"], "problem": str(exc)})
+    finally:
+        with db.tx() as cur:
+            if _has_table(cur, "maintenance_log"):
+                cur.execute("INSERT INTO maintenance_log (action, at, backup_path, details_json) VALUES (?, ?, ?, ?)",
+                            ("REPAIR", datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                             str(backup) if backup else None,
+                             json.dumps({"recomputed": changed, "journal_resynced": resynced, "failed": failed},
+                                        default=str)))
     after = diagnose(db, market)
     if changed or resynced:
         emit("repair_applied", logging.WARNING, positions=len(changed), journal_entries=len(resynced),

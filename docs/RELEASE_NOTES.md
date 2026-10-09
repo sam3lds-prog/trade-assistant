@@ -27,10 +27,12 @@ the first start (a copy of the database is taken first).
 **Risk checks**
 
 - The trade ticket's open-risk limit now counts open risk on the Positions screen, not only
-  the option journal. A position whose risk cannot be measured is named in a note.
+  the option journal. A position whose risk cannot be measured, or that is priced from a saved
+  copy, is named in a note. The per-trade limit is unchanged, so a protective option on shares
+  you hold is not blocked by the shares' own risk.
 - The daily loss stop never reports a complete, OK day when the positions could not be read,
-  when a price is a stale saved copy, or when yesterday's close comes from history that could
-  not be refreshed.
+  when a price is a saved copy from before the data source failed, or when yesterday's close
+  would come from history that could not be refreshed and ends before yesterday.
 - The bad-day estimate names any holding it leaves out for lack of history, and says it
   understates. A total that nothing could be measured for shows as unknown, not $0.
 
@@ -39,13 +41,15 @@ the first start (a copy of the database is taken first).
 - A position whose fills no longer add up (possible with data from older versions) no longer
   stops the other screens: it is listed on its own with a Correct button for each fill and
   counted as not measured everywhere.
-- A split, a voided split or a contract adjustment that would reopen a closed position asks
-  for confirmation and a reason, and is recorded as a correction.
-- A split entered as a date applies to every fill on that date. Voiding a split keeps later
-  splits and plan edits.
-- A tiny remainder left by rounding or a split (below a millionth of a share) closes with the
-  sale that left it, instead of keeping the position open for ever.
-- Borrow status is PARTIAL when any day of the short has no recorded fee.
+- A split, a voided split or a contract adjustment that would reopen a closed position, or
+  turn one position into two trades, asks for confirmation and a reason, and is recorded as a
+  correction.
+- A split or contract adjustment entered as a date applies to every fill on that date.
+  Voiding a split keeps later splits and plan edits.
+- A tiny remainder left by rounding or a split (below a millionth of a share) closes at the
+  last sale's price, instead of keeping the position open for ever.
+- Borrow status is PARTIAL when any night of the short has no recorded fee (tonight is not
+  owed yet, and a short covered the same day owes nothing).
 - The thesis and notes of an option-journal trade are edited in the journal.
 - Recording an option as expired worthless with no known stock price needs a reason.
 
@@ -60,8 +64,8 @@ the first start (a copy of the database is taken first).
 
 **Analytics**
 
-- Signal calibration is tested on the earlier 70% of dates only, so the held-out dates are a
-  real check. Frequency ranges are wider when one period holds most of the cases.
+- Signal calibration is tested on the earlier 70% of dates only, with a gap of one horizon
+  before the held-out dates, so they are a real check. Frequency ranges are wider when one period holds most of the cases.
 - Trade reviews leave out the exit day's range when the exit was during the session.
 - Research runs fingerprint the benchmark and market-regime prices they used.
 

@@ -263,7 +263,8 @@ HOLDOUT_SHARE = 0.3              # the latest share of dates kept out to check t
 def calibrate(days: pd.DataFrame, horizon: int = MAIN_HORIZON) -> dict[str, Any]:
     """Frequency of a gain after each range of net score; and whether the score is calibrated.
 
-    The check is made on the earlier 70% of dates only: there, higher ranges must have been
+    The check is made on the earlier 70% of dates only (less the last horizon before the cut,
+    whose outcomes reach into the held-out dates): there, higher ranges must have been
     followed by gains more often, in order, with the gap between the lowest and highest
     significant on time blocks. The latest 30% of dates are then held out: never used to choose
     the ranges or to test them, only to see whether the same ranges point the same way.
@@ -299,7 +300,9 @@ def calibrate(days: pd.DataFrame, horizon: int = MAIN_HORIZON) -> dict[str, Any]
                         "mean_excess_vs_spy": float(ex.mean()) if len(ex) else None, "by_regime": by_regime})
     dates = pd.to_datetime(d["date"])
     cut = dates.quantile(1 - HOLDOUT_SHARE) if len(d) else None
-    early = d[dates < cut] if cut is not None else d
+    # The outcomes of cases in the last horizon before the cut are measured on held-out prices, so they are
+    # left out of the check (an embargo of one horizon).
+    early = d[dates < cut - pd.Timedelta(days=block_span(horizon))] if cut is not None else d
     usable = []
     for lo, hi in SCORE_BUCKETS:
         sel = early[(early["net"] >= lo) & (early["net"] < hi)]

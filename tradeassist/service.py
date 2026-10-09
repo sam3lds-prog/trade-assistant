@@ -184,7 +184,9 @@ class TradeAssistant:
         card = build_scorecard(row, analysis, enriched, self.settings, chosen, contracts, earnings=earnings,
                                iv_rank=self.iv_rank(symbol), open_risk=self.journal.committed_risk() + book["total"],
                                today=datetime.now(NY).date(), trend_validated=False,
-                               symbol_risk=self.journal.committed_risk(symbol) + book["symbol"])
+                               # Not the Positions screen's risk in this stock: an option on a stock you hold is often
+                               # a hedge, and counting the shares' risk against it would block the trade that cuts risk.
+                               symbol_risk=self.journal.committed_risk(symbol))
         events = recent_events(enriched)
         for e in events:
             e["verdicts"] = validated.get(e["key"], [])
@@ -395,7 +397,8 @@ class TradeAssistant:
             # A partial measurement is not a pass: say so, and with INCOMPLETE_RISK_POLICY=BLOCK treat it
             # as a limit broken until it is overridden on purpose.
             note = {"key": "daily_loss_incomplete", "label": "Daily loss not fully measured",
-                    "value": f"{today['positions_evaluated']} of {today['positions']} positions measured",
+                    "value": (f"{today['positions_evaluated']} of {today['positions']} positions measured"
+                              if today.get("positions") is not None else "positions could not be read"),
                     "text": today["text"], "overridable": True}
             if self.settings.incomplete_risk_policy == "BLOCK":
                 violations.append(note)
@@ -628,6 +631,12 @@ class TradeAssistant:
             if v.get("legacy_trade_id"):
                 continue
             out["positions"] += 1
+            fresh = (v.get("mark") or {}).get("freshness") or {}
+            if fresh.get("from_cache"):
+                # A saved quote from before the source failed can make the risk look smaller (or larger) than it is.
+                out["unknown"].append({"id": v["id"], "description": v["description"],
+                                       "reason": "its price is a saved copy from before the data source failed"})
+                continue
             x = exposure(v, None)
             if x["open_risk"] is None:
                 out["unknown"].append({"id": v["id"], "description": v["description"],
@@ -635,7 +644,7 @@ class TradeAssistant:
                 continue
             out["total"] += x["open_risk"]
             if symbol and v["symbol"] == symbol:
-                out["symbol"] += x["open_risk"]
+                out["symbol"] += x["open_risk"]          # reported, not counted toward the per-trade limit
         return out
 
     def daily_loss_status(self) -> dict[str, Any]:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -524,9 +524,17 @@ class Analyst:
             bars = self.market.bars(view["symbol"], 1)
             failed = self.market.bar_info(view["symbol"]).get("refresh_failed")
             before = bars[bars["date"] < pd.Timestamp(today)]
-            stock_prev = float(before["close"].iloc[-1]) if len(before) and not failed else None
-            if failed:
-                self._prev_reason = f"the saved price history could not be refreshed ({failed})"
+            stock_prev = float(before["close"].iloc[-1]) if len(before) else None
+            if failed and stock_prev is not None:
+                # Saved history that could not be refreshed is still right if it reaches the weekday before today
+                # (no holiday calendar here: after a holiday it is treated as unknown, the safe side).
+                prior = today - timedelta(days=1)
+                while prior.weekday() >= 5:
+                    prior -= timedelta(days=1)
+                if before["date"].iloc[-1].date() < prior:
+                    stock_prev = None
+                    self._prev_reason = (f"the saved price history ends {before['date'].iloc[-1].date():%b %d} and could "
+                                         f"not be refreshed ({failed})")
         except DataError as exc:
             stock_prev = None
             self._prev_reason = f"no price history ({exc})"
@@ -567,8 +575,12 @@ class Analyst:
                 v["prev_reason"] = self._prev_reason
             relevant.append(v)
         s = self.svc.settings
+        # An unreadable position counts against today only if it is open or had a fill today.
+        start_utc = start.astimezone(timezone.utc).isoformat()
+        today_unreadable = [u for u in unreadable or [] if u["status"] in ("OPEN", "PARTIALLY_CLOSED")
+                            or (u["status"] == "CLOSED" and any(e["executed_at"] >= start_utc for e in u["executions"]))]
         return portfolio.daily_loss(relevant, s.daily_loss_mode, s.account_size, s.daily_loss_stop_pct,
-                                    unreadable=[u for u in unreadable or [] if u["status"] not in ("PLANNED", "CANCELLED")])
+                                    unreadable=today_unreadable)
 
     def portfolio(self, scenarios: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         from . import portfolio

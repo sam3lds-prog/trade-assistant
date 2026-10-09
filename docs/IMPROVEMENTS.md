@@ -285,7 +285,37 @@ forward fill, the 40-day beta minimum, VaR and expected-shortfall signs and unit
 pause logic of the source health; no endpoint that places, changes or cancels an order; no
 stale quote in option pricing; deterministic research hashes.
 
-Version set to 2.3.1. Tests: 513 passed, 2 skipped.
+The two reviewers then checked the fixes (second round). They confirmed all 27 and found
+problems in the fixes themselves, all now fixed with tests (`test_followup_*`):
+
+| Severity | Problem in the first fixes | Fix |
+| --- | --- | --- |
+| Medium | Adding the stock's open risk to the per-trade limit blocked hedges (a protective put on held shares failed a non-overridable check) | The per-trade limit counts only the journal's risk in the stock, as before; total open risk includes the Positions screen |
+| Medium | The ticket's open risk could be measured from a saved quote | A position priced from a saved copy is unknown, with the reason |
+| Medium | The Positions screen could no longer save any plan field on a journal mirror (it always sends thesis and notes) | Only a change to thesis or notes is refused |
+| Medium | Contract adjustments entered as a date still missed same-day fills | A plain date is the ex-date here too |
+| Medium/low | An adjustment could still turn an open position into two trades, and a correction on an unreadable position could create a reopening | Both refused unless confirmed (adjustments) or at all (corrections) |
+| Low | Repair caught only position errors and logged only at the end | Database errors are reported per item; the log is always written |
+| Low | Snapping a remainder mid-history turned a later purchase into a "reopening" on 2.3.0 data | A remainder is closed only at the end of the replay |
+| Low | An open short was PARTIAL every day (tonight's fee is never booked yet) | Coverage counts nights, not including tonight |
+| Low | Redacting uvicorn's access lines broke its formatter | Arguments are redacted in place |
+| Low | The exit-day rule also cut today's bar from open positions | Applied only to an actual exit |
+| Low | Any failed history refresh dropped yesterday's close | Kept when the saved history reaches the weekday before today |
+| Low | An unreadable position closed weeks ago kept today's loss UNAVAILABLE | Only open ones, or ones with a fill today, count |
+| Low | No gap between the calibration check and the held-out dates | One horizon left out before the cut |
+| Low | Short tokens after the word "token" were not redacted; `state=` in SEC URLs was | Both corrected |
+| Low (pre-existing) | A saved quote's age was measured to when it was saved ("0 seconds old") | Measured to now; `saved_at` added |
+
+Possibly more INCOMPLETE days in live trading (suspected by a reviewer, not reproducible on
+demo data) was addressed by the second row's rule: only a saved copy is unmeasured; a quote
+the source gives now counts and is labelled, however long since it changed.
+
+Left as they are, by choice: the redaction errs toward hiding, so an ordinary word after
+"authorization:" or "token:" in an error message is also hidden; a split recorded by 2.2 or
+2.3.0 on a position that later had a second split may not have its planned size restored when
+voided (its levels are), because those versions did not record whether they rescaled it.
+
+Version set to 2.3.1. Tests: 525 passed, 2 skipped.
 
 ## Test evidence (deliverable C)
 
@@ -303,7 +333,7 @@ Run on Python 3.13.16 with pandas 3.0.5, numpy 2.5.3, FastAPI 0.143.0 and pydant
 | Sprint 5 (2.2.0) | 454 | 2 |
 | Sprint 6 | 468 | 2 |
 | Sprint 7 (2.3.0) | 484 | 2 |
-| **Review fixes (2.3.1)** | **513** | **2** |
+| **Review fixes (2.3.1)** | **525** | **2** |
 
 The two skips are the same as at the baseline (`test_optionmath.py`: implied volatility
 cannot be solved from a near-zero price). The one warning is the test client's own
@@ -313,7 +343,7 @@ New test files in this programme: `test_migrations.py` (7), `test_p0_defects.py`
 `test_ledger_properties.py` (4, property-based with hypothesis, derandomized),
 `test_history_integrity.py` (21), `test_risk_models.py` (14), `test_short_and_options.py`
 (14), `test_freshness.py` (11), `test_validation.py` (14), `test_diagnostics.py` (12),
-`test_static_assets.py` (4), `test_review_fixes.py` (29). Test names begin with the requirement they prove
+`test_static_assets.py` (4), `test_review_fixes.py` (41). Test names begin with the requirement they prove
 (`test_1_2_*`, `test_6_4_*`, ...).
 
 Line coverage of the package: **93%** (10,889 statements). The modules this programme
@@ -384,9 +414,9 @@ What this means for a real database:
 
 | Check | Result |
 | --- | --- |
-| Full test suite | 513 passed, 2 skipped (2.3.1) |
+| Full test suite | 525 passed, 2 skipped (2.3.1) |
 | Lint | `ruff check .` clean |
-| Independent review | two reviewers; 27 findings reproduced and fixed with regression tests (above) |
+| Independent review | two reviewers; 27 findings reproduced and fixed with regression tests, then the fixes re-checked by the same reviewers and their 15 follow-up problems fixed (above) |
 | Migrations from 0.4.0, 2.0.0 and 2.1.0 databases, with a copy first | pass (`test_migrations.py`, report above) |
 | A failed migration rolls back and leaves the copy | pass (`test_migrations.py`) |
 | Ledger property tests | pass (`test_ledger_properties.py`) |

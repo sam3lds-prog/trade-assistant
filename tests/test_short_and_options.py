@@ -71,7 +71,7 @@ def test_3_3_trading_profit_and_net_profit_after_borrow_fees_and_dividends(db):
     assert p["status"] == "CLOSED" and p["ledger"]["realized_pnl"] == pytest.approx(40 * 5 + 60 * 2)   # trading: 320
     assert fin["by_kind"]["BORROW_FEE"] == pytest.approx(-12.50) and fin["by_kind"]["DIVIDEND_OWED"] == pytest.approx(-30.0)
     assert fin["financing_total"] == pytest.approx(-42.50)
-    assert fin["borrow_status"] == "PARTIAL" and "2 of the 7 days" in fin["borrow_text"]       # Oct 6 and 7 not recorded
+    assert fin["borrow_status"] == "PARTIAL" and "1 of the 6 nights" in fin["borrow_text"]     # the night of Oct 6
     assert "first Oct 06, 2026" in fin["borrow_text"]
     assert fin["borrow_estimate"] is not None and fin["borrow_estimate"] < 0                   # shown, labelled, not added
     with db.tx() as cur:

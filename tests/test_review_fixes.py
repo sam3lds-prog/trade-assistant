@@ -209,7 +209,7 @@ def test_A5_borrow_fees_with_a_gap_are_partial(db):
         add_adjustment(cur, pid, "BORROW_FEE", amount=-30, effective_at="2026-03-31T16:00",
                        period_start="2026-03-01T10:00", period_end="2026-03-31T16:00")
     fin = get(db, pid)["financing"]
-    assert fin["borrow_status"] == "PARTIAL" and "28 of the 89 days" in fin["borrow_text"]
+    assert fin["borrow_status"] == "PARTIAL" and "28 of the 88 nights" in fin["borrow_text"]
     with db.tx() as cur:
         add_adjustment(cur, pid, "BORROW_FEE", amount=-30, effective_at="2026-02-28T16:00",
                        period_start="2026-02-01T10:00", period_end="2026-02-28T16:00")
@@ -301,10 +301,11 @@ def test_B3_a_stale_price_does_not_measure_today():
     start = datetime(2026, 10, 7, tzinfo=NY)
     v = {"id": 1, "description": "Long 10 KO", "direction": "LONG", "multiplier": 1.0, "unit_adjustments": [],
          "executions": [{"side": "BUY", "quantity": 10, "price": 60.0, "fees": 0, "executed_at": "2026-10-01T14:00:00+00:00"}],
-         "prev_close": 61.0, "mark": {"price": 70.0, "freshness": {"freshness": "STALE", "warnings": ["a saved copy"]}}}
+         "prev_close": 61.0, "mark": {"price": 70.0, "freshness": {"freshness": "STALE", "from_cache": True,
+                                                                   "warnings": ["a saved copy"]}}}
     d = portfolio.day_pnl(v, start)
-    assert d["known"] is False and "stale" in d["reason"]
-    v["mark"]["freshness"] = {"freshness": "LAST_SESSION", "warnings": []}
+    assert d["known"] is False and "saved copy" in d["reason"]
+    v["mark"]["freshness"] = {"freshness": "STALE", "warnings": ["10 minutes old"]}   # the live source's quote: today's market
     assert portfolio.day_pnl(v, start)["unrealized_change"] == pytest.approx(90.0)
 
 
@@ -312,6 +313,9 @@ def test_B7_a_previous_close_from_history_that_could_not_be_refreshed_is_unknown
     c, svc = app
     c.post("/v2/positions", json={"symbol": "KO", "quantity": 10, "entry": {"price": 60, "executed_at": "2026-09-01T10:00"}})
     monkeypatch.setattr(svc.market, "bar_info", lambda s: {"refresh_failed": "timeout"})
+    assert svc.analyst.daily_loss()["coverage_status"] == "COMPLETE"     # the saved history still reaches yesterday
+    real = svc.market.bars
+    monkeypatch.setattr(svc.market, "bars", lambda s, *a, **k: (lambda b: b[b["date"] < b["date"].max() - pd.Timedelta(days=7)])(real(s, *a, **k)))
     d = svc.analyst.daily_loss()
     assert d["coverage_status"] == "UNAVAILABLE" and "could not be refreshed" in d["missing"][0]["reason"]
 
@@ -479,3 +483,143 @@ def test_B5_uvicorns_loggers_are_protected_too():
         lg = logging.getLogger("uvicorn.error")
         for f in [f for f in lg.filters if isinstance(f, events.RedactingFilter)]:
             lg.removeFilter(f)
+
+
+# --- Follow-up: problems the reviewers found in the first round of fixes ----------------------------------------------
+
+def test_followup_a_remainder_followed_by_a_purchase_is_an_addition_as_recorded():
+    led = account("LONG", 1, [Fill("BUY", 1, 10.0, 0, "a"), Fill("SELL", 0.9999995, 11.0, 0, "b"), Fill("BUY", 10, 12.0, 0, "c")])
+    assert led.lifecycle_issues == [] and led.open_quantity == pytest.approx(10.0000005)
+
+
+def test_followup_a_plan_save_from_the_screen_works_on_a_journal_mirror(app):
+    c, svc = app
+    tid = svc.journal.create(data_source="demo", symbol="AAPL", option_symbol="X", option_type="call", strike=200,
+                             expiration="2026-12-18", contracts=1, thesis="t" * 20, planned_limit=2.0, max_limit=2.0,
+                             plan={}, quote={}, scorecard=[], signals=[], overrides=[])
+    pid = svc.db.one("SELECT id FROM positions WHERE legacy_trade_id = ?", (tid,))[0]
+    pos = c.get(f"/v2/positions/{pid}").json()
+    same = c.post(f"/v2/positions/{pid}/plan", json={"thesis": pos["thesis"], "notes": pos["notes"], "invalidation_price": 180})
+    assert same.status_code == 200 and same.json()["invalidation_price"] == 180
+
+
+def test_followup_a_contract_adjustment_on_a_date_applies_to_that_days_fills(db):
+    with db.tx() as cur:
+        oid = create(cur, symbol="AAPL", instrument_type="OPTION", direction="LONG", quantity=3,
+                     option=OptionLeg("CALL", 200.0, "2026-12-18"))
+    fill(db, oid, "BUY", 1, 4.0, "2026-06-09T10:00")
+    fill(db, oid, "BUY", 2, 2.0, "2026-06-10T11:00")              # on the ex-date: already adjusted contracts
+    with db.tx() as cur:
+        adjust_contract(cur, oid, effective_at="2026-06-10", new_strike=100.0, new_multiplier=100.0, quantity_factor=2.0,
+                        reason="2-for-1 split")
+    led = get(db, oid)["ledger"]
+    assert led["open_quantity"] == pytest.approx(4) and led["cost_basis"] == pytest.approx(2.0)
+
+
+def test_followup_adjustments_cannot_split_an_open_position_into_two_trades(db):
+    pid = stock(db, qty=200)
+    fill(db, pid, "BUY", 100, 100.0, "2026-06-01T10:00")
+    fill(db, pid, "SELL", 50, 110.0, "2026-06-20T10:00")
+    fill(db, pid, "BUY", 20, 105.0, "2026-06-25T10:00")
+    with pytest.raises(PositionError, match="two trades"):
+        with db.tx() as cur:                       # 1-for-2 before the sale: 50 shares, all sold, then a new buy
+            add_adjustment(cur, pid, "SPLIT", ratio=0.5, effective_at="2026-06-10")
+    assert get(db, pid)["adjustments"] == [] and get(db, pid)["ledger"]["lifecycle_issues"] == []
+
+
+def test_followup_correcting_an_unreadable_position_cannot_create_a_reopening(db):
+    pid = stock(db)
+    fill(db, pid, "BUY", 10, 100.0, "2026-06-01T10:00")
+    fill(db, pid, "SELL", 10, 110.0, "2026-06-02T10:00")
+    with db.tx() as cur:                           # a stray sale, as an older version could leave
+        cur.execute("INSERT INTO executions (position_id, side, quantity, price, fees, executed_at, created_at) "
+                    "VALUES (?, 'SELL', 5, 111, 0, '2026-06-03T14:00:00+00:00', 'x')", (pid,))
+    eid = db.one("SELECT MAX(id) FROM executions")[0]
+    from tradeassist.positions import correct_execution
+    with pytest.raises(PositionError, match="two trades"):
+        with db.tx() as cur:
+            correct_execution(cur, pid, eid, {"side": "BUY"}, "it was a buy")
+
+
+def test_followup_an_option_on_a_held_stock_is_not_blocked_by_the_shares_risk(app):
+    c, svc = app
+    spot = svc.market.spot("AAPL")
+    c.post("/v2/positions", json={"symbol": "AAPL", "quantity": 20, "invalidation_price": round(spot * 0.85, 2),
+                                  "entry": {"price": round(spot, 2)}})
+    exp = c.get("/api/expirations", params={"symbol": "AAPL"}).json()["expirations"][3]["date"]
+    chain = c.get("/api/chain", params={"symbol": "AAPL", "expiration": exp}).json()
+    k = min((x for x in chain["contracts"] if x["option_type"] == "put"), key=lambda x: abs(x["moneyness_pct"] + 5))
+    t = c.post("/api/ticket", json={"symbol": "AAPL", "expiration": exp, "option_type": "put", "strike": k["strike"],
+                                    "contracts": 1, "limit_price": k["ask"], "thesis": "A protective put on the shares I hold."}).json()
+    trade = next(x for x in t["priced"]["scorecard"]["checks"] if x["key"] == "trade_risk")
+    assert trade["status"] == "pass" and t["priced"]["book_risk"]["symbol"] > 0
+
+
+def test_followup_ticket_risk_from_a_saved_quote_is_unknown(app):
+    c, svc = app
+    c.post("/v2/positions", json={"symbol": "KO", "quantity": 10, "invalidation_price": 1, "entry": {"price": 60}})
+    svc.market.quote("KO")
+    real = svc.market.provider.quotes
+
+    def down(symbols):
+        if "KO" in symbols:
+            raise DataError("Tradier request failed (timeout)")
+        return real(symbols)
+    svc.market.provider.quotes = down
+    book = svc.book_risk()
+    assert book["total"] == 0 and "saved copy" in book["unknown"][0]["reason"]
+    q = svc.market.quote("KO", allow_stale=True)["_meta"]
+    assert q["from_cache"] and q["saved_at"] and q["age_seconds"] >= 0
+
+
+def test_followup_an_open_positions_excursions_include_today():
+    bars = pd.DataFrame({"date": pd.to_datetime(["2026-09-01", "2026-09-02"]), "open": [100, 100], "high": [101, 100],
+                         "low": [99, 85], "close": [100, 86], "volume": [1e6] * 2})
+    pos = {"instrument_type": "STOCK", "direction": "LONG", "bias": 1, "status": "OPEN", "opened_at": "2026-09-01T14:00:00+00:00",
+           "closed_at": None, "ledger": {"average_entry_price": 100.0}, "invalidation_price": 90.0, "target_1": None,
+           "snapshots": []}
+    x = excursions(pos, bars, until="2026-09-02T15:00:00+00:00")
+    assert x["mae_pct"] == pytest.approx(-15.0)
+
+
+def test_followup_an_unreadable_position_closed_before_today_does_not_touch_today(app):
+    c, svc = app
+    p = c.post("/v2/positions", json={"symbol": "MSFT", "quantity": 1, "entry": {"price": 400, "executed_at": "2026-09-01T10:00"}}).json()
+    c.post(f"/v2/positions/{p['id']}/executions", json={"side": "SELL", "quantity": 1, "price": 410, "executed_at": "2026-09-02T10:00"})
+    with svc.db.tx() as cur:
+        cur.execute("UPDATE executions SET fees = 0.0000001, quantity = 0.0000005 WHERE position_id = ? AND side = 'BUY'", (p["id"],))
+    assert c.get("/v2/positions").json()["invalid"]
+    assert svc.analyst.daily_loss()["coverage_status"] == "COMPLETE"
+
+
+def test_followup_repair_logs_what_it_did_even_when_an_item_fails(app, monkeypatch):
+    _, svc = app
+    import tradeassist.reconcile as rc
+    p = svc.desk.create({"symbol": "KO", "quantity": 1, "entry": {"price": 60, "executed_at": "2026-10-01T10:00"}})
+    with svc.db.tx() as cur:
+        cur.execute("UPDATE positions SET realized_pnl = 5 WHERE id = ?", (p["id"],))
+
+    def refuse(cur, pid, correction=False):
+        raise sqlite3.IntegrityError("a rule says no")
+    monkeypatch.setattr(rc, "recompute", refuse)
+    done = repair(svc.db)
+    assert done["failed"][0]["problem"] == "a rule says no"
+    assert "a rule says no" in svc.db.one("SELECT details_json FROM maintenance_log ORDER BY id DESC")[0]
+
+
+def test_followup_an_open_short_with_fees_through_yesterday_is_recorded(db):
+    pid = stock(db, "SHORT")
+    now = datetime.now(NY)
+    opened = (now - timedelta(days=10)).replace(hour=10, minute=0, second=0, microsecond=0)
+    fill(db, pid, "SELL_SHORT", 100, 50.0, opened.isoformat())
+    with db.tx() as cur:
+        add_adjustment(cur, pid, "BORROW_FEE", amount=-5, effective_at=(now - timedelta(days=1)).isoformat(),
+                       period_start=opened.isoformat(), period_end=(now - timedelta(days=1)).isoformat())
+    assert get(db, pid)["financing"]["borrow_status"] == "RECORDED"
+
+
+def test_followup_uvicorns_access_lines_keep_their_arguments():
+    r = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                          ("127.0.0.1:5", "GET", "/cb?code=abc123", "1.1", 200), None)
+    events.RedactingFilter().filter(r)
+    assert len(r.args) == 5 and "abc123" not in r.getMessage()
