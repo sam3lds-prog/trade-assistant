@@ -96,11 +96,13 @@ def excursions(pos: dict[str, Any], bars: pd.DataFrame | None, until: str | None
     held = window[pd.to_datetime(window["date"]).dt.date < end] if pos.get("closed_at") else window
     closes = held["close"].to_numpy(dtype=float)
     held_past = bool(inv is not None and len(closes) and np.any(bias * (closes - inv) < 0))
-    t1 = pos.get("target_1")
+    t1, t2 = pos.get("target_1"), pos.get("target_2")
     reached = bool(t1 is not None and (hi >= t1 if bias > 0 else lo <= t1))
+    reached_2 = bool(t2 is not None and (hi >= t2 if bias > 0 else lo <= t2))
     return {"available": True, "underlying_entry": entry, "entry_basis": basis, "mfe_pct": 100 * mfe, "mae_pct": 100 * mae,
             "mfe_r": mfe / r_unit if r_unit else None, "mae_r": mae / r_unit if r_unit else None,
-            "closed_beyond_invalidation": held_past, "reached_target_1": reached, "days": int(len(window))}
+            "closed_beyond_invalidation": held_past, "reached_target_1": reached, "reached_target_2": reached_2,
+            "days": int(len(window))}
 
 
 def behaviour_detail(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> dict[str, bool | None]:
@@ -295,6 +297,71 @@ def journal_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "behaviour": behaviours, "trades": rows[::-1], "notes": notes}
 
 
+def review(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> dict[str, Any]:
+    """A completed trade explained: what was planned, what was done, what was known at entry,
+    whether the thesis was invalidated or the targets reached, the result after identifiable
+    costs, and what is missing. Descriptive only: it says what happened, not why it worked or
+    failed."""
+    led, fin = pos["ledger"], pos.get("financing") or {}
+    context, why = entry_context(pos)
+    inv, t1, t2 = pos.get("invalidation_price"), pos.get("target_1"), pos.get("target_2")
+    has_bars = bool(exc.get("available"))
+    missing = []
+    if context is None:
+        missing.append("Historical entry-time market data is unavailable for this position "
+                       f"({'it was recorded with hindsight' if why == 'recorded with hindsight' else 'no entry snapshot'}).")
+    if not has_bars:
+        missing.append("No daily price history after the entry, so the moves while it was held are unknown.")
+    if inv is None:
+        missing.append("No invalidation price was set, so whether the thesis was invalidated cannot be judged.")
+    if not led.get("initial_risk"):
+        missing.append("No risk was set, so there is no R multiple.")
+    if fin.get("borrow_status") in ("UNKNOWN", "PARTIAL"):
+        missing.append(fin.get("borrow_text") or "Borrow fees are not fully recorded.")
+    signals = [s.get("name") if isinstance(s, dict) else str(s) for s in pos.get("legacy_signals") or []]
+    trading, financing_total = led["realized_pnl"], float(fin.get("financing_total") or 0.0)
+    unreal = (pos.get("pnl") or {}).get("unrealized") if pos["status"] != "CLOSED" else 0.0
+    net = trading + financing_total + (unreal or 0.0) if unreal is not None else None
+    risk = led.get("initial_risk")
+    invalidated = bool(exc["closed_beyond_invalidation"]) if has_bars and inv is not None else None
+    t1_hit = bool(exc["reached_target_1"]) if has_bars and t1 is not None else None
+    t2_hit = bool(exc.get("reached_target_2")) if has_bars and t2 is not None else None
+    lines = []
+    if invalidated is True:
+        lines.append(f"The stock closed through the invalidation price ({inv:,.2f}) while the position was open.")
+    elif invalidated is False:
+        lines.append(f"The stock never closed through the invalidation price ({inv:,.2f}) while it was held.")
+    if t1_hit is not None:
+        lines.append(f"Target 1 ({t1:,.2f}) was {'reached' if t1_hit else 'not reached'} on the daily highs and lows"
+                     + (f"; target 2 ({t2:,.2f}) was {'reached' if t2_hit else 'not reached'}." if t2_hit is not None else "."))
+    if context is not None and context.get("trend_state"):
+        lines.append(f"At entry the trend engine read {context['trend_state'].replace('_', ' ').lower()}"
+                     + (f" in a {context['market_regime'].replace('_', ' ').lower()} market" if context.get("market_regime") else "")
+                     + ".")
+    return {
+        "planned": {"thesis": pos.get("thesis"), "setup": pos.get("setup_type"), "invalidation_price": inv, "target_1": t1,
+                    "target_2": t2, "risk_amount": pos.get("risk_amount"), "initial_risk": risk,
+                    "intended_horizon_days": pos.get("intended_horizon"), "planned_quantity": pos.get("quantity")},
+        "executed": {"fills": len(pos.get("executions", [])), "opened_at": led.get("opened_at"), "closed_at": led.get("closed_at"),
+                     "average_entry_price": led.get("average_entry_price"), "average_exit_price": led.get("average_exit_price"),
+                     "largest_size": led.get("max_open_quantity"), "days_held": pos.get("days_held"),
+                     "corrections": len(pos.get("corrections") or [])},
+        "at_entry": ({"available": True, "trend_state": context.get("trend_state"), "market_regime": context.get("market_regime"),
+                      "bullish_score": context.get("bullish_score"), "bearish_score": context.get("bearish_score"),
+                      "rsi_14": context.get("rsi_14"), "structure": context.get("structure_state"),
+                      "method": context.get("method"), "data_as_of": context.get("data_timestamp")}
+                     if context is not None else {"available": False, "reason": why}),
+        "signals_at_entry": signals,
+        "thesis_invalidated": invalidated, "target_1_reached": t1_hit, "target_2_reached": t2_hit,
+        "result": {"trading": trading, "fees": led.get("fees"), "financing": financing_total, "unrealized": unreal,
+                   "net": net, "r_multiple": (net / risk) if (net is not None and risk) else None},
+        "habits": behaviour_detail(pos, exc, risk_limit),
+        "what_happened": lines, "missing": missing,
+        "note": "A description of what happened, from the records and daily prices. It does not say why the trade won "
+                "or lost.",
+    }
+
+
 def position_analytics(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> dict[str, Any]:
     """One position: its result so far, MAE and MFE, and how the picture changed since entry."""
     entry = snapshot(pos, "ENTRY") or {}
@@ -307,6 +374,7 @@ def position_analytics(pos: dict[str, Any], exc: dict[str, Any], risk_limit: flo
     return {"id": pos["id"], "description": pos.get("description"), "status": pos["status"], "pnl": pos.get("pnl"),
             "excursions": exc, "behaviour": [{"key": b, "label": BEHAVIOUR_WORDS[b]} for b in behaviour(pos, exc, risk_limit)],
             "behaviour_checks": behaviour_detail(pos, exc, risk_limit),
+            "review": review(pos, exc, risk_limit),
             "compare": compare, "compared_with": (last or {}).get("snapshot_type"),
             "thesis_check": pos.get("thesis_check"), "days_held": pos.get("days_held"),
             "fills": len(pos.get("executions", []))}

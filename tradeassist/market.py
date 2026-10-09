@@ -13,6 +13,7 @@ import pandas as pd
 from .chain import ChainAnalysis, analyze_chain
 from .config import Settings
 from .db import Database
+from .events import emit
 from .freshness import SourceHealth, observe, quote_completeness, session_state
 from .indicators import enrich
 from .optionmath import NY
@@ -84,7 +85,8 @@ class Market:
             out = fn()
         except DataError as exc:
             self.health.failure(what, str(exc))
-            log.warning("Data source failure (%s): %s", what, exc)
+            emit("provider_failure", logging.WARNING, source=self.info.label, request=what, error=exc,
+                 consecutive=self.health.consecutive_failures)
             raise
         self.health.success()
         return out

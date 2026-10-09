@@ -322,3 +322,40 @@ def research_runs(cur: sqlite3.Cursor) -> None:
         summary_json   TEXT NOT NULL DEFAULT '{}'
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_research_runs_kind ON research_runs (kind, run_at)")
+
+
+@migration(8, "database rules for positions and option legs, and a log of repairs")
+def integrity_rules(cur: sqlite3.Cursor) -> None:
+    """2.3: rules the database itself enforces on new writes (the tables already check fills'
+    quantities, prices, fees, sides, statuses, directions and instrument types), and a record of
+    every repair. SQLite cannot add CHECK constraints to existing tables without rebuilding them,
+    so the new rules are triggers; they apply to inserts and updates from now on and do not
+    touch existing rows (reconcile.py reports any that would break them)."""
+    rules = {
+        "positions": ("NEW.quantity IS NULL OR NEW.quantity <= 0", "a position's planned quantity must be above zero"),
+        "positions_mult": ("NEW.multiplier IS NULL OR NEW.multiplier <= 0", "a position's multiplier must be above zero"),
+        "option_contracts": ("NEW.strike IS NULL OR NEW.strike <= 0 OR NEW.multiplier IS NULL OR NEW.multiplier <= 0 "
+                             "OR length(NEW.expiration) != 10", "an option leg needs a strike and multiplier above zero "
+                                                                 "and an expiration like 2026-11-20"),
+        "executions": ("NEW.executed_at IS NULL OR length(NEW.executed_at) < 19", "a fill needs a full time stamp"),
+        "position_adjustments": ("NEW.kind = 'SPLIT' AND (NEW.ratio IS NULL OR NEW.ratio <= 0)",
+                                 "a split needs a ratio above zero"),
+    }
+    targets = {"positions": "positions", "positions_mult": "positions", "option_contracts": "option_contracts",
+               "executions": "executions", "position_adjustments": "position_adjustments"}
+    for name, (condition, message) in rules.items():
+        table = targets[name]
+        quoted = message.replace("'", "''")
+        # An update is refused only when it makes a good row bad, so a row that broke a rule
+        # before 2.3 can still have its other figures recomputed (it is reported, not frozen).
+        was_bad = condition.replace("NEW.", "OLD.")
+        for op, when in (("INSERT", condition), ("UPDATE", f"({condition}) AND NOT ({was_bad})")):
+            cur.execute(f"CREATE TRIGGER IF NOT EXISTS check_{name}_{op.lower()} BEFORE {op} ON {table} "
+                        f"WHEN {when} BEGIN SELECT RAISE(ABORT, '{quoted}'); END")
+    cur.execute("""CREATE TABLE IF NOT EXISTS maintenance_log (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        action       TEXT NOT NULL,                 -- REPAIR, BACKFILL
+        at           TEXT NOT NULL,
+        backup_path  TEXT,                          -- the copy taken first
+        details_json TEXT NOT NULL DEFAULT '{}'
+    )""")

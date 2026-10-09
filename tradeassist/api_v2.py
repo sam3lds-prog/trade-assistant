@@ -6,6 +6,7 @@ it (see versions.py). Areas behind a feature flag answer 404 when the flag is of
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
@@ -127,6 +128,10 @@ class OptionAdjust(Strict):
     quantity_factor: float = Field(1.0, gt=0)
     new_option_symbol: str | None = None
     reason: str = Field(..., min_length=3, max_length=500)
+
+
+class RepairRequest(Strict):
+    confirm: bool = False
 
 
 class SnapshotBackfill(Strict):
@@ -275,6 +280,75 @@ def build_router(svc: Any) -> APIRouter:
             out["quote_freshness"] = svc.market.quote(sym).get("_meta")
         except DataError as exc:
             out["quote_freshness"] = {"freshness": "UNKNOWN", "completeness": "MISSING", "warnings": [str(exc)]}
+        return clean(out)
+
+    @router.get("/diagnostics/reconciliation")
+    def reconciliation():
+        """Read-only: every stored figure checked against the fills, and what needs a look (reconcile.py)."""
+        need("unified_positions")
+        from .reconcile import diagnose
+        return clean(diagnose(svc.db, svc.market))
+
+    @router.post("/diagnostics/repair")
+    def repair(req: RepairRequest):
+        """Recompute derived figures from the fills, after copying the database. Never changes a fill."""
+        need("unified_positions")
+        if not req.confirm:
+            raise PositionError("Repair changes stored figures. Send {\"confirm\": true} after reading the "
+                                "reconciliation report; a copy of the database is taken first.")
+        from .reconcile import repair as run_repair
+        return clean(run_repair(svc.db, svc.market))
+
+    @router.get("/health/data")
+    def data_health():
+        """What the data health screen shows. No credentials or settings values are included."""
+        from . import events
+        from .reconcile import diagnose
+        from .snapshots import status as snapshot_status
+        info, health = svc.market.info, svc.market.health.summary()
+        out: dict[str, Any] = {"source": {"label": info.label, "mode": info.mode, "realtime": info.realtime, **health}}
+        positions = []
+        if svc.settings.features.get("unified_positions"):
+            positions = desk.list("open")["positions"]
+        fresh_counts: dict[str, int] = {}
+        missing, chains = [], []
+        for p in positions:
+            mk = p.get("mark") or {}
+            f = (mk.get("freshness") or {}).get("freshness") or ("NONE" if mk.get("price") is None else "UNKNOWN")
+            fresh_counts[f] = fresh_counts.get(f, 0) + 1
+            if mk.get("price") is None:
+                missing.append({"id": p["id"], "description": p["description"], "error": mk.get("error")})
+                if "chain" in str(mk.get("error") or "").lower():
+                    chains.append({"id": p["id"], "description": p["description"], "error": mk.get("error")})
+        symbols = sorted({p["symbol"] for p in positions} | set(svc.settings.watchlist[:20]))
+        bars = []
+        for sym in symbols:
+            meta = svc.db.one("SELECT last_date, fetched_at, source FROM bars_meta WHERE symbol = ?", (sym,))
+            row = {"symbol": sym, "held": any(p["symbol"] == sym for p in positions)}
+            if meta is None:
+                bars.append({**row, "status": "NOT_LOADED"})
+                continue
+            f = svc.market.bars_freshness(sym)
+            bars.append({**row, "status": f["freshness"], "last_finished_bar": f.get("last_finished_bar"),
+                         "fetched_at": f.get("fetched_at"), "refresh_failed": svc.market.bar_info(sym).get("refresh_failed")})
+        last = svc.db.one("SELECT version, name, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 1")
+        repairs = [dict(r) for r in svc.db.query("SELECT id, action, at, backup_path FROM maintenance_log "
+                                                 "ORDER BY id DESC LIMIT 5")]
+        recon = diagnose(svc.db, svc.market) if svc.settings.features.get("unified_positions") else None
+        out.update({
+            "quotes": {"open_positions": len(positions), "by_freshness": fresh_counts,
+                       "stale": fresh_counts.get("STALE", 0) + fresh_counts.get("UNKNOWN", 0)},
+            "positions_missing_valuations": missing, "missing_option_chains": chains, "history": bars,
+            "snapshots": snapshot_status(svc.db) if svc.settings.features.get("unified_positions") else None,
+            "migration": {"schema_version": svc.db.schema_version(), "latest": dict(last) if last else None,
+                          "backup_before_last_migration": svc.db.backup_before_migration.name
+                          if svc.db.backup_before_migration else None},
+            "reconciliation": {"summary": recon["summary"], "needs_repair": recon["needs_repair"],
+                               "needs_attention": recon["needs_attention"], "database_ok": recon["database"]["ok"]}
+            if recon else None,
+            "repairs": repairs, "recent_problems": events.recent(30),
+            "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
         return clean(out)
 
     @router.get("/research/runs")

@@ -132,6 +132,8 @@ def test_a_failed_migration_leaves_the_file_as_it_was(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         Database(path)
     assert table_rows(path) == before           # the broken migration's change was rolled back
+    copies = list((path.parent / "backups").glob(f"*-before-migration-{latest() + 1}-*.db"))
+    assert len(copies) == 1 and table_rows(copies[0]) == before    # and the copy taken first is there
     conn = sqlite3.connect(path)
     assert conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == latest()
     conn.close()

@@ -291,8 +291,9 @@ class TradeAssistant:
                                                      "cannot tell how fresh it is. Check the bid and ask "
                                                      "against your broker's screen before using these prices."})
             elif age > 300:
-                out.append({"level": "warn", "text": f"This contract's quote last changed {age / 60:.0f} "
-                                                     "minutes ago. Either few market makers are active in "
+                out.append({"level": "warn", "text": "The quote for this contract is stale. Refresh the chain "
+                                                     f"before evaluating it. It last changed {age / 60:.0f} "
+                                                     "minutes ago: either few market makers are active in "
                                                      "it or the data is out of date; check it against your "
                                                      "broker's screen."})
         return out
