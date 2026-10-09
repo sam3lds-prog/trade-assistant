@@ -841,6 +841,11 @@ class TradeAssistant:
                         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, fetched_at = excluded.fetched_at",
                         (json.dumps({"run_id": run_id, "run_at": run_at, **meta}), datetime.now().timestamp()))
         study.update({"run_id": run_id, "run_at": run_at})
+        from . import runs
+        runs.attach(self.db, study, "PATTERNS", {"symbols": sorted(frames), "years": years, "horizons": horizons,
+                                                 "cost_bps": self.settings.stock_cost_bps},
+                    {**frames, **({"SPY": benchmark} if benchmark is not None else {})}, self.market.info.mode, None,
+                    ("caveats",))
         return study
 
     def last_pattern_run(self) -> dict[str, Any] | None:
@@ -888,6 +893,12 @@ class TradeAssistant:
             raise RequestError(str(exc)) from exc
         result["data_warnings"] = warnings
         result["data_source"] = self.market.info.mode
+        from dataclasses import asdict
+        from . import runs
+        runs.attach(self.db, result, "BACKTEST", {"params": asdict(self._params(params)), "symbols": sorted(frames),
+                                                  "years": years, "start": start, "n_trials": n_trials},
+                    frames, self.market.info.mode, None,
+                    ("total_return_pct", "sharpe", "max_drawdown_pct", "num_trades", "start_date", "end_date"))
         if len(result["trades"]) > 500:
             result["trades_truncated"] = len(result["trades"])
             result["trades"] = result["trades"][-500:]
@@ -904,6 +915,11 @@ class TradeAssistant:
             raise RequestError(str(exc)) from exc
         result["data_warnings"] = warnings
         result["data_source"] = self.market.info.mode
+        from dataclasses import asdict
+        from . import runs
+        runs.attach(self.db, result, "WALK_FORWARD", {"params": asdict(self._params(params)), "symbols": sorted(frames),
+                                                      "years": years, "train_days": train_days, "test_days": test_days},
+                    frames, self.market.info.mode, None, ("out_of_sample", "avg_train_sharpe", "avg_test_sharpe"))
         return clean(result)
 
     def _params(self, overrides: dict[str, Any]) -> BacktestParams:

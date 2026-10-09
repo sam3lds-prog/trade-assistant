@@ -103,35 +103,57 @@ def excursions(pos: dict[str, Any], bars: pd.DataFrame | None, until: str | None
             "closed_beyond_invalidation": held_past, "reached_target_1": reached, "days": int(len(window))}
 
 
-def behaviour(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> list[str]:
-    flags = []
-    if exc.get("available"):
-        if exc["closed_beyond_invalidation"] and pos["status"] == "CLOSED":
-            # The stock closed through the invalidation price and the trade was still open on a later bar.
-            flags.append("held_past_invalidation")
-        if (pos["status"] == "CLOSED" and not exc["closed_beyond_invalidation"] and pos.get("target_1") is not None
-                and not exc["reached_target_1"]):
-            flags.append("exited_before_target")
+def behaviour_detail(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> dict[str, bool | None]:
+    """Each habit as True (it happened), False (checked, it did not) or None (it could not be
+    checked: no price history, no entry-time context, no risk measure, or it does not apply).
+    A check that could not be made is never counted as "did not happen"."""
+    out: dict[str, bool | None] = {}
+    closed = pos["status"] == "CLOSED"
+    if exc.get("available") and closed:
+        out["held_past_invalidation"] = bool(exc["closed_beyond_invalidation"]) if pos.get("invalidation_price") is not None \
+            else None
+        out["exited_before_target"] = (not exc["closed_beyond_invalidation"] and not exc["reached_target_1"]) \
+            if pos.get("target_1") is not None else None
+    else:
+        out["held_past_invalidation"] = out["exited_before_target"] = None
     execs = pos.get("executions", [])
     opening = ("BUY",) if pos["direction"] == "LONG" else ("SELL_SHORT", "SELL")
     adds = [e for e in execs if e["side"] in opening]
-    if len(adds) > 1:
-        first = adds[0]["price"]
-        sign = 1 if pos["direction"] == "LONG" else -1
-        if any(sign * (e["price"] - first) < 0 for e in adds[1:]):
-            flags.append("added_to_a_loser")
+    sign = 1 if pos["direction"] == "LONG" else -1
+    out["added_to_a_loser"] = bool(len(adds) > 1 and any(sign * (e["price"] - adds[0]["price"]) < 0 for e in adds[1:]))
     risk = pos["ledger"].get("initial_risk")
-    if risk and risk_limit and risk > risk_limit * 1.001:
-        flags.append("oversized")
-    entry = entry_context(pos)[0] or {}
-    state = entry.get("trend_state")
+    out["oversized"] = bool(risk > risk_limit * 1.001) if risk and risk_limit else None
+    entry = entry_context(pos)[0]
+    state = (entry or {}).get("trend_state")
     bias = pos.get("bias") or (1 if pos["direction"] == "LONG" else -1)
-    if state and ((bias > 0 and state in DOWN_STATES) or (bias < 0 and state in UP_STATES)):
-        flags.append("against_the_trend")
-    if pos.get("legacy_overrides"):
-        flags.append("overrode_a_limit")
-    return flags
+    out["against_the_trend"] = bool((bias > 0 and state in DOWN_STATES) or (bias < 0 and state in UP_STATES)) \
+        if state else None
+    # Ticket limits exist only for option-journal trades; for others the habit does not apply.
+    out["overrode_a_limit"] = bool(pos.get("legacy_overrides")) if (pos.get("legacy_trade_id") or "legacy_overrides" in pos) \
+        else None
+    return out
 
+
+def behaviour(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> list[str]:
+    """The habits that happened (behaviour_detail)."""
+    return [k for k, v in behaviour_detail(pos, exc, risk_limit).items() if v is True]
+
+
+DEFINITIONS = {
+    "trade": "One closed position, from its first fill to the fill that closed it, however many fills it took. "
+             "Partial exits and adds belong to that one trade.",
+    "pnl": "Net economic profit: realized from the fills after their fees, plus borrow fees, dividends and cash "
+           "adjustments recorded on the position.",
+    "win": "A trade with a net profit above zero; a loss is below zero; exactly zero is neither.",
+    "profit_factor": "Gross profit of the wins divided by gross loss of the losses; none when there are no losses.",
+    "expectancy": "Average net profit per trade, in dollars; in R, over the trades that have an initial risk.",
+    "r_multiple": "Net profit divided by the initial risk (positions.initial_risk).",
+    "drawdown": "Deepest fall of the running total of closed results from its peak, in trade order by close date.",
+    "mae_mfe": "Worst and best the stock moved against and for the trade on daily highs and lows from the day after "
+               "entry to the exit day; the entry day's own range is not counted.",
+    "habits": "Each habit is compared with trades checked and found without it; trades that could not be checked "
+              "(no price history, no entry context, no risk) are left out of both groups.",
+}
 
 BEHAVIOUR_WORDS = {
     "held_past_invalidation": "Held after the stock closed through the invalidation price",
@@ -144,11 +166,17 @@ BEHAVIOUR_WORDS = {
 
 
 def trade_row(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> dict[str, Any]:
+    """One closed position lifecycle as one trade. Its result is the net economic profit: what the
+    fills made after their fees, plus the borrow fees, dividends and cash adjustments recorded
+    on it (positions.financing)."""
     context, missing_context = entry_context(pos)
     entry = context or {}
     led = pos["ledger"]
     risk = led.get("initial_risk")
-    pnl = led["realized_pnl"]
+    fin = pos.get("financing") or {}
+    trading = led["realized_pnl"]
+    pnl = trading + float(fin.get("financing_total") or 0.0)
+    detail = behaviour_detail(pos, exc, risk_limit)
     days = None
     if pos.get("opened_at") and pos.get("closed_at"):
         days = (datetime.fromisoformat(pos["closed_at"]) - datetime.fromisoformat(pos["opened_at"])).total_seconds() / 86400
@@ -156,11 +184,13 @@ def trade_row(pos: dict[str, Any], exc: dict[str, Any], risk_limit: float) -> di
             "instrument_type": pos["instrument_type"], "direction": pos["direction"],
             "bias": pos.get("bias"), "setup_type": pos.get("setup_type") or "not given",
             "opened_at": pos.get("opened_at"), "closed_at": pos.get("closed_at"), "days_held": days,
-            "pnl": pnl, "fees": led["fees"], "r_multiple": pnl / risk if risk else None, "initial_risk": risk,
+            "pnl": pnl, "trading_pnl": trading, "financing": pnl - trading, "borrow_status": fin.get("borrow_status"),
+            "fees": led["fees"], "r_multiple": pnl / risk if risk else None, "initial_risk": risk,
+            "behaviour_checks": detail, "lifecycle_issues": len(led.get("lifecycle_issues") or []),
             "trend_at_entry": entry.get("trend_state") or "not recorded",
             "regime_at_entry": entry.get("market_regime") or "not recorded",
             "entry_context": "available" if context is not None else missing_context,
-            "excursions": exc, "behaviour": behaviour(pos, exc, risk_limit), "data_source": pos.get("data_source")}
+            "excursions": exc, "behaviour": [k for k, v in detail.items() if v is True], "data_source": pos.get("data_source")}
 
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -220,10 +250,12 @@ def journal_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         curve.append({"date": (r["closed_at"] or "")[:10], "equity": equity, "trade": r["id"]})
     behaviours = []
     for flag, words in BEHAVIOUR_WORDS.items():
-        with_ = [r for r in rows if flag in r["behaviour"]]
-        without = [r for r in rows if flag not in r["behaviour"]]
+        checks = [r.get("behaviour_checks", {}).get(flag, flag in r["behaviour"]) for r in rows]
+        with_ = [r for r, c in zip(rows, checks) if c is True]
+        without = [r for r, c in zip(rows, checks) if c is False]       # checked and not done; unknown left out
         if with_:
-            behaviours.append({"key": flag, "label": words, "with": summarize(with_), "without": summarize(without)})
+            behaviours.append({"key": flag, "label": words, "with": summarize(with_), "without": summarize(without),
+                               "not_checked": sum(1 for c in checks if c is None)})
     overall = summarize(rows)
     notes = []
     if rows and not overall["enough"]:
@@ -234,6 +266,13 @@ def journal_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
                      "figures.")
     if any(r["data_source"] == "demo" for r in rows):
         notes.append("Some trades were recorded on demo data.")
+    if any(r.get("borrow_status") in ("UNKNOWN", "PARTIAL") for r in rows):
+        k = sum(1 for r in rows if r.get("borrow_status") in ("UNKNOWN", "PARTIAL"))
+        notes.append(f"{k} short trade{'s have' if k != 1 else ' has'} borrow fees not recorded for every day, so "
+                     "their net profit leaves those costs out.")
+    if any(r.get("lifecycle_issues") for r in rows):
+        notes.append("Some positions were opened again after closing, which versions before 2.1.1 allowed; each counts "
+                     "as one trade here.")
     without = [r for r in rows if r.get("entry_context", "available") != "available"]
     if without:
         hind = sum(1 for r in without if r["entry_context"] == "recorded with hindsight")
@@ -243,7 +282,10 @@ def journal_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
                        "habit. Rebuilding snapshots can add it where the price history allows.")
     return {"overall": overall, "max_drawdown": dd, "equity_curve": curve,
             "coverage": {"trades": len(rows), "entry_context": len(rows) - len(without),
-                         "excursions": sum(1 for r in rows if r["excursions"].get("available"))},
+                         "excursions": sum(1 for r in rows if r["excursions"].get("available")),
+                         "r_multiple": sum(1 for r in rows if r["r_multiple"] is not None),
+                         "borrow_known": sum(1 for r in rows if r.get("borrow_status") not in ("UNKNOWN", "PARTIAL"))},
+            "definitions": DEFINITIONS,
             "by_setup": _group(rows, lambda r: r["setup_type"]),
             "by_direction": _group(rows, lambda r: "bet on a rise" if (r["bias"] or 0) > 0 else "bet on a fall"),
             "by_instrument": _group(rows, lambda r: {"STOCK": "stock", "OPTION": "calls and puts"}.get(r["instrument_type"], r["instrument_type"])),
@@ -264,6 +306,7 @@ def position_analytics(pos: dict[str, Any], exc: dict[str, Any], risk_limit: flo
                if entry.get(f) is not None or (last or {}).get(f) is not None]
     return {"id": pos["id"], "description": pos.get("description"), "status": pos["status"], "pnl": pos.get("pnl"),
             "excursions": exc, "behaviour": [{"key": b, "label": BEHAVIOUR_WORDS[b]} for b in behaviour(pos, exc, risk_limit)],
+            "behaviour_checks": behaviour_detail(pos, exc, risk_limit),
             "compare": compare, "compared_with": (last or {}).get("snapshot_type"),
             "thesis_check": pos.get("thesis_check"), "days_held": pos.get("days_held"),
             "fills": len(pos.get("executions", []))}

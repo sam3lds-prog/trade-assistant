@@ -614,6 +614,13 @@ function ticketPanel(data, request) {
     el("div", { class: "row", style: "margin-top:12px" }, check, save), error, result);
 }
 
+// Which settings, data and code produced a research result, so it can be reproduced or compared (runs.py).
+function runLine(run) {
+  if (!run) return null;
+  return el("p", { class: "small muted", title: `Settings ${run.config_hash} · data ${run.data_hash} · result ${run.result_hash}${run.seed !== null && run.seed !== undefined ? ` · seed ${run.seed}` : ""}` },
+    `Run ${run.id ?? "(not saved)"} · app ${run.versions ? run.versions.app : ""} · settings ${run.config_hash.slice(0, 8)} · data ${run.data_hash.slice(0, 8)} · result ${run.result_hash.slice(0, 8)}. The same settings and data always give the same result.`);
+}
+
 function metric(value, label) { return el("div", { class: "metric" }, el("div", { class: "v" }, value), el("div", { class: "k", text: label })); }
 
 /* ---------- view: research ---------- */
@@ -1414,6 +1421,7 @@ function sharpeWord(sig) {
 
 function renderBacktest(r) {
   const frag = el("div");
+  const line = runLine(r.run);
   if (r.data_source === "demo") frag.append(banner("fail", "This run used made-up demo prices. The numbers show how the screen works, not how the strategy performs."));
   const b = r.benchmark;
   frag.append(el("div", { class: "panel" },
@@ -1443,6 +1451,7 @@ function renderBacktest(r) {
         { label: "Entry", num: true, cell: t => money(t.entry_price) }, { label: "Exit", num: true, cell: t => money(t.exit_price) },
         { label: "Profit or loss", num: true, cell: t => `${money(t.pnl, 0)} (${signedPct(t.pnl_pct)})` },
         { label: "Why it closed", cell: t => words[t.exit_reason] || t.exit_reason }], r.trades.slice(-100).reverse()))));
+  if (line) frag.append(line);
   return frag;
 }
 
@@ -1466,6 +1475,8 @@ function renderWalkForward(w) {
       { label: "Return", num: true, cell: x => signedPct(x.test_return_pct) }, { label: "Trades", num: true, cell: x => x.test_trades }], w.folds),
     el("ul", { class: "plain small muted" }, w.notes.map(t => el("li", { text: t }))),
     (w.data_warnings || []).map(x => banner("warn", x))));
+  const line = runLine(w.run);
+  if (line) frag.append(line);
   return frag;
 }
 

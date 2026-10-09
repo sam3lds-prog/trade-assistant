@@ -188,3 +188,20 @@ Version set to 2.2.0. Tests: 454 passed, 2 skipped.
 
 Known limitations: no market-holiday calendar (one extra day is tolerated); option chains
 are not cached, so a failed chain shows as no price rather than a stale one.
+
+### Sprint 6: analytics, signals and backtests validated (2.3)
+
+Migration 7 adds `research_runs`.
+
+| Requirement | Done | Where | Tests (`test_validation.py` unless noted) |
+| --- | --- | --- | --- |
+| 5.1 Journal analytics | One definition: a trade is one position lifecycle; result is net economic profit (trading plus financing); definitions in the response; habits are True, False or not checked, and unchecked trades are left out of both comparison groups (a confirmed defect: 2.1 counted trades without price history as "did not hold past invalidation"); coverage of entry context, excursions, R and borrow costs; notes for unknown borrow costs and reopened positions | `analytics.py`, `v2.js` | `test_5_1_*` (3) |
+| 5.2 Trend and reversal causality | Audit: the engines are causal. New harness on three random walks and three cut points checks indicators, patterns, trend states, reversal stages and events and backtest conditions against a truncated history, and recorded signals and their outcomes | tests | `test_5_2_*` (4) plus existing truncation tests in `test_trend.py`, `test_reversal.py`, `test_regime.py`, `test_signals.py`, `test_backtest.py`, `test_backtest_v2.py` |
+| 5.3 Calibration | Dependence-adjusted intervals on separate periods (a confirmed defect: 2.1's intervals treated overlapping cases as independent, so they were too narrow); naive interval kept for reference; held-out check on the latest 30% of dates and `calibration_status`; frequencies labelled as historical, not forecasts | `signalbook.py`, `v2.js` | `test_5_3_*` (2) |
+| 5.4 Backtest | Audit (all confirmed in place, with tests): next-open entries, short direction, borrow fees, stop before target, gap fills, slippage and commission, holding and end-of-test exits, cooldown, cash and position limits, survivorship note, options refused. New: walk-forward choices unchanged when every price after the training window is scrambled; Monte Carlo identical with the same seed; position limits under constant signals | `backtest.py`, `backtest_v2.py` | `test_5_4_*` (3) plus `test_backtest.py`, `test_backtest_v2.py` |
+| 5.5 Reproducibility | `runs.py`: settings, data and result hashes for backtests, walk-forwards, pattern runs and signal histories; stored, listed and compared; identical inputs give identical results | `runs.py`, `analysis.py`, `service.py`, `api_v2.py`, UI | `test_5_5_*` (2) |
+
+Tests: 468 passed, 2 skipped.
+
+Known limitations: MAE and MFE use daily bars, so the entry day's own range is not counted.
+Calibration and signal histories built before 2.3 keep their old intervals until rebuilt.

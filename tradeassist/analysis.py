@@ -251,9 +251,11 @@ class Analyst:
         except DataError:
             spy = None
         built, warnings, days, total = [], [], [], 0
+        loaded: dict[str, pd.DataFrame] = {"SPY": spy}
         for sym in dict.fromkeys(names):
             try:
                 df = self.market.enriched(sym, years, complete=True)
+                loaded[sym] = df
                 sector = self.sector(sym)
                 bench = {"SPY": spy}
                 if sector:
@@ -278,6 +280,9 @@ class Analyst:
                 "symbols": built, "years": years, "occurrences": total, "warnings": warnings,
                 "signal_engine_version": SIGNAL_ENGINE_VERSION, "trend_engine_version": TREND_ENGINE_VERSION,
                 "calibration": calibration}
+        from . import runs
+        runs.attach(self.svc.db, meta, "SIGNAL_HISTORY", {"symbols": built, "years": years}, loaded, source, None,
+                    ("occurrences", "symbols"))
         self.svc.db.cache_put(f"signals:history:{source}", meta)
         return meta
 
@@ -681,11 +686,20 @@ class Analyst:
         backtest_v2.validate(strategy)
         frames, states, regimes, warnings = self._backtest_inputs(req.get("symbols"), years)
         start = (datetime.now(NY).date() - pd.Timedelta(days=int(years * 365.25))).isoformat()
-        out = backtest_v2.run(frames, states, regimes, strategy, self._bt_params(req.get("params")), start,
+        params = self._bt_params(req.get("params"))
+        out = backtest_v2.run(frames, states, regimes, strategy, params, start,
                               bool(req.get("monte_carlo", True)), int(req.get("n_trials") or 1))
         out["data_warnings"] = warnings
         out["data_source"] = self.market.info.mode
         out["trend_engine_version"] = TREND_ENGINE_VERSION
+        from . import runs
+        from dataclasses import asdict
+        runs.attach(self.svc.db, out, "BACKTEST_V2",
+                    {"strategy": strategy, "params": asdict(params), "symbols": sorted(frames), "years": years,
+                     "start": start, "monte_carlo": bool(req.get("monte_carlo", True)),
+                     "n_trials": int(req.get("n_trials") or 1)},
+                    frames, self.market.info.mode, backtest_v2.MC_SEED,
+                    ("total_return_pct", "sharpe", "max_drawdown_pct", "num_trades", "start_date", "end_date"))
         if len(out["trades"]) > 500:
             out["trades_truncated"] = len(out["trades"])
             out["trades"] = out["trades"][-500:]
@@ -701,11 +715,18 @@ class Analyst:
         strategy = self._strategy(req)
         backtest_v2.validate(strategy)
         frames, states, regimes, warnings = self._backtest_inputs(req.get("symbols"), years)
-        out = backtest_v2.run_walk_forward(frames, states, regimes, strategy, self._bt_params(req.get("params")),
+        params = self._bt_params(req.get("params"))
+        out = backtest_v2.run_walk_forward(frames, states, regimes, strategy, params,
                                            req.get("grid"), train, test, bool(req.get("anchored")))
         out["data_warnings"] = warnings
         out["data_source"] = self.market.info.mode
-        return out
+        from . import runs
+        from dataclasses import asdict
+        return runs.attach(self.svc.db, out, "WALK_FORWARD_V2",
+                           {"strategy": strategy, "params": asdict(params), "symbols": sorted(frames), "years": years,
+                            "grid": req.get("grid"), "train_days": train, "test_days": test,
+                            "anchored": bool(req.get("anchored"))},
+                           frames, self.market.info.mode, None, ("out_of_sample", "avg_train_sharpe", "avg_test_sharpe"))
 
     # --- alerts ---------------------------------------------------------------------------------------
     def alerts(self) -> dict[str, Any]:
