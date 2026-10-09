@@ -304,3 +304,21 @@ def financing_and_option_events(cur: sqlite3.Cursor) -> None:
         created_at             TEXT NOT NULL
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_option_events_position ON option_events (position_id, event_at)")
+
+
+@migration(7, "research runs: the inputs, data fingerprint and results of each backtest and study")
+def research_runs(cur: sqlite3.Cursor) -> None:
+    """2.3: each backtest, walk-forward, pattern-lab run and signal-history build is recorded with
+    what produced it (runs.py), so a result can be reproduced and a change traced to the data
+    or to the settings."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS research_runs (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind           TEXT NOT NULL,                -- BACKTEST, BACKTEST_V2, WALK_FORWARD, WALK_FORWARD_V2, PATTERNS, SIGNAL_HISTORY
+        run_at         TEXT NOT NULL,
+        config_hash    TEXT NOT NULL,                -- strategy, parameters, symbols, dates, costs, seed, versions
+        data_hash      TEXT NOT NULL,                -- the price history it read
+        result_hash    TEXT NOT NULL,                -- its deterministic output
+        fingerprint_json TEXT NOT NULL,
+        summary_json   TEXT NOT NULL DEFAULT '{}'
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_research_runs_kind ON research_runs (kind, run_at)")

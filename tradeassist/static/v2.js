@@ -651,7 +651,8 @@ const VERDICT_WORDS = { supported: "passed", contradicted: "worked the wrong way
 const freqText = h => {
   if (!h || !h.cases) return el("span", { class: "muted", text: "no past cases" });
   const range = isNum(h.frequency_low) ? ` (${pct(100 * h.frequency_low, 0)}–${pct(100 * h.frequency_high, 0)})` : "";
-  return el("span", { title: `Average ${signedPct(100 * h.mean_return, 1)} over ${h.horizon} days, ${signedPct(100 * (h.mean_excess_vs_spy || 0), 1)} against SPY` },
+  const periods = isNum(h.independent_periods) ? ` ${num(h.independent_periods, 0)} separate periods; the range allows for cases that overlap.` : "";
+  return el("span", { title: `Historical frequency, not a forecast. Average ${signedPct(100 * h.mean_return, 1)} over ${h.horizon} days, ${signedPct(100 * (h.mean_excess_vs_spy || 0), 1)} against SPY.${periods}` },
     h.enough ? "" : statusTag("warn", "Few"), `${h.enough ? "" : " "}${pct(100 * h.frequency, 0)} of ${num(h.cases, 0)}${range}`);
 };
 
@@ -683,7 +684,7 @@ function renderSignals(box, g, reload) {
     box.append(el("h4", { text: "Is the evidence score calibrated?" }));
     if (!g.history_built) box.append(el("p", { class: "small muted", text: "Build the signal history to check the score against what followed." }));
     else {
-      box.append(el("p", { class: "small" }, sc.calibrated ? statusTag("pass", "Calibrated on this data") : statusTag("warn", "Not calibrated"), ` ${h.verdict}`));
+      box.append(el("p", { class: "small" }, calTag(h.calibration_status, sc.calibrated), ` ${h.verdict}`));
       if (b && b.cases > 0 && isNum(b.frequency)) box.append(el("p", { class: "small", text: `Net score ${num(sc.net_score_for_calibration, 0)} on ${shortDate(sc.date)} is in the ${num(b.low, 0)} to ${num(b.high, 0)} range. On ${num(b.cases, 0)} past days in that range across the stocks in the history, the stock was higher 10 days later ${pct(100 * b.frequency, 0)} of the time (${pct(100 * b.frequency_low, 0)}–${pct(100 * b.frequency_high, 0)})` +
         (h.same_regime && h.same_regime.cases > 0 ? `; ${pct(100 * h.same_regime.frequency, 0)} of ${num(h.same_regime.cases, 0)} in the same market regime.` : ".") }));
       else box.append(el("p", { class: "small muted", text: `Net score ${num(sc.net_score_for_calibration, 0)}: no past days in that range to compare with.` }));
@@ -708,7 +709,8 @@ function signalHistoryPanel() {
     if (!c.built) { body.replaceChildren(el("p", { class: "small muted", text: "Not built yet. It records every pattern and change of trend state on your watchlist over five years, with what followed, so live signals can be compared with their past cases and the trend score can be checked against outcomes." })); return; }
     const cal = c.calibration["10"];
     body.replaceChildren(el("p", { class: "small", text: `Built ${shortDate(c.run_at)} from ${c.symbols.length} stocks (${c.data_source} data, ${c.trend_engine_version}).` }),
-      el("p", { class: "small" }, cal.calibrated ? statusTag("pass", "Calibrated") : statusTag("warn", "Not calibrated"), ` ${cal.verdict}`),
+      el("p", { class: "small" }, calTag(cal.calibration_status, cal.calibrated), ` ${cal.verdict}`),
+      cal.interval_method ? el("p", { class: "small muted", text: `Ranges: ${cal.interval_method}.` }) : null,
       table([{ label: "Net score range", cell: b => `${num(b.low, 0)} to ${num(b.high, 0)}` }, { label: "Days", num: true, cell: b => num(b.cases, 0) },
         { label: "Higher 10 days later", num: true, cell: b => isNum(b.frequency) ? `${pct(100 * b.frequency, 0)} (${pct(100 * b.frequency_low, 0)}–${pct(100 * b.frequency_high, 0)})` : "n/a" },
         { label: "Average return", num: true, cell: b => isNum(b.mean_return) ? signedPct(100 * b.mean_return, 2) : "n/a" },
@@ -1008,6 +1010,11 @@ function stressPanel(r) {
   return box;
 }
 
+const CAL_TAG = { CALIBRATED: ["pass", "Calibrated, confirmed on held-out dates"], CALIBRATED_IN_SAMPLE_ONLY: ["warn", "Not confirmed on held-out dates"],
+  NOT_CALIBRATED: ["warn", "Not calibrated"], INSUFFICIENT_DATA: ["info", "Too little history"] };
+// Histories built before 2.3 have no status: fall back to the yes/no they recorded.
+const calTag = (status, calibrated) => status ? tagOf(CAL_TAG, status) : (calibrated ? statusTag("pass", "Calibrated on this data") : statusTag("warn", "Not calibrated"));
+
 /* ---------- journal analytics ---------- */
 const rText = v => isNum(v) ? `${v > 0 ? "+" : ""}${num(v, 2)}R` : "n/a";
 function statCells(g) {
@@ -1052,7 +1059,8 @@ function renderJournalStats(box, r) {
     box.append(el("h4", { text: "What your habits cost or earned" }), table([
       { label: "Habit", cell: b => b.label }, { label: "Trades", num: true, cell: b => num(b.with.trades, 0) },
       { label: "Per trade, with it", num: true, cell: b => `${signedMoney(b.with.expectancy)} (${rText(b.with.expectancy_r)})` },
-      { label: "Per trade, without it", num: true, cell: b => b.without.trades ? `${signedMoney(b.without.expectancy)} (${rText(b.without.expectancy_r)})` : "n/a" }], r.behaviour),
+      { label: "Per trade, without it", num: true, cell: b => b.without.trades ? `${signedMoney(b.without.expectancy)} (${rText(b.without.expectancy_r)})` : "n/a" },
+      { label: "Not checked", num: true, cell: b => isNum(b.not_checked) && b.not_checked ? el("span", { title: "No price history, entry context or risk to check these trades against: left out of both columns" }, num(b.not_checked, 0)) : "" }], r.behaviour),
       el("p", { class: "small muted", text: "MAE and MFE are the worst and best the stock moved while each trade was open, from daily highs and lows after the entry day; for calls and puts they are measured on the stock." }));
   }
 }
@@ -1215,6 +1223,8 @@ function renderBacktestV2(r) {
     { label: "Symbol", cell: t => t.symbol }, { label: "Side", cell: t => t.direction === "LONG" ? "Long" : "Short" },
     { label: "In", cell: t => shortDate(t.entry_date) }, { label: "Out", cell: t => shortDate(t.exit_date) },
     { label: "Result", num: true, cell: t => signedMoney(t.pnl) }, { label: "Why it ended", cell: t => t.exit_reason.replaceAll("_", " ").toLowerCase() }], r.trades.slice().reverse())));
+  const line = runLine(r.run);
+  if (line) frag.append(line);
   return frag;
 }
 
@@ -1229,6 +1239,8 @@ function renderWalkForwardV2(w) {
       { label: "Chosen", cell: f => Object.entries(f.chosen).map(([k, v]) => `${k.replace("_pct", "").replaceAll("_", " ")} ${k.endsWith("_pct") ? pct(100 * v, 0) : v}`).join(", ") },
       { label: "Test return", num: true, cell: f => signedPct(f.test_return_pct, 1) }, { label: "Trades", num: true, cell: f => num(f.test_trades, 0) }], w.folds),
     el("ul", { class: "plain small muted" }, w.notes.map(n => el("li", { text: n }))));
+  const wfLine = runLine(w.run);
+  if (wfLine) frag.append(wfLine);
   return frag;
 }
 {

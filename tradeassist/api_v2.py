@@ -277,6 +277,27 @@ def build_router(svc: Any) -> APIRouter:
             out["quote_freshness"] = {"freshness": "UNKNOWN", "completeness": "MISSING", "warnings": [str(exc)]}
         return clean(out)
 
+    @router.get("/research/runs")
+    def research_runs(kind: str | None = None, limit: int = 50):
+        from . import runs
+        return clean({"runs": runs.listing(svc.db, kind, max(1, min(limit, 500)))})
+
+    @router.get("/research/runs/compare")
+    def compare_runs(a: int, b: int):
+        from . import runs
+        ra, rb = runs.load(svc.db, a), runs.load(svc.db, b)
+        if ra is None or rb is None:
+            raise HTTPException(status_code=404, detail="No such run")
+        return clean(runs.compare(ra, rb))
+
+    @router.get("/research/runs/{run_id}")
+    def research_run(run_id: int):
+        from . import runs
+        r = runs.load(svc.db, run_id)
+        if r is None:
+            raise HTTPException(status_code=404, detail=f"No run {run_id}")
+        return clean(r)
+
     @router.get("/source/health")
     def source_health():
         """The data source's recent successes and failures (freshness.SourceHealth). No credentials."""

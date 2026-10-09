@@ -220,9 +220,12 @@ def monte_carlo(daily: np.ndarray, initial: float, paths: int = MC_PATHS, block:
                     "have produced in a different order; it does not test whether the edge is real."}
 
 
+MC_SEED = 7       # fixed, so the same data and settings always give the same Monte Carlo range
+
+
 def run(frames: dict[str, pd.DataFrame], states: dict[str, pd.DataFrame], regimes: pd.Series | None,
         strategy: dict[str, Any], params: BacktestParams, start: str | None = None,
-        with_monte_carlo: bool = True, n_trials: int = 1) -> dict[str, Any]:
+        with_monte_carlo: bool = True, n_trials: int = 1, seed: int = MC_SEED) -> dict[str, Any]:
     strategy = validate(strategy)
     calendar = Backtester(frames).calendar
     direction, score, counts = signal_matrices(frames, states, regimes, strategy, calendar)
@@ -234,7 +237,9 @@ def run(frames: dict[str, pd.DataFrame], states: dict[str, pd.DataFrame], regime
         point["benchmark"] = value
     result["signals"] = counts
     result["strategy"] = strategy
-    result["monte_carlo"] = monte_carlo(returns, params.initial_capital) if with_monte_carlo else None
+    result["monte_carlo"] = monte_carlo(returns, params.initial_capital, seed=seed) if with_monte_carlo else None
+    if result["monte_carlo"] is not None:
+        result["monte_carlo"]["seed"] = seed
     shorts = [t for t in result["trades"] if t["direction"] == "SHORT"]
     result["borrow_cost"] = float(sum(t.get("borrow_cost", 0.0) for t in shorts))
     result["notes"] = notes(result, params)
