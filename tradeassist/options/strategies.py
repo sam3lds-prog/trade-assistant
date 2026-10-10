@@ -510,6 +510,13 @@ class Strategies:
             if ai and ai.get("strategy") in TEMPLATES:
                 parsed["spec"] = {**{k: v for k, v in ai.items() if v is not None}, **{
                     k: v for k, v in parsed["spec"].items() if v is not None}}
+                if parsed["spec"].get("strikes"):
+                    fitted = _strikes_for(parsed["spec"]["strategy"], parsed["spec"]["strikes"])
+                    if fitted is None:
+                        parsed["spec"].pop("strikes")
+                        parsed["assumed"].append("strikes chosen by the template: the ones read do not fit it")
+                    else:
+                        parsed["spec"]["strikes"] = fitted
                 parsed["understood"].append("The strategy was read by the AI model, then checked against the chain")
                 parsed["source"] = "ai"
         if parsed["spec"].get("strategy") is None:

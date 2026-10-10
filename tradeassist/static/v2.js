@@ -1798,6 +1798,21 @@ function renderHealth(h, reload) {
   if (h.repairs.length) dbPanel.append(el("h4", { text: "Repairs" }), el("ul", { class: "small" }, h.repairs.map(r => el("li", { text: `${timeText(r.at)}: ${r.action.toLowerCase()}, copy saved as ${(r.backup_path || "").split(/[\\/]/).pop() || "none"}` }))));
   frag.append(dbPanel);
 
+  // 2.4: the AI plug-in and the news sources. Whether they are set up, never the keys.
+  if (h.ai || h.news) {
+    const a = h.ai || {}, n = h.news || {}, u = a.used_today || {};
+    frag.append(el("div", { class: "panel" }, el("h3", {}, "AI and news ", a.configured ? statusTag("pass", "AI set up") : statusTag("info", "AI off")),
+      el("div", { class: "metrics" },
+        metric(a.configured ? a.model : "off", a.configured ? `AI model${a.web_search ? ", with web search" : ", no web search"}` : (a.reason || "AI")),
+        metric(`${u.requests || 0} of ${a.daily_limit || 0}`, `AI requests today${u.failed ? ` (${u.failed} failed)` : ""}`),
+        metric(`${num((u.input_tokens || 0) + (u.output_tokens || 0), 0)}`, `Tokens today${u.web_searches ? `, ${u.web_searches} web searches` : ""}`),
+        metric(n.finnhub ? "Finnhub" : n.demo_headlines ? "Demo headlines" : "none", "Headlines from"),
+        metric(n.sec ? "on" : "off", "SEC filings")),
+      a.last_error ? el("p", { class: "small error", text: `Last AI error (${timeText(a.last_error.at)}): ${a.last_error.error}` }) : null,
+      n.last_error ? el("p", { class: "small error", text: `Last news error (${timeText(n.last_error.at)}, ${n.last_error.what}): ${n.last_error.error}` }) : null,
+      el("p", { class: "small muted", text: "Keys are read from .env and never shown or logged. AI requests are billed by Anthropic to the key's account; the daily limit is AI_DAILY_REQUESTS." })));
+  }
+
   frag.append(el("div", { class: "panel" }, el("h3", { text: "Recent problems" }),
     h.recent_problems.length ? table([
       { label: "When", cell: e => el("span", { class: "nowrap", text: timeText(e.at) }) },

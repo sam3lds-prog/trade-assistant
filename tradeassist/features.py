@@ -22,6 +22,8 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "options_lab": True,
     "scanner": True,
     "strategy_builder": True,
+    "market_news": True,
+    "ai_assistant": True,
     "options_backtest": False,
 }
 

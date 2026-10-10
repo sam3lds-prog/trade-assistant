@@ -540,4 +540,232 @@ if (BUILDERS.simulate) {
   };
 }
 
-Object.assign(BUILDERS, { lab: buildOptionsLab, scanner: buildScanner });
+/* ---------- market makeup, news and AI briefs ---------- */
+const AI_STATE = { status: null };
+const MARKET_NEXT = { symbol: null };
+async function aiStatus(force) {
+  if (!AI_STATE.status || force) AI_STATE.status = await api("/v2/ai/status");
+  return AI_STATE.status;
+}
+const safeUrl = u => typeof u === "string" && /^https?:\/\//i.test(u) ? u : null;
+const extLink = (url, text) => safeUrl(url) ? el("a", { href: url, target: "_blank", rel: "noopener noreferrer", text }) : el("span", { text });
+const TONE_TAG = t => !isNum(t) ? null : t > 0.15 ? statusTag("pass", "Positive") : t < -0.15 ? statusTag("fail", "Negative") : statusTag("info", "Neutral");
+const LEAN_WORDS = { POSITIVE: "mostly positive", NEGATIVE: "mostly negative", MIXED: "mixed" };
+const timeAgo = iso => {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso.length === 10 ? iso + "T12:00:00" : iso).getTime();
+  if (!isFinite(ms)) return "";
+  const h = ms / 3600000;
+  return h < 1 ? `${Math.max(1, Math.round(h * 60))} min ago` : h < 48 ? `${Math.round(h)} h ago` : shortDate(iso);
+};
+
+function headlineList(items, opts = {}) {
+  if (!items.length) return el("p", { class: "muted", text: opts.empty || "No headlines." });
+  return el("ul", { class: "headlines" }, items.slice(0, opts.limit || 40).map(it => el("li", {},
+    el("div", {}, it.kind === "filing" ? statusTag("info", "Filing") : TONE_TAG(it.tone), " ", extLink(it.url, it.headline)),
+    el("div", { class: "small muted" }, [it.source, timeAgo(it.published), it.tone_method === "ai" && it.why ? `AI: ${it.why}` : null].filter(Boolean).join(" · ")))));
+}
+
+function toneLine(t, method) {
+  if (!t || !t.count) return null;
+  return el("p", { class: "small" }, el("strong", { text: `Tone of ${t.count} headlines${method === "ai" ? " (read by AI)" : " (by word list)"}: ` }),
+    `${LEAN_WORDS[t.lean] || "mixed"}, ${t.positive} positive, ${t.negative} negative, ${t.neutral} neutral. The tone of headlines, not a forecast.`);
+}
+
+function sourcesList(sources) {
+  const good = (sources || []).filter(x => safeUrl(x.url));
+  if (!good.length) return el("p", { class: "small muted", text: "No web sources were used: the brief rests on the figures and headlines sent." });
+  return el("div", {}, el("h5", { text: "Sources" }), el("ol", { class: "small sources" }, good.map(x => el("li", {},
+    extLink(x.url, x.title || x.url), el("span", { class: "muted", text: `${x.cited ? " · cited" : ""}${x.page_age ? ` · ${x.page_age}` : ""}` })))));
+}
+
+function renderBrief(b) {
+  const f = b.brief;
+  const box = el("div", { class: "brief" });
+  const list = (title, items) => items && items.length ? el("div", {}, el("h5", { text: title }), el("ul", { class: "plain" }, items.map(t => el("li", { text: t })))) : null;
+  if (f) {
+    box.append(el("h4", { text: f.headline || "Brief" }), el("p", { text: f.summary }));
+    const cols = b.kind === "market"
+      ? [list("What is moving markets", f.drivers), list("Risks", f.risks), list("Coming up", f.watch)]
+      : [list("News that matters", f.news), f.options_view ? el("div", {}, el("h5", { text: "What the options imply" }), el("p", { text: f.options_view })) : null,
+        list("For", f.bull_points), list("Against", f.bear_points), list("Coming up", f.events)];
+    box.append(el("div", { class: "brief-grid" }, cols.filter(Boolean)));
+    if (f.social) box.append(el("p", { class: "small" }, statusTag("warn", "Unverified"), ` Social media and forums, found by web search: ${f.social}`));
+    const tag = f.tone || f.sentiment;
+    if (tag) box.append(el("p", { class: "small muted", text: `The model's overall read: ${tag}.` }));
+  } else {
+    box.append(banner("warn", "The answer did not come back in the expected form; here it is as written."), el("p", { class: "pre-wrap", text: b.text || "" }));
+  }
+  box.append(sourcesList(b.sources));
+  const u = b.usage || {};
+  box.append(el("p", { class: "small muted", text: `${b.model} · ${new Date(b.at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` +
+    `${b.cached ? " · saved answer, no new request" : ""} · ${num(u.input_tokens, 0)} tokens in, ${num(u.output_tokens, 0)} out, ${u.web_searches || 0} web search${u.web_searches === 1 ? "" : "es"}. ${b.note}` }),
+    el("details", { class: "small" }, el("summary", { text: "What was sent to the model" }), el("pre", { class: "sent", text: b.sent })));
+  return box;
+}
+
+function aiPanel(title, intro, run) {
+  const box = el("div", { class: "panel" }, el("h3", { text: title }), el("p", { class: "small muted", text: "Checking whether AI is set up…" }));
+  aiStatus().then(st => {
+    box.replaceChildren(el("h3", { text: title }));
+    if (!st.configured) {
+      box.append(el("p", { class: "small", text: `AI briefs are off: ${st.reason}. ${intro}` }),
+        el("p", { class: "small muted", text: "Add ANTHROPIC_API_KEY to .env and restart the app. Requests are billed by Anthropic to that API account; at most AI_DAILY_REQUESTS a day are made. Everything else on this screen works without it." }));
+      return;
+    }
+    const web = el("input", { type: "checkbox", checked: st.web_search, disabled: !st.web_search });
+    const go = el("button", { class: "primary", text: "Write it" });
+    const again = el("button", { class: "plain", text: "Write a fresh one" });
+    const err = el("div", { class: "error", role: "alert" });
+    const out = el("div");
+    const left = el("span", { class: "small muted", text: `${st.remaining_today} of ${st.daily_limit} requests left today · ${st.model}` });
+    const call = refresh => withBusy(refresh ? again : go, err, async () => {
+      out.classList.add("refetching");
+      try { out.replaceChildren(renderBrief(await run({ web_search: web.checked, refresh }))); }
+      finally { out.classList.remove("refetching"); const s2 = await aiStatus(true); left.textContent = `${s2.remaining_today} of ${s2.daily_limit} requests left today · ${s2.model}`; }
+    });
+    go.addEventListener("click", () => call(false));
+    again.addEventListener("click", () => call(true));
+    box.append(el("p", { class: "small muted", text: intro }),
+      el("div", { class: "row" }, go, again, el("label", { class: "check" }, web, st.web_search ? " Search the web for the latest news" : " Web search is off (AI_WEB_SEARCH=0)"), left), err, out);
+  }).catch(e => box.replaceChildren(el("h3", { text: title }), el("p", { class: "error", text: e.message })));
+  return box;
+}
+
+// Bars in HTML rather than SVG, so the labels stay readable at any width.
+function sectorChart(m) {
+  const rows = m.sectors.filter(r => isNum(r.month_pct));
+  if (!rows.length) return el("p", { class: "muted", text: "No sector fund history." });
+  const spy = (m.indexes.find(i => i.symbol === "SPY") || {}).month_pct;
+  const vals = rows.map(r => r.month_pct).concat(isNum(spy) ? [spy] : []);
+  const xs = niceScale(Math.min(0, ...vals), Math.max(0, ...vals), 4);
+  const at = v => 100 * (v - xs.lo) / (xs.hi - xs.lo);
+  const zero = at(0);
+  const marker = isNum(spy) ? el("i", { class: "spy-mark", style: `left: ${at(spy).toFixed(2)}%` }) : null;
+  const list = el("div", { class: "hbars", role: "list", "aria-label": "Sector funds, change over the last month" },
+    rows.map(r => {
+      const left = Math.min(at(r.month_pct), zero), width = Math.abs(at(r.month_pct) - zero);
+      return el("div", { class: "hbar", role: "listitem", title: `${r.name}: ${signedPct(r.month_pct, 1)} over a month, ${signedPct(r.day_pct, 1)} on the day, ${signedPct(r.month_vs_spy_pct, 1)} against SPY` },
+        el("span", { class: "hbar-name", text: `${r.name} (${r.symbol})` }),
+        el("span", { class: "hbar-track" }, el("i", { class: "zero-mark", style: `left: ${zero.toFixed(2)}%` }), marker ? marker.cloneNode() : null,
+          el("b", { class: r.month_pct >= 0 ? "up" : "down", style: `left: ${left.toFixed(2)}%; width: ${Math.max(width, 0.4).toFixed(2)}%` })),
+        el("span", { class: "hbar-value", text: signedPct(r.month_pct, 1) }));
+    }));
+  return el("div", {}, list, el("p", { class: "small muted" }, isNum(spy) ? `Dashed line: SPY ${signedPct(spy, 1)} over the same month. ` : "",
+    `Scale ${signedPct(xs.lo, 0)} to ${signedPct(xs.hi, 0)}; hover a bar for its day and its difference from SPY.`));
+}
+
+function renderMakeup(m) {
+  const frag = el("div");
+  for (const n of m.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
+  const idx = s => m.indexes.find(i => i.symbol === s);
+  const g = m.regime || {}, v = g.volatility || {}, b = m.breadth, spyOpt = m.options.find(o => o.symbol === "SPY");
+  frag.append(el("div", { class: "metrics" },
+    ...m.indexes.map(i => metric(signedPct(i.day_pct, 2), `${i.name} (${i.symbol}) ${i.bar_finished ? "on the day" : "today so far"}`)),
+    metric(v.source === "VIX" && isNum(v.vix) ? num(v.vix, 1) : isNum(v.spy_realized_20d) ? pct(100 * v.spy_realized_20d, 0) : "n/a", v.source === "VIX" ? "VIX" : "SPY 20-day realized volatility (no VIX)"),
+    metric(g.regime ? regimeTag(g.regime) : "n/a", "Market regime"),
+    metric(`${b.advancing} / ${b.declining}`, `Up / down on the day, of ${b.stocks} ${b.universe === "large_caps" ? "large companies" : "watchlist stocks"}`),
+    metric(isNum(b.above_200d_pct) ? pct(b.above_200d_pct, 0) : "n/a", `Above their 200-day average (${pct(b.above_50d_pct, 0)} above the 50-day)`),
+    metric(`${b.new_highs} / ${b.new_lows}`, "New 52-week highs / lows"),
+    metric(spyOpt ? ratioText(spyOpt.put_call_volume) : "n/a", "SPY put/call volume, nearest expirations")));
+  frag.append(table([
+    { label: "Index fund", cell: i => el("span", {}, el("strong", { text: i.symbol }), ` ${i.name}`) },
+    { label: "Close", num: true, cell: i => money(i.close) },
+    { label: "Day", num: true, cell: i => signedPct(i.day_pct, 2) },
+    { label: "5 days", num: true, cell: i => signedPct(i.week_pct, 1) },
+    { label: "Month", num: true, cell: i => signedPct(i.month_pct, 1) },
+    { label: "3 months", num: true, cell: i => signedPct(i.quarter_pct, 1) },
+    { label: "vs 200-day", num: true, cell: i => signedPct(i.vs_200d_pct, 1) }], m.indexes));
+  frag.append(el("h4", { text: "Sector funds over the last month" }), sectorChart(m));
+  if (b.unreadable) frag.append(el("p", { class: "small muted", text: `${b.unreadable} of ${b.asked} stocks could not be read and are left out of breadth (not counted as down).` }));
+  if (m.errors.length) frag.append(el("details", { class: "small" }, el("summary", { text: `${m.errors.length} could not be read` }), el("ul", { class: "plain" }, m.errors.map(e => el("li", { text: `${e.symbol}: ${e.error}` })))));
+  if (g.text) frag.append(el("p", { class: "small muted", text: `Regime: ${g.text}` }));
+  return frag;
+}
+
+function buildMarket() {
+  const breadthSel = el("select", { "aria-label": "Breadth over" }, el("option", { value: "large_caps", text: "100 large US companies" }), el("option", { value: "watchlist", text: "Watchlist" }));
+  const refresh = el("button", { class: "plain", text: "Refresh" });
+  const mErr = el("div", { class: "error", role: "alert" });
+  const mOut = el("div", {}, el("p", { class: "small muted" }, el("span", { class: "spinner" }), " Reading indexes, sectors and 100 stocks…"));
+  const loadMakeup = force => withBusy(refresh, mErr, async () => {
+    mOut.classList.add("refetching");
+    try { mOut.replaceChildren(renderMakeup(await api(`/v2/market/makeup?breadth=${breadthSel.value}${force ? "&refresh=true" : ""}`))); }
+    finally { mOut.classList.remove("refetching"); }
+  });
+  refresh.addEventListener("click", () => loadMakeup(true));
+  breadthSel.addEventListener("change", () => loadMakeup(false));
+  const newsOut = el("div", {}, el("p", { class: "small muted", text: "Loading headlines…" }));
+  const loadNews = () => api("/v2/news/market").then(n => {
+    newsOut.replaceChildren(...n.notes.slice(0, 1).map(t => el("p", { class: "small muted", text: t })), toneLine(n.tone, "words") || "",
+      ...n.errors.map(e => banner("warn", e)), headlineList(n.items, { limit: 25, empty: n.finnhub ? "No headlines." : "No market headlines without a news source." }));
+  }).catch(e => newsOut.replaceChildren(el("p", { class: "error", text: e.message })));
+  // one stock
+  const sym = el("input", { class: "sym", type: "text", value: "AAPL", "aria-label": "Ticker", autocomplete: "off", spellcheck: "false" });
+  const go = el("button", { class: "primary", text: "Headlines" });
+  const sErr = el("div", { class: "error", role: "alert" });
+  const sOut = el("div");
+  const brief = el("div");
+  let current = null;
+  const loadStock = () => withBusy(go, sErr, async () => {
+    const s = sym.value.trim().toUpperCase();
+    if (!s) throw new Error("Enter a ticker.");
+    sOut.classList.add("refetching");
+    try {
+      const n = await api(`/v2/news/${encodeURIComponent(s)}`);
+      current = n.symbol; sym.value = n.symbol;
+      const toneBox = el("div", {}, toneLine(n.tone, "words") || "", headlineList(n.items, { limit: 30, empty: "No headlines or filings in the last week." }));
+      const st = await aiStatus().catch(() => null);
+      const actions = el("div", { class: "row" });
+      if (st && st.configured) {
+        const readTone = el("button", { class: "plain", text: "Read the tone with AI" });
+        readTone.addEventListener("click", () => withBusy(readTone, sErr, async () => {
+          const t = await api("/v2/ai/tone", { symbol: current });
+          toneBox.replaceChildren(toneLine(t.tone, "ai") || "", t.summary ? el("p", { class: "small", text: t.summary }) : "",
+            headlineList([...t.items, ...n.items.filter(i => i.kind === "filing")], { limit: 30 }));
+          readTone.remove();
+        }));
+        actions.append(readTone);
+      }
+      sOut.replaceChildren(...n.notes.slice(0, 1).map(t => el("p", { class: "small muted", text: t })), ...n.errors.map(e => banner("warn", e)),
+        actions, toneBox);
+      brief.replaceChildren(aiPanel(`AI brief on ${current}`, `Claude reads ${current}'s price, indicators, options figures and these headlines${st && st.web_search ? ", searches the web for the latest news," : ""} and writes a short brief with its sources.`,
+        o => api(`/v2/ai/brief/${encodeURIComponent(current)}`, o)));
+    } finally { sOut.classList.remove("refetching"); }
+  });
+  go.addEventListener("click", loadStock);
+  sym.addEventListener("keydown", e => { if (e.key === "Enter") loadStock(); });
+  const view = el("section", {}, el("h2", { text: "Market & news" }),
+    el("p", { class: "lede", text: "The market's make-up from the app's own prices, the latest headlines and filings, and, with an Anthropic API key, AI briefs that pull in today's news with their sources. AI answers can be wrong: check the sources." }),
+    el("div", { class: "panel" }, el("div", { class: "row" }, el("h3", { class: "grow", text: "Market make-up" }), field("Breadth over", breadthSel), refresh), mErr, mOut),
+    aiPanel("AI market brief", "Claude reads the figures above and the market headlines, searches the web for today's news if you let it, and writes a short brief with its sources.",
+      o => api("/v2/ai/market-brief", o)),
+    el("div", { class: "panel" }, el("h3", { text: "Market headlines" }), newsOut),
+    el("div", { class: "panel" }, el("h3", { text: "A stock's headlines and filings" }), el("div", { class: "row" }, field("Ticker", sym), go), sErr, sOut),
+    brief);
+  let ran = false;
+  view.onShow = () => {
+    const next = MARKET_NEXT.symbol;
+    MARKET_NEXT.symbol = null;
+    if (next) sym.value = next;
+    if (!ran) { ran = true; loadMakeup(false); loadNews(); loadStock(); }
+    else if (next) loadStock();
+  };
+  return view;
+}
+
+// The Analyze screen gets the stock's latest headlines and, with AI set up, a brief.
+function newsSection(d) {
+  if (!featureOn("market_news")) return null;
+  const box = el("div", { class: "panel" }, el("h3", { text: "News" }), el("p", { class: "small muted", text: "Loading headlines…" }));
+  api(`/v2/news/${encodeURIComponent(d.symbol)}`).then(n => {
+    const more = el("button", { class: "plain small-btn", text: "More on Market & news" });
+    more.addEventListener("click", () => { MARKET_NEXT.symbol = d.symbol; show("market"); });
+    box.replaceChildren(el("h3", { text: "News" }), ...n.notes.slice(0, 1).map(t => el("p", { class: "small muted", text: t })),
+      toneLine(n.tone, "words") || "", headlineList(n.items, { limit: 6, empty: "No headlines or filings in the last week." }), BUILDERS.market ? more : "");
+  }).catch(e => box.replaceChildren(el("h3", { text: "News" }), el("p", { class: "small error", text: e.message })));
+  return box;
+}
+if (typeof ANALYSIS_SECTIONS !== "undefined") ANALYSIS_SECTIONS.push(newsSection);
+
+Object.assign(BUILDERS, { lab: buildOptionsLab, scanner: buildScanner, market: buildMarket });

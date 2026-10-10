@@ -342,3 +342,27 @@ ul.signal-list li { line-height: 1.35; }
 .dir { font-size: 0.75rem; }
 .dir.up { color: var(--pass); }
 .dir.down { color: var(--fail); }
+/* 2.4 market and news */
+ul.headlines { list-style: none; padding: 0; margin: 8px 0; }
+ul.headlines li { padding: 7px 0; border-bottom: 1px solid var(--line); }
+ul.headlines li:last-child { border-bottom: none; }
+ul.headlines a { color: var(--ink); }
+ol.sources { padding-left: 20px; margin: 4px 0 8px; }
+ol.sources li { margin: 2px 0; overflow-wrap: anywhere; }
+.brief h4 { margin-top: 4px; }
+.brief h5 { margin: 10px 0 4px; font-size: 0.86rem; color: var(--muted); font-weight: 600; }
+.brief-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px 20px; }
+pre.sent { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sunk); padding: 10px; border-radius: 6px; font-size: 0.8rem; max-height: 320px; overflow: auto; }
+.pre-wrap { white-space: pre-wrap; }
+h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
+.hbars { display: grid; gap: 6px; margin: 6px 0; }
+.hbar { display: grid; grid-template-columns: minmax(120px, 34%) 1fr 56px; align-items: center; gap: 10px; font-size: 0.86rem; }
+.hbar-name { text-align: right; color: var(--ink); }
+.hbar-value { font-variant-numeric: tabular-nums; }
+.hbar-track { position: relative; height: 16px; }
+.hbar-track b { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.hbar-track b.up { background: var(--div-pos); }
+.hbar-track b.down { background: var(--div-neg); }
+.hbar-track .zero-mark { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--muted); }
+.hbar-track .spy-mark { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 1px dashed var(--ink); }
+@media (max-width: 520px) { .hbar { grid-template-columns: 42% 1fr 48px; font-size: 0.8rem; gap: 6px; } }

@@ -222,6 +222,15 @@ class StrategyParse(Strict):
     symbol: str | None = Field(None, max_length=12)
 
 
+class BriefRequest(Strict):
+    web_search: bool = True
+    refresh: bool = False
+
+
+class ToneRequest(Strict):
+    symbol: str | None = Field(None, max_length=12)
+
+
 class ReversalOptions(Strict):
     symbol: str
     side: Literal["auto", "bottom", "top"] = "auto"
@@ -393,6 +402,8 @@ def build_router(svc: Any) -> APIRouter:
                                "needs_attention": recon["needs_attention"], "database_ok": recon["database"]["ok"]}
             if recon else None,
             "repairs": repairs, "recent_problems": events.recent(30),
+            "ai": svc.ai.status() if getattr(svc, "ai", None) else None,
+            "news": svc.news.status() if getattr(svc, "news", None) else None,
             "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         })
         return clean(out)
@@ -614,6 +625,70 @@ def build_router(svc: Any) -> APIRouter:
             return clean(strategies.parse_and_build(req.text, req.symbol, getattr(svc, "strategy_fallback", None)))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- market makeup, news and the AI plug-in (2.4) -------------------------------------------
+    # Anything that calls the AI model is a POST, so another web page cannot spend the key's budget
+    # through the browser (the same-origin check refuses its writes).
+    from .ai import AIClient, AIError
+    from .briefs import Briefs
+    from .makeup import MarketMakeup
+    from .news import NewsClient
+    ai = svc.ai if getattr(svc, "ai", None) else AIClient(svc.settings, svc.db)
+    news = svc.news if getattr(svc, "news", None) else NewsClient(svc.settings, svc.db, svc.sec)
+    makeup = MarketMakeup(svc, analyst)
+    briefs = Briefs(ai, svc, news, makeup, lab, analyst)
+    svc.ai, svc.news, svc.makeup, svc.briefs = ai, news, makeup, briefs
+    if getattr(svc, "strategy_fallback", None) is None:
+        svc.strategy_fallback = briefs.read_strategy
+
+    def ai_error(exc: AIError) -> HTTPException:
+        return HTTPException(status_code=503, detail=str(exc))
+
+    @router.get("/ai/status")
+    def ai_status():
+        return clean({**ai.status(), "news": news.status()})
+
+    @router.get("/market/makeup")
+    def market_makeup(breadth: str = "large_caps", refresh: bool = False):
+        need("market_news")
+        try:
+            return clean(makeup.build(breadth, refresh))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/news/market")
+    def market_news():
+        need("market_news")
+        return clean(news.market())
+
+    @router.get("/news/{symbol}")
+    def company_news(symbol: str, days: int = 7):
+        need("market_news")
+        return clean(news.company(svc._symbol(symbol), days))
+
+    @router.post("/ai/market-brief")
+    def ai_market_brief(req: BriefRequest):
+        need("market_news")
+        try:
+            return clean(briefs.market(web_search=req.web_search, refresh=req.refresh))
+        except AIError as exc:
+            raise ai_error(exc) from exc
+
+    @router.post("/ai/brief/{symbol}")
+    def ai_symbol_brief(symbol: str, req: BriefRequest):
+        need("market_news")
+        try:
+            return clean(briefs.symbol(symbol, web_search=req.web_search, refresh=req.refresh))
+        except AIError as exc:
+            raise ai_error(exc) from exc
+
+    @router.post("/ai/tone")
+    def ai_tone(req: ToneRequest):
+        need("market_news")
+        try:
+            return clean(briefs.headline_tone(req.symbol))
+        except AIError as exc:
+            raise ai_error(exc) from exc
 
     # --- portfolio risk ------------------------------------------------------------------------
     @router.get("/portfolio/risk")
