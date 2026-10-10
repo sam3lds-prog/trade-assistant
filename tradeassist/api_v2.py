@@ -195,6 +195,33 @@ class MonteCarloRequest(Strict):
     earnings_jump: bool = False
 
 
+class StrategyAdjust(Strict):
+    op: Literal["up", "down", "wider", "narrower", "leg"]
+    leg: int | None = Field(None, ge=0, le=3)
+    by: int | None = Field(None, ge=-1, le=1)
+
+
+class StrategyBuild(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    strategy: str = Field(..., min_length=1, max_length=40)
+    expiration: str | None = None
+    dte: int | None = Field(None, ge=1, le=1000)
+    far_expiration: str | None = None
+    far_days: int | None = Field(None, ge=7, le=400)
+    contracts: int = Field(1, ge=1, le=100)
+    delta: float | None = Field(None, gt=0, lt=100)
+    width: float | None = Field(None, gt=0)
+    strikes: list[float] | None = Field(None, min_length=1, max_length=4)
+    center: float | None = Field(None, gt=0)
+    after_earnings: bool = False
+    adjust: StrategyAdjust | None = None
+
+
+class StrategyParse(Strict):
+    text: str = Field(..., min_length=1, max_length=500)
+    symbol: str | None = Field(None, max_length=12)
+
+
 class ReversalOptions(Strict):
     symbol: str
     side: Literal["auto", "bottom", "top"] = "auto"
@@ -558,6 +585,33 @@ def build_router(svc: Any) -> APIRouter:
             return clean(scanner.flow(universe_name=universe, symbols=_symbols(symbols), max_dte=max_dte,
                                       expirations=expirations, min_volume=min_volume, min_vol_oi=min_vol_oi,
                                       min_premium=min_premium))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- strategy builder (2.4): multi-leg trades from listed contracts; models only -------------
+    from .options.strategies import Strategies
+    strategies = Strategies(svc)
+    svc.strategies = strategies
+
+    @router.get("/strategies")
+    def strategy_templates():
+        need("strategy_builder")
+        return {"templates": strategies.templates()}
+
+    @router.post("/strategies/build")
+    def strategy_build(req: StrategyBuild):
+        need("strategy_builder")
+        body = req.model_dump(exclude_none=True)
+        try:
+            return clean(strategies.build(body))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/strategies/parse")
+    def strategy_parse(req: StrategyParse):
+        need("strategy_builder")
+        try:
+            return clean(strategies.parse_and_build(req.text, req.symbol, getattr(svc, "strategy_fallback", None)))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

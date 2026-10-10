@@ -411,4 +411,133 @@ function buildScanner() {
   return view;
 }
 
+/* ---------- strategy builder, on the Simulate screen ---------- */
+const GROUP_WORDS = { bullish: "Expect a rise", bearish: "Expect a fall", neutral: "Expect a range", volatile: "Expect a big move", time: "Time decay" };
+const ROLE_SIDE = { buy: "Buy", sell: "Sell" };
+
+function renderStrategy(r, parsed, actions) {
+  const frag = el("div");
+  for (const n of r.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
+  if (parsed) frag.append(el("p", { class: "small" }, el("strong", { text: "Read as: " }), parsed.understood.join(", ") || "nothing specific",
+    parsed.assumed.length ? el("span", { class: "muted", text: ` · assumed: ${parsed.assumed.join(", ")}` }) : null));
+  const credit = r.net_mid < 0;
+  const rc = r.risk_check;
+  frag.append(...[el("h4", { text: `${r.label}: ${r.symbol} ${shortDate(r.expiration)}${r.far_expiration ? ` / ${shortDate(r.far_expiration)}` : ""} (${r.dte} days)` }),
+    el("p", { class: "small muted", text: r.description }),
+    table([
+      { label: "Leg", cell: l => l.role },
+      { label: "Action", cell: l => `${ROLE_SIDE[l.side]} ${l.contracts}` },
+      { label: "Contract", cell: l => `${shortDate(l.expiration)} ${num(l.strike, l.strike % 1 ? 2 : 0)} ${l.option_type}` },
+      { label: "Bid / ask", num: true, cell: l => `${num(l.bid)} / ${num(l.ask)}` },
+      { label: "Midpoint", num: true, cell: l => num(l.mid) },
+      { label: "Delta", num: true, cell: l => isNum(l.delta) ? l.delta.toFixed(2) : "n/a" }], r.legs),
+    el("div", { class: "metrics" },
+      metric(money(Math.abs(r.net_mid), 0), `${credit ? "Credit received" : "Debit paid"} at the midpoints (${money(Math.abs(r.net_natural), 0)} at the bid and ask)`),
+      metric(r.unlimited_gain ? "No limit" : money(r.max_gain, 0), "Most it can make at expiration"),
+      metric(r.unlimited_loss ? "No limit" : money(isNum(r.max_loss) ? -r.max_loss : null, 0), "Most it can lose at expiration"),
+      metric(r.breakevens.length ? r.breakevens.map(b => money(b)).join(" and ") : "none", "Breakeven at expiration"),
+      metric(pct(100 * r.p_profit_at_expiry, 0), "Chance of a profit at expiration, as option prices imply"),
+      metric(rc.status === "pass" ? statusTag("pass", "Within your limit") : rc.status === "fail" ? statusTag("fail", "Over your limit") : statusTag("info", "Not measured"), rc.text)),
+    r.exact ? null : el("p", { class: "small muted", text: "The legs expire on different days: the most it can make and lose are read from the model at the first expiration, not worked out exactly." }),
+    el("ul", { class: "plain small muted" }, r.choices.map(c => el("li", { text: c })))].filter(Boolean));
+  frag.append(actions);
+  return frag;
+}
+
+function strategyPanel(view) {
+  const symInput = view.querySelector("input.sym");
+  const text = el("input", { type: "text", style: "width: 100%", placeholder: "AAPL iron condor 45 days 16 delta, 5 wide", autocomplete: "off", "aria-label": "Describe the trade" });
+  const read = el("button", { class: "primary", text: "Build it" });
+  const tpl = el("select", { "aria-label": "Strategy" }, el("option", { text: "Loading…" }));
+  const exp = el("select", { "aria-label": "Expiration" }, el("option", { value: "", text: "Automatic" }));
+  const delta = el("input", { type: "number", min: 2, max: 98, step: 1, placeholder: "auto", "aria-label": "Delta of the main strike" });
+  const width = el("input", { type: "number", min: 0.5, step: 0.5, placeholder: "auto", "aria-label": "Width in dollars" });
+  const center = el("input", { type: "number", min: 0.01, step: 0.5, placeholder: "auto", "aria-label": "Middle strike" });
+  const qty = el("input", { type: "number", min: 1, max: 100, step: 1, value: 1, "aria-label": "How many" });
+  const build = el("button", { class: "plain", text: "Build" });
+  const fDelta = field("Delta (×100)", delta), fWidth = field("Wing width, $", width), fCenter = field("Middle strike", center);
+  const error = el("div", { class: "error", role: "alert" });
+  const out = el("div");
+  let templates = [], expFor = "";
+  const shownFor = () => templates.find(t => t.key === tpl.value);
+  const syncFields = () => {
+    const t = shownFor(); if (!t) return;
+    fDelta.classList.toggle("hidden", !t.uses_delta); fWidth.classList.toggle("hidden", !t.has_width);
+    fCenter.classList.toggle("hidden", !(t.key.includes("butterfly") || t.key.includes("straddle") || t.calendar || t.key.startsWith("long_c") || t.key.startsWith("long_p")));
+    delta.placeholder = t.defaults.delta ? String(Math.round(100 * t.defaults.delta)) : "auto";
+  };
+  async function loadExpirations() {
+    const symbol = symInput.value.trim().toUpperCase();
+    if (!symbol || symbol === expFor) return;
+    const d = await api(`/api/expirations?symbol=${encodeURIComponent(symbol)}`);
+    expFor = d.symbol;
+    exp.replaceChildren(el("option", { value: "", text: "Automatic" }), ...d.expirations.filter(e => e.dte >= 1).map(e => el("option", { value: e.date, text: `${shortDate(e.date)} (${e.dte} days)` })));
+  }
+  const actions = r => {
+    const t = templates.find(x => x.key === r.strategy) || {};
+    const move = (op, label) => { const b = el("button", { class: "plain small-btn", text: label }); b.addEventListener("click", () => send({ ...r.request, adjust: { op } }, b)); return b; };
+    const sim = el("button", { class: "primary", text: "Simulate this" });
+    sim.addEventListener("click", () => view.loadPosition(r.symbol, r.legs.map(l => ({ expiration: l.expiration, option_type: l.option_type, strike: l.strike,
+      side: l.side, contracts: l.contracts, entry_price: l.mid, entry_source: "midpoint" }))));
+    return el("div", { class: "row" }, sim, move("down", "Strikes down"), move("up", "Strikes up"),
+      t.has_wings ? move("narrower", "Narrower") : null, t.has_wings ? move("wider", "Wider") : null,
+      el("span", { class: "small muted", text: "Modelled only: the app never places orders." }));
+  };
+  async function send(body, button, parsed) {
+    return withBusy(button, error, async () => {
+      out.classList.add("refetching");
+      try {
+        const r = parsed === undefined ? await api("/v2/strategies/build", body) : body;
+        out.replaceChildren(renderStrategy(r, parsed, actions(r)));
+      } finally { out.classList.remove("refetching"); }
+    });
+  }
+  build.addEventListener("click", () => {
+    const symbol = symInput.value.trim().toUpperCase();
+    if (!symbol) { error.textContent = "Enter a ticker above."; return; }
+    const body = { symbol, strategy: tpl.value, contracts: Math.max(1, Math.round(Number(qty.value) || 1)) };
+    if (exp.value) body.expiration = exp.value;
+    if (delta.value && !fDelta.classList.contains("hidden")) body.delta = Number(delta.value);
+    if (width.value && !fWidth.classList.contains("hidden")) body.width = Number(width.value);
+    if (center.value && !fCenter.classList.contains("hidden")) body.center = Number(center.value);
+    send(body, build);
+  });
+  const describe = () => withBusy(read, error, async () => {
+    if (!text.value.trim()) throw new Error("Describe the trade first.");
+    out.classList.add("refetching");
+    try {
+      const d = await api("/v2/strategies/parse", { text: text.value, symbol: symInput.value.trim() || null });
+      if (d.result.symbol !== symInput.value.trim().toUpperCase()) { symInput.value = d.result.symbol; symInput.dispatchEvent(new Event("change")); }
+      out.replaceChildren(renderStrategy(d.result, d.parsed, actions(d.result)));
+    } finally { out.classList.remove("refetching"); }
+  });
+  read.addEventListener("click", describe);
+  text.addEventListener("keydown", e => { if (e.key === "Enter") describe(); });
+  tpl.addEventListener("change", syncFields);
+  symInput.addEventListener("change", () => loadExpirations().catch(() => {}));
+  api("/v2/strategies").then(d => {
+    templates = d.templates;
+    const groups = {};
+    for (const t of templates) (groups[t.group] = groups[t.group] || []).push(t);
+    tpl.replaceChildren(...Object.entries(groups).map(([g, ts]) => el("optgroup", { label: GROUP_WORDS[g] || g },
+      ts.map(t => el("option", { value: t.key, text: `${t.label}${t.defined_risk ? "" : " (loss not limited)"}`, selected: t.key === "iron_condor" })))));
+    syncFields();
+  }).catch(e => { error.textContent = e.message; });
+  setTimeout(() => loadExpirations().catch(() => {}), 0);
+  return el("div", { class: "panel" }, el("h3", { text: "Build a strategy" }),
+    el("p", { class: "small muted", text: "Describe a trade in plain words, or pick a strategy. The legs are real listed contracts, picked by delta and width from the chain, and can be loaded into the simulator below." }),
+    el("div", { class: "row" }, (() => { const f = field("Describe the trade", text); f.classList.add("grow"); return f; })(), read),
+    el("div", { class: "inline-form" }, field("Or pick a strategy", tpl), field("Expiration", exp), fDelta, fWidth, fCenter, field("How many", qty), build),
+    error, out);
+}
+
+if (BUILDERS.simulate) {
+  const classicSimulate = BUILDERS.simulate;
+  BUILDERS.simulate = () => {
+    const view = classicSimulate();
+    if (featureOn("strategy_builder")) view.insertBefore(strategyPanel(view), view.children[2]);
+    return view;
+  };
+}
+
 Object.assign(BUILDERS, { lab: buildOptionsLab, scanner: buildScanner });

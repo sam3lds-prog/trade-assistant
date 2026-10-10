@@ -21,6 +21,7 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "reversal_analysis": True,
     "options_lab": True,
     "scanner": True,
+    "strategy_builder": True,
     "options_backtest": False,
 }
 

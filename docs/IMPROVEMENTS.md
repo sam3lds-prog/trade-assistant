@@ -477,3 +477,17 @@ early exercise is not modelled (the chain's Black-76 prices are European on the 
 Known limitations: the large-company list is fixed; volume and open interest are the
 provider's (open interest is usually as of the previous close), and there is no record of
 each contract's usual volume, so "unusual" is measured against open interest only.
+
+### Part 3: strategy builder
+
+| Requirement | Done | Where | Tests (`test_strategies.py` unless noted) |
+| --- | --- | --- | --- |
+| Multi-leg strategies (spreads, iron condors, straddles, butterflies, calendars) | 16 templates resolved to listed, two-sided contracts by delta, width, a middle strike or strikes you give; strike order checked; strikes far from the price refused | `options/strategies.py`, `POST /v2/strategies/build` | `test_contract_pickers`, `test_pick_expiration`, `test_default_strikes` (10), `test_credit_spreads_*`, `test_a_butterfly_*`, `test_strike_order_*`, `test_every_template_builds_*` |
+| Risk, profit zones and limits | Net debit or credit at midpoints and natural; maximum gain and loss and breakevens from the simulator (checked against the payoff by hand); market-implied chance of profit; per-trade limit check with how many fit; unlimited loss always fails | `options/strategies.py`, `simulate.py` | `test_prices_and_the_risk_check`, `test_the_numbers_match_the_payoff`, `test_the_risk_check_uses_the_settings` |
+| Adjusting | Whole trade up or down, wings wider or narrower, one leg, one listed strike at a time, refused with a reason when strikes would cross | `options/strategies.py` | `test_adjustments_*`, `test_given_strikes_adjustments_and_errors` |
+| Describe the trade in plain language | Rule-based reader for ticker, strategy (named or from a view), expiration (days, weeks, months, month names, dates, this/next week, next month, earnings), delta, width, count and strikes, saying what it read and assumed; a pluggable fallback reader whose answer must be a template and is validated against the chain | `options/strategies.py`, `POST /v2/strategies/parse` | `test_strategy_words` (27), `test_settings_in_a_description`, `test_strikes_and_dates_*`, `test_tickers_*`, `test_parse_endpoint`, `test_a_fallback_reader_*` |
+| Screen and flag | Build a strategy panel on the Simulate screen, loading the legs into the simulator; `strategy_builder` flag; models only, nothing recorded | `static/lab.js`, `features.py`, `api_v2.py` | `test_the_strategy_builder_can_be_switched_off`, `test_static_assets.py` |
+
+Known limitations: four legs at most (the simulator's limit), so no broken-wing condors with
+extra legs; covered calls and protective puts need shares, which the simulator does not
+model; early assignment of sold options is not modelled.
