@@ -163,6 +163,17 @@ def implied_event_move(rows: Sequence[dict[str, Any]], earnings: date | None) ->
                     "larger or smaller."}
 
 
+def iv30_basis(rows: Sequence[dict[str, Any]]) -> str | None:
+    """How iv30 was found: interpolated between expirations either side of 30 days, or the nearest one."""
+    pts = [r["dte"] for r in rows if r["atm_iv"] and r["dte"] >= 7]
+    if not pts:
+        return None
+    if any(d <= 30 for d in pts) and any(d > 30 for d in pts):
+        return "interpolated"
+    near = min(pts, key=lambda d: abs(d - 30))
+    return f"the {near}-day expiration (none on the other side of 30 days)"
+
+
 def iv30(rows: Sequence[dict[str, Any]]) -> float | None:
     """At-the-money volatility 30 days out, interpolated in total variance between the nearest
     expirations either side (at least a week out)."""
@@ -193,7 +204,7 @@ def profile(analyses: Sequence[ChainAnalysis], today: date, earnings: date | Non
     """The whole picture for one stock (see the module notes)."""
     rows = [expiration_row(a, today, earnings) for a in sorted(analyses, key=lambda a: a.expiration)]
     out: dict[str, Any] = {"expirations": rows, "shape": shape(rows), "event": implied_event_move(rows, earnings),
-                           "iv30": iv30(rows)}
+                           "iv30": iv30(rows), "iv30_basis": iv30_basis(rows)}
     if closes is not None:
         rv = realized(closes)
         out["realized"] = rv
@@ -258,8 +269,9 @@ def monte_carlo(*, spot: float, forward: float, t: float, rate: float, sigma: fl
         raise ValueError("event_move must be a fraction from 0 to 1")
     paths = int(min(max(paths, 2_000), MC_MAX_PATHS))
     paths += paths % 2
-    n_steps = int(steps) if steps else max(1, min(int(round(t * TRADING_DAYS)), TRADING_DAYS))
-    reduced = False
+    daily = max(1, int(round(t * TRADING_DAYS)))
+    n_steps = int(steps) if steps else min(daily, TRADING_DAYS)
+    reduced = n_steps < daily
     if paths * n_steps > MC_MAX_CELLS:
         n_steps, reduced = max(1, MC_MAX_CELLS // paths), True
     cp = 1 if option_type == "call" else -1
@@ -299,8 +311,10 @@ def monte_carlo(*, spot: float, forward: float, t: float, rate: float, sigma: fl
         "p_finish_itm_formula": prob_finish_beyond(forward, strike, t, eff_vol, above=cp > 0),
         # Reaching the strike on a closing price (as simulated, one check a trading day) and at any moment.
         "p_touch_close": float(touched.mean()),
+        # The daily-check correction is an approximation that fails within a step or two of the barrier.
         "p_touch_close_formula": (touch_probability(spot, strike, t, sigma, growth, n_steps / t)
-                                  if jump_step is None else None),
+                                  if jump_step is None and abs(math.log(strike / spot)) >= 2 * sigma * math.sqrt(dt)
+                                  else None),
         "p_touch_any_time": (touch_probability(spot, strike, t, sigma, growth) if jump_step is None else None),
         "terminal": {"p5": float(pct[0]), "p25": float(pct[1]), "median": float(pct[2]), "p75": float(pct[3]),
                      "p95": float(pct[4])},
@@ -317,7 +331,8 @@ def monte_carlo(*, spot: float, forward: float, t: float, rate: float, sigma: fl
         ],
     }
     if reduced:
-        out["notes"].append(f"Paths were checked {n_steps} times rather than daily, to keep the run small.")
+        out["notes"].append(f"Paths were checked {n_steps} times, about every {daily / n_steps:.1f} trading days, rather "
+                            "than daily, to keep the run small; touching the strike between checks is not counted.")
     if premium is not None:
         if not (math.isfinite(premium) and premium >= 0):
             raise ValueError("premium must be zero or more")
@@ -327,8 +342,9 @@ def monte_carlo(*, spot: float, forward: float, t: float, rate: float, sigma: fl
                         "average_pnl": float(pnl.mean()), "model_edge_per_share": bs - premium,
                         "pnl": {"p5": float(q[0]), "p25": float(q[1]), "median": float(q[2]), "p75": float(q[3]),
                                 "p95": float(q[4])},
-                        "note": "Paying more than the model value means paying for volatility above what the chain "
-                                "implies at this strike; paying less, the reverse."}
+                        "note": "Outcomes are in dollars at expiration; the model value is today's (discounted). Paying "
+                                "more than the model value means paying for volatility above what the chain implies at "
+                                "this strike; paying less, the reverse."}
     return out
 
 

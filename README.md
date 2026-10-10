@@ -48,6 +48,21 @@ screens did not appear. Version 2.3.1 fixes what an independent review of 2.1.0 
 found, among them a ticket open-risk check that ignored the Positions screen and a daily loss
 stop that could report a complete day from a stale price. Release notes: `docs/RELEASE_NOTES.md`.
 
+Version 2.4 adds options analytics and AI help. The **Options lab** shows what option prices
+imply (implied volatility by expiration and strike, the expected move, the straddle, skew,
+the move priced for earnings, implied against realized volatility) and checks any contract
+with a seeded Monte Carlo (value against Black-76, the chance of finishing in the money and of
+touching the strike, the spread of outcomes for a buyer). The **Scanner** finds RSI, MACD,
+moving-average, 52-week and volume signals across the watchlist or 100 large companies, each
+with how often it worked before (a historical frequency, not a forecast), and options trading
+unusually against open interest. The **strategy builder** on the Simulate screen turns "AAPL
+iron condor 45 days 16 delta 5 wide", or a picked template (spreads, straddles, strangles,
+condors, butterflies, calendars), into real listed contracts with the debit or credit, the
+most it can make and lose, breakevens and a risk-limit check. **Market & news** shows the
+market's make-up (indexes, VIX, regime, sectors, breadth, put/call) and headlines with their
+tone, and, with an Anthropic API key, Claude writes market and stock briefs that pull in the
+latest news with their sources. Everything is modelled only: the app still places no orders.
+
 ## Start it
 
 Needs Python 3.11 or newer (built and tested on 3.13 with pandas 3 and numpy 2).

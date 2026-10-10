@@ -109,7 +109,7 @@ def test_every_screen_opens_without_a_script_error(tmp_path):
             page.goto(f"http://127.0.0.1:{port}/")
             page.wait_for_function("document.querySelectorAll('#main > section').length > 0", timeout=20000)
             views = page.eval_on_selector_all(".rail button.nav:not(.hidden)", "bs => bs.map(b => b.dataset.view)")
-            assert {"positions", "portfolio", "health", "lab"} <= set(views)
+            assert {"positions", "portfolio", "health", "lab", "scanner", "market"} <= set(views)
             for v in views:
                 page.click(f'.rail button.nav[data-view="{v}"]')
                 page.wait_for_timeout(400)

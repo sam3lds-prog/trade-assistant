@@ -174,6 +174,16 @@ def step(analysis: Any, kind: str, strike: float, n: int) -> float:
     return ks[j]
 
 
+def even_wings(analysis: Any, kind: str, middle: float, gap: float) -> tuple[float, float]:
+    """Wings the same distance either side of `middle`: the smallest listed distance at least `gap`
+    with a quoted strike on both sides; failing that, the nearest strikes (uneven, and noted)."""
+    ks = {c["strike"] for c in quoted(analysis, kind)}
+    for d in sorted({abs(k - middle) for k in ks if abs(k - middle) >= gap - 1e-9 and k != middle}):
+        if any(abs(k - (middle - d)) < 1e-9 for k in ks) and any(abs(k - (middle + d)) < 1e-9 for k in ks):
+            return middle - d, middle + d
+    return beyond(analysis, kind, middle, gap, -1)["strike"], beyond(analysis, kind, middle, gap, 1)["strike"]
+
+
 def default_width(analysis: Any) -> float:
     """About 2.5% of the stock price: a common distance between a sold strike and its wing."""
     return max(analysis.spot * 0.025, 0.5)
@@ -317,6 +327,8 @@ def adjust(t: Template, near: Any, far: Any | None, strikes: list[float], op: di
             out = [out[0]] * len(out)
         elif t.key == "iron_butterfly":
             out[2] = out[1]
+        elif t.key in ("call_butterfly", "put_butterfly"):
+            out[0], out[2] = even_wings(near, kind_of[0], out[1], strikes[1] - strikes[0])
     elif what in ("wider", "narrower"):
         if not t.wings:
             raise StrategyError(f"A {t.label.lower()} has no wings to move")
@@ -442,6 +454,14 @@ class Strategies:
                                                  + int(req.get("far_days") or t.defaults.get("far_days", 30)),
                                                  after=exp, min_gap=7)
             far = self.svc._chain_for(symbol, far_exp)
+        center = req.get("center")
+        if center is not None:
+            if t.key not in CENTER_TEMPLATES:
+                notes.append(f"The middle strike {float(center):g} was not used: a {t.label.lower()} picks its strikes by delta.")
+                req = {k: v for k, v in req.items() if k != "center"}
+            elif not 0.5 * near.spot <= float(center) <= 1.5 * near.spot:
+                raise StrategyError(f"A strike near {float(center):g} is far from the stock price (${near.spot:,.2f}); "
+                                    "a number such as a delta or a day count may have been read as a price")
         given = req.get("strikes")
         if given:
             given = [float(k) for k in given]
@@ -465,6 +485,9 @@ class Strategies:
         if req.get("adjust"):
             strikes = adjust(t, near, far, strikes, req["adjust"])
             why = [f"Strikes moved ({req['adjust'].get('op')})"]
+        if t.key in ("call_butterfly", "put_butterfly") and abs((strikes[1] - strikes[0]) - (strikes[2] - strikes[1])) > 1e-9:
+            notes.append(f"The wings are uneven ({strikes[0]:g} / {strikes[1]:g} / {strikes[2]:g}): the listed strikes are not "
+                         "evenly spaced here, so the loss is not the same on both sides.")
         legs = legs_for(t, near, far, strikes, contracts)
         cost = prices(legs)
         sim = self.svc.simulate(symbol=symbol, legs=[{"expiration": l["expiration"], "option_type": l["option_type"],
@@ -542,28 +565,60 @@ _COMMON = {"low", "now", "cost", "met", "dis", "lin", "all", "key", "big", "fun"
            "has", "one", "two", "c", "f", "t", "v", "ma", "so", "de", "go", "on", "it", "be", "can", "do", "pep"}
 MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 
-PHRASES: list[tuple[str, str]] = [   # (regex, template); the first match wins, so specific phrases come first
-    (r"\biron\s*(?:butterfly|fly)\b", "iron_butterfly"),
-    (r"\biron\s*condor\b|\bcondor\b", "iron_condor"),
-    (r"\bput\s+(?:butterfly|fly)\b|\b(?:butterfly|fly)\b.*\bputs?\b", "put_butterfly"),
-    (r"\b(?:call\s+)?(?:butterfly|fly)\b", "call_butterfly"),
-    (r"\bput\s+calendar\b|\bcalendar\b.*\bputs?\b|\bput\s+time\s+spread\b", "put_calendar"),
-    (r"\bcalendar\b|\btime\s+spread\b|\bhorizontal\s+spread\b", "call_calendar"),
-    (r"\b(?:short|sell(?:ing)?)\s+(?:an?\s+)?straddle\b", "short_straddle"),
-    (r"\bstraddle\b", "long_straddle"),
-    (r"\b(?:short|sell(?:ing)?)\s+(?:an?\s+)?strangle\b", "short_strangle"),
-    (r"\bstrangle\b", "long_strangle"),
-    (r"\bbull(?:ish)?\s+put\b|\bput\s+credit\s+spread\b|\bshort\s+put\s+spread\b|\bsell(?:ing)?\s+(?:an?\s+)?put\s+spread\b"
-     r"|\bcredit\s+put\s+spread\b", "bull_put_spread"),
-    (r"\bbear(?:ish)?\s+call\b|\bcall\s+credit\s+spread\b|\bshort\s+call\s+spread\b"
-     r"|\bsell(?:ing)?\s+(?:an?\s+)?call\s+spread\b|\bcredit\s+call\s+spread\b", "bear_call_spread"),
-    (r"\bbull(?:ish)?\s+call\b|\bcall\s+debit\s+spread\b|\bdebit\s+call\s+spread\b|\bcall\s+(?:vertical|spread)\b"
-     r"|\blong\s+call\s+spread\b", "bull_call_spread"),
-    (r"\bbear(?:ish)?\s+put\b|\bput\s+debit\s+spread\b|\bdebit\s+put\s+spread\b|\bput\s+(?:vertical|spread)\b"
-     r"|\blong\s+put\s+spread\b", "bear_put_spread"),
-    (r"\b(?:long|buy(?:ing)?)\b(?:\s+\S+){0,3}?\s+calls?\b", "long_call"),
-    (r"\b(?:long|buy(?:ing)?)\b(?:\s+\S+){0,3}?\s+puts?\b", "long_put"),
-]
+# "short-term" and "long-term" are not sides of a trade.
+SELL_WORDS = re.compile(r"\b(?:sell|selling|sold|write|writing|credit|short(?![-\s]term))\b")
+BUY_WORDS = re.compile(r"\b(?:buy|buying|bought|debit|long(?![-\s]term))\b")
+CENTER_TEMPLATES = {"long_call", "long_put", "bull_call_spread", "bear_put_spread", "long_straddle", "short_straddle",
+                    "iron_butterfly", "call_butterfly", "put_butterfly", "call_calendar", "put_calendar"}
+
+
+def read_strategy_words(low: str) -> tuple[str | None, str | None]:
+    """(template, None), (None, a reason it cannot be built), or (None, None) when no structure is named.
+
+    The structure (spread, straddle, condor...) is read first, then whether it is sold or bought from
+    words anywhere in the description, so "sell AAPL put spread" is a credit spread, not the debit one."""
+    sell, buy = bool(SELL_WORDS.search(low)), bool(BUY_WORDS.search(low))
+    if re.search(r"\b(?:reverse|long)\s+iron\b", low):
+        return None, "A reverse (bought) iron condor or butterfly is not one of the templates; a long straddle or strangle also gains on a big move"
+    if re.search(r"\biron\s*(?:butterfly|fly)\b", low):
+        return "iron_butterfly", None
+    if re.search(r"\biron\s*condor\b|\bcondor\b", low):
+        return "iron_condor", None
+    if re.search(r"\b(?:butterfly|fly)\b", low):
+        if re.search(r"\b(?:short|sell(?:ing)?|reverse)\s+(?:an?\s+|the\s+)?(?:\w+\s+)?(?:butterfly|fly)\b", low):
+            return None, "A sold butterfly is not one of the templates"
+        return ("put_butterfly" if re.search(r"\bputs?\b", low) else "call_butterfly"), None
+    if re.search(r"\bcalendar\b|\btime\s+spread\b|\bhorizontal\s+spread\b", low):
+        if re.search(r"\b(?:short|reverse)\s+(?:an?\s+|the\s+)?(?:\w+\s+)?calendar\b", low):
+            return None, "A sold (reverse) calendar is not one of the templates"
+        return ("put_calendar" if re.search(r"\bputs?\b", low) else "call_calendar"), None
+    for word in ("straddle", "strangle"):
+        if re.search(rf"\b{word}\b", low):
+            if sell and buy:
+                return None, f"Say whether the {word} is bought or sold"
+            return (f"short_{word}" if sell else f"long_{word}"), None
+    named = [(r"\bbull(?:ish)?\s+put\b|\bput\s+credit\b|\bcredit\s+put\b", "bull_put_spread"),
+             (r"\bbear(?:ish)?\s+call\b|\bcall\s+credit\b|\bcredit\s+call\b", "bear_call_spread"),
+             (r"\bbull(?:ish)?\s+call\b|\bcall\s+debit\b|\bdebit\s+call\b", "bull_call_spread"),
+             (r"\bbear(?:ish)?\s+put\b|\bput\s+debit\b|\bdebit\s+put\b", "bear_put_spread")]
+    for pattern, key in named:
+        if re.search(pattern, low):
+            return key, None
+    for kind, sold, bought in (("put", "bull_put_spread", "bear_put_spread"), ("call", "bear_call_spread", "bull_call_spread")):
+        if re.search(rf"\b{kind}\s+(?:vertical|spread)s?\b", low):
+            if sell and buy:
+                return None, f"Say whether the {kind} spread is bought (a debit) or sold (a credit)"
+            return (sold if sell else bought), None
+    if re.search(r"\b(?:calls?|puts?)\b", low) and (sell or buy):
+        if sell and buy:
+            return None, "That reads as more than one leg: name the strategy, for example \"bull call spread 190/200\""
+        if sell:
+            return None, ("Selling a single call or put is not one of the templates; a credit spread (bull put or bear "
+                          "call) limits the loss")
+        return ("long_put" if re.search(r"\bputs?\b", low) and not re.search(r"\bcalls?\b", low) else "long_call"), None
+    return None, None
+
+
 # Without a named strategy, a view picks the usual defined-risk structure for it.
 VIEWS: list[tuple[str, str, str]] = [
     (r"\b(?:big\s+move|either\s+way|volatil\w*|earnings\s+(?:move|play)|breakout)\b", "long_straddle",
@@ -579,6 +634,29 @@ VIEWS: list[tuple[str, str, str]] = [
     (r"\bcalls?\b", "long_call", "a call: long call"),
     (r"\bputs?\b", "long_put", "a put: long put"),
 ]
+
+
+def _slash_date(text: str, today: date) -> date | None:
+    """A month/day (or month/day/year) that is today or later, or None."""
+    nums = re.findall(r"\d+(?:\.\d+)?", text)
+    if len(nums) not in (2, 3) or any("." in x for x in nums):
+        return None
+    m, d = int(nums[0]), int(nums[1])
+    if len(nums) == 3:
+        y = int(nums[2])
+        y = y + 2000 if len(nums[2]) == 2 else y if len(nums[2]) == 4 else -1
+    else:
+        y = today.year + (1 if (m, d) < (today.month, today.day) else 0)
+    try:
+        when = date(y, m, d)
+    except ValueError:
+        return None
+    return when if today <= when <= today + timedelta(days=1100) else None
+
+
+def _third_friday(year: int, month: int) -> date:
+    first = date(year, month, 1)
+    return first + timedelta(days=(4 - first.weekday()) % 7 + 14)
 
 
 def _expiry_days(text: str, today: date) -> tuple[int | None, str | None, str | None]:
@@ -602,13 +680,15 @@ def _expiry_days(text: str, today: date) -> tuple[int | None, str | None, str | 
         return 30 * int(m[1]), None, f"about {m[1]} months out"
     if re.search(r"\bnext\s+month\b", t):
         y, mo = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
-        first = date(y, mo, 1)
-        third = first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+        third = _third_friday(y, mo)
         return (third - today).days, None, f"next month's monthly ({third.isoformat()})"
+    # The coming Friday: later this week on a weekday, the end of the coming week at a weekend.
+    coming = (4 - today.weekday()) % 7 or 7
     if re.search(r"\bnext\s+week\b", t):
-        return 7 + (4 - today.weekday()) % 7, None, "next week's expiration"
-    if re.search(r"\bthis\s+(?:week|friday)\b|\bweeklies?\b|\bweekly\b", t):
-        return max((4 - today.weekday()) % 7, 1), None, "this week's expiration"
+        days = coming + 7 if today.weekday() <= 4 else coming
+        return days, None, f"next week's Friday ({(today + timedelta(days=days)).isoformat()})"
+    if re.search(r"\b(?:this|next|coming)\s+friday\b|\bthis\s+week\b|\bweeklies?\b|\bweekly\b", t):
+        return coming, None, f"the coming Friday ({(today + timedelta(days=coming)).isoformat()})"
     m = re.search(r"\b(january|february|march|april|june|july|august|september|october|november|december|jan|feb|mar|"
                   r"apr|jun|jul|aug|sept|sep|oct|nov|dec)\b\.?(?:\s+(\d{1,2})(?!\d))?|\b(may)\s+(\d{1,2})(?!\d)", t)
     if m:
@@ -621,9 +701,10 @@ def _expiry_days(text: str, today: date) -> tuple[int | None, str | None, str | 
                 return (d - today).days, None, f"near {d.isoformat()}"
             except ValueError:
                 pass
-        # A month alone means its standard expiration, the third Friday.
-        first = date(year, month, 1)
-        third = first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+        # A month alone means its standard expiration, the third Friday; once that has passed, next year's.
+        third = _third_friday(year, month)
+        if third <= today:
+            third = _third_friday(year + 1, month)
         return (third - today).days, None, f"the {name[:3].capitalize()} monthly ({third.isoformat()})"
     return None, None, None
 
@@ -659,11 +740,12 @@ def parse(text: str, known: set[str], default_symbol: str | None = None, today: 
         spec["symbol"] = default_symbol.upper()
         assumed.append(f"stock {default_symbol.upper()} (the one on screen)")
 
-    for pattern, key in PHRASES:
-        if re.search(pattern, low):
-            spec["strategy"] = key
-            understood.append(TEMPLATES[key].label.lower())
-            break
+    key, refused = read_strategy_words(low)
+    if refused:
+        raise StrategyError(refused + ".")
+    if key:
+        spec["strategy"] = key
+        understood.append(TEMPLATES[key].label.lower())
     if spec["strategy"] is None:
         for pattern, key, words in VIEWS:
             if re.search(pattern, low):
@@ -672,23 +754,16 @@ def parse(text: str, known: set[str], default_symbol: str | None = None, today: 
                 break
 
     groups = list(re.finditer(r"\b(\d+(?:\.\d+)?)(?:\s*/\s*(\d+(?:\.\d+)?)){1,3}\b", raw))
-    date_group = None
-    if len(groups) > 1:            # with strikes elsewhere, a short month/day pair is the expiration
-        for g in groups:
-            nums = re.findall(r"\d+(?:\.\d+)?", g[0])
-            if len(nums) in (2, 3) and all("." not in x for x in nums) and 1 <= int(nums[0]) <= 12 and 1 <= int(nums[1]) <= 31:
-                date_group = g
-                break
+    date_group, slash_date = None, None
+    if len(groups) > 1:            # with strikes elsewhere, a month/day pair still ahead is the expiration
+        dated = [(g, d) for g in groups if (d := _slash_date(g[0], today)) is not None]
+        preferred = [(g, d) for g, d in dated
+                     if re.search(r"\b(?:exp\w*|for|on|by|until|in)\s*$", raw[:g.start()].lower())]
+        if preferred or dated:
+            date_group, slash_date = (preferred or dated)[-1]
     days, iso, words = _expiry_days(raw, today)
-    if date_group is not None:
-        nums = [int(x) for x in re.findall(r"\d+", date_group[0])]
-        year = (nums[2] + (2000 if nums[2] < 100 else 0)) if len(nums) == 3 else (
-            today.year + (1 if (nums[0], nums[1]) < (today.month, today.day) else 0))
-        try:
-            d = date(year, nums[0], nums[1])
-            days, iso, words = (d - today).days, d.isoformat(), f"expiration near {d.isoformat()}"
-        except ValueError:
-            date_group = None
+    if slash_date is not None:
+        days, iso, words = (slash_date - today).days, slash_date.isoformat(), f"expiration near {slash_date.isoformat()}"
     if re.search(r"\bearnings\b", low):
         spec["after_earnings"] = True
         if days is None:
@@ -699,7 +774,7 @@ def parse(text: str, known: set[str], default_symbol: str | None = None, today: 
         spec["dte"] = max(days, 1)
         understood.append(words)
 
-    m = re.search(r"\b(\d{1,2}(?:\.\d+)?)\s*-?\s*(?:delta|Δ)", low)
+    m = re.search(r"\b(\d{1,2}(?:\.\d+)?)\s*-?\s*(?:delta\b|Δ|δ)", low)
     if m:
         spec["delta"] = float(m[1]) / (100 if float(m[1]) >= 1 else 1)
         understood.append(f"{spec['delta']:.2f} delta")
@@ -707,12 +782,14 @@ def parse(text: str, known: set[str], default_symbol: str | None = None, today: 
     if m:
         spec["width"] = float(m[1] or m[2])
         understood.append(f"${spec['width']:g} wide")
-    m = re.search(r"\b(\d{1,3})\s*(?:x\b|contracts?\b|lots?\b|spreads?\b|condors?\b|of\s+them\b)", low)
+    # Not the second strike of "25/30 spread".
+    m = re.search(r"(?<![/\d.])\b(\d{1,3})\b(?!\s*/)\s*(?:x\b|contracts?\b|lots?\b|spreads?\b|condors?\b|of\s+them\b)", low)
     if m and int(m[1]) > 0:
         spec["contracts"] = int(m[1])
         understood.append(f"{int(m[1])} at a time")
     if "contracts" not in spec:
-        m = re.search(r"\b(?:buy|sell|long|short)\s+(\d{1,2})\b(?!\s*(?:-|/|delta|dte|days?|weeks?|months?|wide|%))", low)
+        m = re.search(r"\b(?:buy|sell|long|short)\s+(\d{1,2})\b(?!\s*(?:-|/|\.\d|delta|δ|dte|days?|d\b|weeks?|months?|wide|"
+                      r"points?|dollars?|%))", low)
         if m and 1 <= int(m[1]) <= 50:
             spec["contracts"] = int(m[1])
             understood.append(f"{int(m[1])} at a time")
@@ -723,12 +800,25 @@ def parse(text: str, known: set[str], default_symbol: str | None = None, today: 
         if all(k > 0 for k in ks):
             spec["strikes"] = ks
             understood.append("strikes " + "/".join(f"{k:g}" for k in ks))
+    units = r"(?!\s*-?\s*(?:delta\b|δ|dte\b|days?\b|d\b|weeks?\b|months?\b|wide\b|points?\b|dollars?\b|%|/))"
+    center = None
     if "strikes" not in spec:
-        m = re.search(r"\b(?:at|around|near|pin(?:ned)?\s+at|target|centered\s+(?:at|on)|strike)\s+\$?(\d+(?:\.\d+)?)\b", low)
+        m = re.search(r"\b(?:at|around|near|pin(?:ned)?\s+at|target|cent(?:er|re)d?\s+(?:at|on)|strike)\s+\$?(\d+(?:\.\d+)?)\b"
+                      + units, low)
         if m:
-            spec["center"] = float(m[1])
-            understood.append(f"centred on {float(m[1]):g}")
+            center = float(m[1])
+        else:      # a lone strike written before the type: "230 calls", "195p"
+            m = re.search(r"(?<![/\d.$])(?<!buy )(?<!sell )\b(\d{2,5}(?:\.\d+)?)\s*(?:calls?|puts?|c|p)\b", low)
+            if m:
+                center = float(m[1])
     strategy = spec.get("strategy")
+    if center is not None:
+        if strategy is None or strategy in CENTER_TEMPLATES:
+            spec["center"] = center
+            understood.append(f"strike near {center:g}")
+        else:
+            assumed.append(f"the price {center:g} was not used: a {TEMPLATES[strategy].label.lower()} picks its strikes by "
+                           "delta (write strikes such as 55/60 to choose them)")
     if strategy and "strikes" in spec:
         spec["strikes"] = _strikes_for(strategy, spec["strikes"])
         if spec["strikes"] is None:
@@ -738,7 +828,8 @@ def parse(text: str, known: set[str], default_symbol: str | None = None, today: 
         t = TEMPLATES[strategy]
         if "dte" not in spec and not spec.get("after_earnings"):
             assumed.append(f"about {t.defaults.get('dte', 45)} days out")
-        if "delta" in t.defaults and "delta" not in spec and "strikes" not in spec and "center" not in spec:
+        if "delta" in t.defaults and "delta" not in spec and "strikes" not in spec and \
+                ("center" not in spec or t.key not in CENTER_TEMPLATES):
             assumed.append(f"{t.defaults['delta']:.2f} delta")
         if t.key in WIDTH_TEMPLATES and "width" not in spec and "strikes" not in spec:
             assumed.append("wings about 2.5% of the stock price apart")

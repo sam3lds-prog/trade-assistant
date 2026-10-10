@@ -7,6 +7,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import tradeassist.api as _api  # noqa: E402
+
+# The test client calls itself "testserver"; only the tests let the app answer to that name.
+_api.TEST_HOSTS = ("testserver",)
+
 
 def make_bars(closes, start="2024-01-02", opens=None, highs=None, lows=None, volume=1_000_000):
     """Daily bars from a list of closes. Unless given, open = previous close and the

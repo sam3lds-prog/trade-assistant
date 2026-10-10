@@ -197,7 +197,7 @@ def test_settings_in_a_description():
     assert p["assumed"] == [] and "0.16 delta" in p["understood"]
     assert P("KO bull put spread 30 dte")["spec"]["dte"] == 30
     assert P("KO straddle 3 weeks")["spec"]["dte"] == 21 and P("KO straddle 2 months")["spec"]["dte"] == 60
-    assert P("KO straddle next week")["spec"]["dte"] == 13       # from a Saturday: the Friday after next
+    assert P("KO straddle next week")["spec"]["dte"] == 6        # from a Saturday: the coming week's Friday
     assert P("KO straddle this week")["spec"]["dte"] == 6
     assert P("KO condor December")["spec"]["dte"] == (date(2026, 12, 18) - TODAY).days   # the third Friday
     assert P("KO condor nov 20")["spec"]["dte"] == 41 and P("KO condor 2026-11-20")["spec"]["dte"] == 41

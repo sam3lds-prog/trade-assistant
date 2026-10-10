@@ -58,13 +58,15 @@ def changes(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def breadth(frames: dict[str, pd.DataFrame]) -> dict[str, Any]:
-    """Advancers, decliners, stocks above their averages and new 52-week highs and lows."""
-    n = adv = dec = above50 = above200 = known50 = known200 = highs = lows = known_range = 0
+    """Advancers, decliners, stocks above their averages and new 52-week highs and lows. A stock with
+    fewer than two usable closes is counted as unreadable; a measure no stock could give is None, not 0."""
+    n = adv = dec = above50 = above200 = known50 = known200 = highs = lows = known_range = unusable = 0
     for df in frames.values():
-        if len(df) < 2:
+        c = df["close"].astype(float).to_numpy() if len(df) else []
+        if len(c) < 2 or not (math.isfinite(c[-1]) and math.isfinite(c[-2])):
+            unusable += 1
             continue
         n += 1
-        c = df["close"].astype(float).to_numpy()
         adv += c[-1] > c[-2]
         dec += c[-1] < c[-2]
         row = df.iloc[-1]
@@ -76,16 +78,22 @@ def breadth(frames: dict[str, pd.DataFrame]) -> dict[str, Any]:
             known200 += 1
             above200 += c[-1] > s200
         if len(df) >= 253:
-            known_range += 1
             prior_hi = df["high"].astype(float).iloc[-253:-1].max()
             prior_lo = df["low"].astype(float).iloc[-253:-1].min()
-            highs += c[-1] > prior_hi
-            lows += c[-1] < prior_lo
+            if math.isfinite(prior_hi) and math.isfinite(prior_lo):
+                known_range += 1
+                highs += c[-1] > prior_hi
+                lows += c[-1] < prior_lo
+
+    def count(v: int, measured: int) -> int | None:
+        return int(v) if measured else None
+
     pct = lambda a, b: 100 * a / b if b else None          # noqa: E731
-    return {"stocks": n, "advancing": int(adv), "declining": int(dec), "unchanged": int(n - adv - dec),
-            "above_50d": int(above50), "measured_50d": known50, "above_50d_pct": pct(above50, known50),
-            "above_200d": int(above200), "measured_200d": known200, "above_200d_pct": pct(above200, known200),
-            "new_highs": int(highs), "new_lows": int(lows), "measured_52w": known_range}
+    return {"stocks": n, "advancing": count(adv, n), "declining": count(dec, n), "unchanged": count(n - adv - dec, n),
+            "above_50d": count(above50, known50), "measured_50d": known50, "above_50d_pct": pct(above50, known50),
+            "above_200d": count(above200, known200), "measured_200d": known200, "above_200d_pct": pct(above200, known200),
+            "new_highs": count(highs, known_range), "new_lows": count(lows, known_range), "measured_52w": known_range,
+            "unusable": unusable}
 
 
 class MarketMakeup:
@@ -161,7 +169,7 @@ class MarketMakeup:
             except (DataError, ValueError) as exc:
                 errors.append({"symbol": f"{sym} options", "error": str(exc)})
         b = breadth(frames)
-        b.update({"universe": breadth_universe, "asked": len(names), "unreadable": len(names) - len(frames)})
+        b.update({"universe": breadth_universe, "asked": len(names), "unreadable": len(names) - len(frames) + b["unusable"]})
         notes = ["Worked out from daily prices: the day's move is the latest bar against the one before, and is "
                  "provisional until the close."]
         if breadth_universe == "large_caps":

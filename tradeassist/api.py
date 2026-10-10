@@ -122,8 +122,14 @@ class SnapshotRequest(Strict):
     symbols: list[str] | None = None
 
 
-# Host names the app answers to: itself on this computer ("testserver" is the test client's).
-ALLOWED_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]", "testserver")
+# Host names the app answers to: itself on this computer. The test suite adds the test client's
+# name ("testserver") through TEST_HOSTS; it is never accepted otherwise, since a page on a local
+# network that could claim that name would otherwise pass the host and origin checks.
+ALLOWED_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+TEST_HOSTS: tuple[str, ...] = ()
+# API reads that another site must not be able to set off through the browser (an <img> or a
+# script tag), because they cost requests to the data source, Finnhub or more.
+GUARDED_READS = ("/api/", "/v2/")
 
 
 def create_app(settings: Settings | None = None, assistant: TradeAssistant | None = None) -> FastAPI:
@@ -136,10 +142,17 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
     # browser: by pointing its own host name at 127.0.0.1 (DNS rebinding), refused by checking the Host
     # header, or by sending a request from its own page, refused for anything that changes data by
     # checking the Origin the browser attaches.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(ALLOWED_HOSTS))
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=[*ALLOWED_HOSTS, *TEST_HOSTS])
 
     @app.middleware("http")
     async def _same_origin_writes(request: Request, call_next):
+        # Reads: the browser marks a request another site's page made; the app's own page sends
+        # same-origin, and typing an address sends none.
+        if request.method in ("GET", "HEAD") and request.url.path.startswith(GUARDED_READS) and \
+                request.headers.get("sec-fetch-site") in ("cross-site", "same-site"):
+            emit("cross_site_refused", logging.WARNING, path=request.url.path, origin=request.headers.get("origin"))
+            return JSONResponse(status_code=403, content={"error": "Refused: this request came from another web "
+                                                                   "page. Use the app's own page."})
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             origin = request.headers.get("origin")
             site = request.headers.get("sec-fetch-site")
