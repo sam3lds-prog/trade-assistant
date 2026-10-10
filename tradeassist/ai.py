@@ -17,10 +17,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -30,8 +32,11 @@ from .optionmath import NY
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 WEB_SEARCH_TOOL = "web_search_20250305"
-MAX_CONTINUATIONS = 3          # a long web-search turn can pause; it is resumed at most this many times
+MAX_CONTINUATIONS = 2          # a long web-search turn can pause; it is resumed at most this many times
 TIMEOUT = (10, 150)
+MAX_SECONDS = 300              # one question may take at most this long, however many calls it needs
+IN_PROGRESS = "in progress"
+_reserve_lock = threading.Lock()
 
 BASE_SYSTEM = (
     "You write for an individual options trader inside a research tool that never places orders. "
@@ -50,6 +55,13 @@ def extract_json(text: str) -> Any | None:
     """The last JSON object in `text` (fenced or bare), or None."""
     if not text:
         return None
+    try:
+        return _extract_json(text)
+    except RecursionError:              # absurdly deep nesting is not an answer
+        return None
+
+
+def _extract_json(text: str) -> Any | None:
     fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
     for chunk in reversed(fenced):
         try:
@@ -86,44 +98,62 @@ def _text(value: Any, size: int = 1500) -> str | None:
     return str(value).strip()[:size] if isinstance(value, (str, int, float)) and str(value).strip() else None
 
 
-def parse_response(body: dict[str, Any]) -> dict[str, Any]:
-    """Text, sources and usage from a Messages API response."""
+def _count(value: Any) -> int:
+    """A token or search count from the reply; anything that is not a sensible number counts as 0."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return 0
+    return int(min(value, 10**9))
+
+
+def _web_url(value: Any) -> str | None:
+    return value if isinstance(value, str) and re.match(r"https?://", value, re.I) else None
+
+
+def parse_response(body: Any) -> dict[str, Any]:
+    """Text, sources and usage from a Messages API response, whatever its shape: blocks, citations
+    and results that are not what the API documents are skipped."""
+    body = body if isinstance(body, dict) else {}
     parts, sources, seen = [], [], {}
     searches = []
-    for block in body.get("content") or []:
+    blocks = body.get("content")
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
         kind = block.get("type")
         if kind == "text":
-            parts.append(block.get("text") or "")
-            for c in block.get("citations") or []:
-                url = c.get("url")
-                if isinstance(url, str) and url.startswith(("https://", "http://")):
-                    s = seen.get(url)
-                    if s is None:
-                        s = seen[url] = {"url": url, "title": c.get("title") or url, "cited": True, "quotes": []}
-                        sources.append(s)
-                    s["cited"] = True
-                    if c.get("cited_text") and len(s["quotes"]) < 2:
-                        s["quotes"].append(str(c["cited_text"])[:300])
+            if isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            cites = block.get("citations")
+            for c in cites if isinstance(cites, list) else []:
+                if not isinstance(c, dict) or not (url := _web_url(c.get("url"))):
+                    continue
+                src = seen.get(url)
+                if src is None:
+                    src = seen[url] = {"url": url, "title": _text(c.get("title"), 300) or url, "cited": True, "quotes": []}
+                    sources.append(src)
+                src["cited"] = True
+                if _text(c.get("cited_text")) and len(src["quotes"]) < 2:
+                    src["quotes"].append(_text(c["cited_text"], 300))
         elif kind == "server_tool_use" and block.get("name") == "web_search":
-            q = (block.get("input") or {}).get("query")
-            if q:
-                searches.append(str(q)[:200])
+            q = block.get("input").get("query") if isinstance(block.get("input"), dict) else None
+            if _text(q):
+                searches.append(_text(q, 200))
         elif kind == "web_search_tool_result":
-            content = block.get("content")
-            if isinstance(content, list):
-                for r in content:
-                    url = r.get("url") if isinstance(r, dict) else None
-                    if isinstance(url, str) and url.startswith(("https://", "http://")) and url not in seen:
-                        seen[url] = {"url": url, "title": r.get("title") or url, "cited": False, "quotes": [],
-                                     "page_age": r.get("page_age")}
-                        sources.append(seen[url])
-    usage = body.get("usage") or {}
-    sources.sort(key=lambda s: not s["cited"])
+            results = block.get("content")
+            for r in results if isinstance(results, list) else []:
+                url = _web_url(r.get("url")) if isinstance(r, dict) else None
+                if url and url not in seen:
+                    seen[url] = {"url": url, "title": _text(r.get("title"), 300) or url, "cited": False, "quotes": [],
+                                 "page_age": _text(r.get("page_age"), 60)}
+                    sources.append(seen[url])
+    usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+    tools = usage.get("server_tool_use") if isinstance(usage.get("server_tool_use"), dict) else {}
+    sources.sort(key=lambda src: not src["cited"])
     return {"text": "".join(parts).strip(), "sources": sources, "searches": searches,
-            "usage": {"input_tokens": int(usage.get("input_tokens") or 0),
-                      "output_tokens": int(usage.get("output_tokens") or 0),
-                      "web_searches": int((usage.get("server_tool_use") or {}).get("web_search_requests") or 0)},
-            "stop_reason": body.get("stop_reason")}
+            "usage": {"input_tokens": _count(usage.get("input_tokens")), "output_tokens": _count(usage.get("output_tokens")),
+                      "web_searches": _count(tools.get("web_search_requests"))},
+            "stop_reason": body.get("stop_reason") if isinstance(body.get("stop_reason"), str) else None,
+            "content": [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []}
 
 
 class AIClient:
@@ -144,8 +174,9 @@ class AIClient:
 
     def used_today(self) -> dict[str, int]:
         row = self.db.one("SELECT COUNT(*) AS n, COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o, "
-                          "COALESCE(SUM(web_searches), 0) AS w, COALESCE(SUM(1 - ok), 0) AS f FROM ai_usage WHERE day = ?",
-                          (self._today(),))
+                          "COALESCE(SUM(web_searches), 0) AS w, "
+                          "COALESCE(SUM(CASE WHEN ok = 0 AND COALESCE(error, '') != ? THEN 1 ELSE 0 END), 0) AS f "
+                          "FROM ai_usage WHERE day = ?", (IN_PROGRESS, self._today()))
         return {"requests": int(row["n"]), "input_tokens": int(row["i"]), "output_tokens": int(row["o"]),
                 "web_searches": int(row["w"]), "failed": int(row["f"])}
 
@@ -165,19 +196,36 @@ class AIClient:
                 "remaining_today": max(s.ai_daily_requests - used["requests"], 0), "last_error": self._last_error,
                 "provider": "Anthropic Messages API"}
 
-    def _record(self, purpose: str, usage: dict[str, int], ok: bool, error: str | None = None) -> None:
+    def _reserve(self, purpose: str) -> int:
+        """Count a call against today's limit before it is made, so requests that overlap cannot pass
+        the limit together. The row is filled in when the call ends."""
+        with _reserve_lock:
+            if self.used_today()["requests"] >= self.settings.ai_daily_requests:
+                raise AIError(f"Today's AI limit of {self.settings.ai_daily_requests} requests is used up "
+                              "(AI_DAILY_REQUESTS in .env). It resets at midnight New York time.")
+            with self.db.tx() as cur:
+                cur.execute("INSERT INTO ai_usage (at, day, purpose, model, ok, error) VALUES (?, ?, ?, ?, 0, ?)",
+                            (datetime.now(timezone.utc).isoformat(timespec="seconds"), self._today(), purpose,
+                             self.settings.ai_model, IN_PROGRESS))
+                return int(cur.lastrowid)
+
+    def _settle(self, row: int, usage: dict[str, int], ok: bool, error: str | None = None) -> None:
         with self.db.tx() as cur:
-            cur.execute("INSERT INTO ai_usage (at, day, purpose, model, input_tokens, output_tokens, web_searches, ok, error) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (datetime.now(timezone.utc).isoformat(timespec="seconds"), self._today(), purpose,
-                         self.settings.ai_model, usage.get("input_tokens", 0), usage.get("output_tokens", 0),
-                         usage.get("web_searches", 0), 1 if ok else 0, redact(error)[:300] if error else None))
+            cur.execute("UPDATE ai_usage SET input_tokens = ?, output_tokens = ?, web_searches = ?, ok = ?, error = ? "
+                        "WHERE id = ?", (usage.get("input_tokens", 0), usage.get("output_tokens", 0),
+                                         usage.get("web_searches", 0), 1 if ok else 0,
+                                         redact(error)[:300] if error else None, row))
 
     # --- requests ------------------------------------------------------------------------------
     def ask(self, *, purpose: str, prompt: str, system: str = BASE_SYSTEM, max_tokens: int = 1500,
             web_search: bool = False, cache_key: str | None = None, max_age: float = 1800,
-            refresh: bool = False, max_searches: int = 4) -> dict[str, Any]:
-        """One question to the model. Returns text, sources and usage; raises AIError with a safe message."""
+            refresh: bool = False, max_searches: int = 4,
+            accept: Callable[[str], bool] | None = None) -> dict[str, Any]:
+        """One question to the model. Returns text, sources and usage; raises AIError with a safe message.
+
+        Every call to the API counts against the daily limit, including the calls that resume a paused
+        web-search turn. An answer is saved for reuse only when `accept` (if given) takes its text, so a
+        reply that could not be read is asked again next time rather than repeated from the cache."""
         if not self.configured:
             raise AIError("AI is not set up: " + (self.status()["reason"] or "unavailable"))
         web_search = bool(web_search and self.settings.ai_web_search)
@@ -187,11 +235,8 @@ class AIClient:
             key = f"ai:{purpose}:{digest}"
             if not refresh:
                 hit = self.db.cache_get(key, max_age)
-                if hit is not None:
+                if isinstance(hit, dict) and isinstance(hit.get("text"), str):
                     return {**hit, "cached": True}
-        if self.used_today()["requests"] >= self.settings.ai_daily_requests:
-            raise AIError(f"Today's AI limit of {self.settings.ai_daily_requests} requests is used up "
-                          "(AI_DAILY_REQUESTS in .env). It resets at midnight New York time.")
         body: dict[str, Any] = {"model": self.settings.ai_model, "max_tokens": int(max_tokens), "system": system,
                                 "messages": [{"role": "user", "content": prompt}]}
         if web_search:
@@ -199,31 +244,44 @@ class AIClient:
         total = {"input_tokens": 0, "output_tokens": 0, "web_searches": 0}
         content: list[dict[str, Any]] = []
         started = time.time()
-        try:
-            for _ in range(MAX_CONTINUATIONS + 1):
-                reply = self._post(body)
-                parsed_part = parse_response(reply)
-                for k in total:
-                    total[k] += parsed_part["usage"][k]
-                content.extend(reply.get("content") or [])
-                if reply.get("stop_reason") != "pause_turn":
-                    break
-                body = {**body, "messages": [{"role": "user", "content": prompt},
-                                             {"role": "assistant", "content": content}]}
-        except AIError as exc:
-            self._record(purpose, total, False, str(exc))
-            self._last_error = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "error": str(exc)}
-            emit("ai_request_failed", logging.WARNING, purpose=purpose, error=exc)
-            raise
-        parsed = parse_response({"content": content, "usage": {}, "stop_reason": None})
-        self._record(purpose, total, True)
+        finished = False
+        for _ in range(MAX_CONTINUATIONS + 1):
+            row = self._reserve(purpose)
+            usage = {"input_tokens": 0, "output_tokens": 0, "web_searches": 0}
+            try:
+                if time.time() - started > MAX_SECONDS:
+                    raise AIError("The AI request took too long and was stopped. Try again, or switch web search off.")
+                part = parse_response(self._post(body))
+                usage = part["usage"]
+                content.extend(part["content"])
+                finished = part["stop_reason"] != "pause_turn"
+                self._settle(row, usage, True)
+            except Exception as exc:                   # noqa: BLE001 - every failure is recorded, then shown safely
+                err = exc if isinstance(exc, AIError) else AIError(
+                    f"The Anthropic API's reply could not be used ({exc.__class__.__name__}).")
+                self._settle(row, usage, False, str(err))
+                self._last_error = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "error": str(err)}
+                emit("ai_request_failed", logging.WARNING, purpose=purpose, error=err)
+                raise err from exc
+            for k in total:
+                total[k] += usage[k]
+            if finished:
+                break
+            body = {**body, "messages": [{"role": "user", "content": prompt}, {"role": "assistant", "content": content}]}
+        if not finished:
+            err = AIError("The model was still searching after several rounds; its answer is incomplete. Try again, "
+                          "or switch web search off.")
+            self._last_error = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "error": str(err)}
+            emit("ai_request_failed", logging.WARNING, purpose=purpose, error=err)
+            raise err
+        parsed = parse_response({"content": content})
         out = {"text": parsed["text"], "sources": parsed["sources"], "searches": parsed["searches"], "usage": total,
                "model": self.settings.ai_model, "web_search": web_search,
                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                "seconds": round(time.time() - started, 1), "cached": False}
         emit("ai_request", purpose=purpose, model=self.settings.ai_model, input_tokens=total["input_tokens"],
              output_tokens=total["output_tokens"], web_searches=total["web_searches"])
-        if key:
+        if key and (accept is None or _accepts(accept, out["text"])):
             self.db.cache_put(key, out)
         return out
 
@@ -257,6 +315,13 @@ class AIClient:
         if r.status_code in (500, 502, 503, 529):
             raise AIError("The Anthropic API is busy or unavailable right now. Try again shortly.")
         raise AIError(f"The Anthropic API refused the request ({r.status_code})" + (f": {detail}" if detail else "."))
+
+
+def _accepts(accept: Callable[[str], bool], text: str) -> bool:
+    try:
+        return bool(accept(text))
+    except Exception:                                  # noqa: BLE001 - a checker that fails means "do not keep it"
+        return False
 
 
 __all__ = ["AIClient", "AIError", "extract_json", "parse_response", "BASE_SYSTEM"]

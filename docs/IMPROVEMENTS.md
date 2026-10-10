@@ -515,3 +515,47 @@ real use should be checked on the screen (the brief shows its sources, usage and
 Known limitations: tone by word list is crude by design; the AI reads headlines, not
 articles (web search reads pages); Finnhub's free tier limits requests and its company news
 covers US listings best; breadth covers 100 large companies, not the whole market.
+
+### Independent review of 2.4 and fixes
+
+Two reviewers that had not seen the code being written checked 2.4 before release: one for the
+financial calculations (the options lab, Monte Carlo, strategy templates and the trade reader,
+the scanner and the make-up), one for security and integration (keys, prompts, cross-site
+requests, the UI, reply shapes, limits). Every finding was reproduced by the reviewer with a
+script, then fixed with a regression test in `tests/test_2_4_review.py` that fails on the code
+before the fix. The reviewers' scripts were run again on the fixed code.
+
+| # | Finding | Severity | Fix |
+| --- | --- | --- | --- |
+| S1 | The test client's host name `testserver` was accepted in production, so a page on a hostile local network that could claim that name passed the host and origin checks (and could spend the AI budget) | High | Production hosts are 127.0.0.1, localhost and ::1 only; the test suite adds `testserver` through `api.TEST_HOSTS` |
+| H1 | "sell" or "short" not directly before the structure built the opposite trade ("sell AAPL put spread" became a debit spread, "short the AAPL straddle" a long straddle) | High | The reader finds the structure, then whether it is bought or sold from words anywhere in the sentence ("short-term" excepted). Sold single options, sold butterflies and calendars, reverse condors and sentences with both buy and sell and no structure are refused with the reason, never flipped |
+| H2 | "at 30 delta" or "near 30 dte" was read as a strike of 30, building a deep in-the-money option | High | Numbers followed by delta, days, weeks, months, wide, points, dollars or % are not prices; the builder refuses a middle strike outside half to one and a half times the stock price |
+| H3 | The second strike of "25/30 spread" was read as 30 contracts; "5 point wide" as 5 contracts | High | A number after a slash or before a width word is not a count |
+| H4 | The Monte Carlo's earnings jump was timed in whole days from midnight while the option's time runs to 4 pm, so a report today (or late on a day) dropped the jump while its variance was still taken out of the volatility: the option was valued about 28% low | High | The jump is timed on the option's own clock (the report day's close); variance is removed only when the jump is added, and the result says why when it is not (report passed, on or after expiration, not measurable) |
+| S2 | Numbers such as `1e999`, `Infinity` or a list where a word belongs in the model's JSON caused a server error, and the bad answer was cached, so the error repeated for up to 24 hours | Medium | Every number from the model is checked for type, finiteness and range; an answer is cached only when it can be used |
+| S3 | A Messages API reply in an unexpected shape caused a server error, and the call was never counted against the daily limit | Medium | Replies of any shape are read without an error; every call is counted, failed or not |
+| S4 | One Finnhub row with a number for a headline or an out-of-range time stopped all news and the stock brief | Medium | Rows that are not as documented are skipped; times in milliseconds are read; only http(s) links are kept |
+| S5 | Requests made at the same moment could all pass the daily AI limit (10 of 10 with a limit of 2) | Medium | Each call is counted before it is made, under a lock |
+| S6, M4 | Breadth reported 0 new highs and lows when no stock had a year of history (and sent that to the AI); options activity showed unknown put volume and open interest as 0 | Medium | Measures no stock could give are unknown (n/a on screen, "unknown" in prompts); calls and puts keep their own known flags; a contract without open interest is not called unusual |
+| S7 | Another web page could set off costly reads through the browser (an `<img>` pointing at a 30-stock options scan or the make-up refresh) and use up the data and news quotas | Medium | API reads marked by the browser as coming from another site (`Sec-Fetch-Site: cross-site` or `same-site`) are refused; news is cached for five fixed windows |
+| M1 | A price given for a credit spread, strangle or condor was silently ignored | Medium | It is reported as not used, with the delta the strategy uses |
+| M2 | Small strike pairs were taken as dates ("10/12" as Oct 12) | Medium | A slash pair is a date only when strikes are written elsewhere, it is today or later, and preferably after "exp", "for", "on" or "by"; three-number groups are dates only with a year |
+| M3 | "Next week" from a weekend skipped a week; "Oct" after October's monthly built a one-day trade; "25Δ" was not read; a lone strike ("230 calls") was dropped | Medium | Fixed; "next/this Friday" read; the understood line shows the date chosen |
+| M5 | Moving a butterfly up or down across uneven strike spacing unbalanced its wings without saying so | Medium | Moved butterflies keep even wings (wider if the chain has no strike at the old distance); uneven ones are noted |
+| S8, S9 | A web-search turn that kept pausing cost four calls counted as one and returned partial text; an unreadable tone answer was cached for six hours | Low | Each call counts; a turn still paused after three calls is an error; unreadable answers are not cached |
+| L1 | A Monte Carlo over more than a year checked every other day but said "daily" | Low | The result says how often paths were checked |
+| L2 | The daily-check touch formula is inaccurate within a step or two of the strike | Low | Not shown there |
+| L3 | The buyer's outcomes are at expiration while the model value is today's | Low | Said in the note |
+| L4 | 30-day implied volatility silently used the nearest expiration when none was on the other side of 30 days | Low | The screen says which expiration it came from |
+| L5 | A stock with one bar, or a missing last close, counted as unchanged in breadth | Low | Counted as unreadable |
+| S10 | Absurdly deep JSON raised an uncaught error; links such as `httpx:` were accepted | Low | Caught; only http(s) links |
+
+Checked and found sound by the reviewers: neither key appears in any reply, log, the database or
+`repr(Settings)`, including when upstream errors quote them; no account data (account size,
+positions, theses, notes, journal) appears in any prompt; the write guard refuses other origins,
+`null`, other ports and method overrides; the UI never uses innerHTML and opens links with
+`noopener`; option prices, touch odds, the antithetic standard error, the jump's martingale
+correction, all 16 templates' legs, sides, ratios and payoffs, the implied earnings move, iv30,
+realized volatility, the expected move, skew, premium and put/call arithmetic.
+
+Version set to 2.4.0.

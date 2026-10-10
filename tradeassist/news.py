@@ -67,9 +67,12 @@ def summarize_tone(items: list[dict[str, Any]], key: str = "tone") -> dict[str, 
 
 def _item(headline: str, summary: str, source: str, url: str | None, published: str | None, kind: str,
           related: str | None = None) -> dict[str, Any]:
-    headline = (headline or "").strip()
+    headline = headline.strip() if isinstance(headline, str) else ""
+    summary = summary.strip() if isinstance(summary, str) else ""
+    source = source.strip()[:80] if isinstance(source, str) and source.strip() else "unknown"
+    related = related if isinstance(related, str) else None
     ident = hashlib.sha1(f"{headline}|{url}|{published}".encode()).hexdigest()[:12]
-    return {"id": ident, "headline": headline[:300], "summary": (summary or "").strip()[:600], "source": source,
+    return {"id": ident, "headline": headline[:300], "summary": summary[:600], "source": source,
             "url": url, "published": published, "kind": kind, "related": related, "tone": word_tone(headline),
             "tone_method": "words"}
 
@@ -102,6 +105,22 @@ def demo_headlines(symbol: str | None, today: datetime) -> list[dict[str, Any]]:
         when = (today - timedelta(hours=3 + 9 * i)).astimezone(timezone.utc).isoformat(timespec="seconds")
         out.append(_item(h.format(s=subject), s, "Demo", None, when, "news", symbol))
     return out
+
+
+DAY_CHOICES = (1, 3, 7, 14, 30)
+
+
+def _when(ts: Any) -> str | None:
+    """A Unix time in seconds (or, if it is that large, milliseconds) as an ISO time; None when unusable."""
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts != ts or ts <= 0:
+        return None
+    if ts > 1e11:                                   # milliseconds
+        ts = ts / 1000
+    try:
+        when = datetime.fromtimestamp(ts, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return when.isoformat(timespec="seconds") if 2000 <= when.year <= 2100 else None
 
 
 class NewsClient:
@@ -151,13 +170,12 @@ class NewsClient:
     def _from_finnhub(rows: Any, symbol: str | None) -> list[dict[str, Any]]:
         out = []
         for r in rows if isinstance(rows, list) else []:
-            if not isinstance(r, dict) or not r.get("headline"):
+            # A row that is not what Finnhub documents is skipped, never allowed to stop the rest.
+            if not isinstance(r, dict) or not isinstance(r.get("headline"), str) or not r["headline"].strip():
                 continue
-            ts = r.get("datetime")
-            when = datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds") if isinstance(ts, (int, float)) and ts > 0 else None
-            url = r.get("url") if isinstance(r.get("url"), str) and r["url"].startswith("http") else None
-            out.append(_item(r["headline"], r.get("summary") or "", r.get("source") or "Finnhub", url, when, "news",
-                             symbol or (r.get("related") or None)))
+            url = r.get("url") if isinstance(r.get("url"), str) and re.match(r"https?://", r["url"], re.I) else None
+            out.append(_item(r["headline"], r.get("summary"), r.get("source") or "Finnhub", url,
+                             _when(r.get("datetime")), "news", symbol or r.get("related")))
         return out
 
     def _filings(self, symbol: str, days: int) -> list[dict[str, Any]]:
@@ -180,7 +198,7 @@ class NewsClient:
 
     def company(self, symbol: str, days: int = 7) -> dict[str, Any]:
         symbol = symbol.upper()
-        days = max(1, min(int(days), 30))
+        days = min(DAY_CHOICES, key=lambda d: (abs(d - int(days)), d))   # a few windows, so the cache stays small
         key = f"news:company:{symbol}:{days}:{self.configured}:{self.demo}"
         hit = self.db.cache_get(key, CACHE_SECONDS)
         if hit is not None:

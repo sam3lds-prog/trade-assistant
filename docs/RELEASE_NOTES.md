@@ -18,10 +18,14 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
-## 2.4.0 (in progress)
+## 2.4.0
 
-Built in parts; each part is on `main` once it is finished. Migration 10 (a table of AI
-requests) runs on the first start; a copy of the database is taken first.
+Options analytics, a scanner, a strategy builder, and an AI plug-in for news and the market's
+make-up. Migration 10 (a table of AI requests) runs on the first start; a copy of the database
+is taken first. The two new keys (`FINNHUB_API_KEY`, `ANTHROPIC_API_KEY`) are optional: see
+`.env.example`. Not verified against the live Anthropic and Finnhub services from here (the
+tests use fake replies in their documented shapes), so check the first brief on screen: it
+shows its sources, model and usage.
 
 **Options lab** (new screen). Pick a ticker to see what its option prices imply: implied
 volatility for expirations from a week to a year (chart and table), the expected move and
@@ -63,6 +67,21 @@ AI requests are billed by Anthropic to that key's account and capped at `AI_DAIL
 a day (40 by default). The key never leaves the server and is never logged; nothing about
 your account is sent. The Analyze screen gets a News panel, and Data health shows AI and
 news status. Details: [V2.md](V2.md#market--news-and-the-ai-plug-in-24).
+
+**Fixed before release** (independent review; details and tests in
+[IMPROVEMENTS.md](IMPROVEMENTS.md#independent-review-of-24-and-fixes)):
+
+- The trade reader no longer flips a trade: "sell AAPL put spread" is a credit spread and
+  "short the straddle" a short straddle; "at 30 delta" is not a strike of 30; "25/30 spread"
+  is not 30 contracts; dates such as "next week" or "Oct" and lone strikes ("230 calls") are
+  read correctly; trades that are not templates are refused with the reason.
+- The Monte Carlo's earnings jump is timed on the option's own clock and its variance is
+  removed only when the jump is added.
+- The app no longer answers to the test client's host name outside the tests, and another web
+  page cannot set off scans, the make-up or news through the browser.
+- Concurrent AI requests cannot pass the daily limit; every call (including resumed web-search
+  turns) counts; odd replies from the AI or Finnhub can no longer cause errors or be cached.
+- Unknown breadth and options-activity figures are shown as n/a, never 0.
 
 ## 2.3.1
 

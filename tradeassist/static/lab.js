@@ -111,7 +111,7 @@ function renderVolatility(p) {
   if (p.data_source === "demo") frag.append(banner("warn", "Demo data: these prices are made up."));
   const rv = p.realized || {}, rank = p.iv_rank || {};
   frag.append(el("div", { class: "metrics" },
-    metric(ivPct(p.iv30), "Implied volatility, 30 days (at the money)"),
+    metric(ivPct(p.iv30), p.iv30_basis && p.iv30_basis !== "interpolated" ? `Implied volatility at the money, from ${p.iv30_basis}` : "Implied volatility, 30 days (at the money)"),
     metric(ivPct(rv.hv20), "Realized, last 20 trading days"),
     metric(points(p.iv_premium_points), "Implied minus realized"),
     metric(isNum(rank.rank) ? `${rank.rank.toFixed(0)} of 100` : "n/a", isNum(rank.rank) ? `IV rank over ${rank.days} recorded days${rank.fresh ? "" : " (not recorded today)"}` : "IV rank: not enough recorded days yet"),
@@ -308,6 +308,8 @@ function renderFlowScan(d) {
     { label: "Unusual", num: true, cell: r => String(r.unusual_count) }], d.rows, { onRow: r => openInLab(r.symbol) }));
   frag.lastChild.classList.add("scan-table");
   frag.append(el("h4", { text: `Unusually active contracts${d.unusual_total > d.unusual.length ? ` (largest ${d.unusual.length} of ${d.unusual_total})` : ""}` }));
+  const unmeasured = d.rows.reduce((n, r) => n + (r.unusual_unmeasured || 0), 0);
+  if (unmeasured) frag.append(el("p", { class: "small muted", text: `${unmeasured} contract${unmeasured === 1 ? "" : "s"} traded heavily but had no open interest reported, so whether ${unmeasured === 1 ? "it is" : "they are"} unusual cannot be told.` }));
   if (!d.unusual.length) frag.append(el("p", { class: "muted", text: "None at these thresholds." }));
   else frag.append(table([
     { label: "Stock", cell: u => el("strong", { text: u.symbol }) },
@@ -664,9 +666,9 @@ function renderMakeup(m) {
     ...m.indexes.map(i => metric(signedPct(i.day_pct, 2), `${i.name} (${i.symbol}) ${i.bar_finished ? "on the day" : "today so far"}`)),
     metric(v.source === "VIX" && isNum(v.vix) ? num(v.vix, 1) : isNum(v.spy_realized_20d) ? pct(100 * v.spy_realized_20d, 0) : "n/a", v.source === "VIX" ? "VIX" : "SPY 20-day realized volatility (no VIX)"),
     metric(g.regime ? regimeTag(g.regime) : "n/a", "Market regime"),
-    metric(`${b.advancing} / ${b.declining}`, `Up / down on the day, of ${b.stocks} ${b.universe === "large_caps" ? "large companies" : "watchlist stocks"}`),
+    metric(`${num(b.advancing, 0)} / ${num(b.declining, 0)}`, `Up / down on the day, of ${b.stocks} ${b.universe === "large_caps" ? "large companies" : "watchlist stocks"}`),
     metric(isNum(b.above_200d_pct) ? pct(b.above_200d_pct, 0) : "n/a", `Above their 200-day average (${pct(b.above_50d_pct, 0)} above the 50-day)`),
-    metric(`${b.new_highs} / ${b.new_lows}`, "New 52-week highs / lows"),
+    metric(`${num(b.new_highs, 0)} / ${num(b.new_lows, 0)}`, isNum(b.new_highs) ? `New 52-week highs / lows (of ${b.measured_52w} with a year of history)` : "New 52-week highs / lows: too little history"),
     metric(spyOpt ? ratioText(spyOpt.put_call_volume) : "n/a", "SPY put/call volume, nearest expirations")));
   frag.append(table([
     { label: "Index fund", cell: i => el("span", {}, el("strong", { text: i.symbol }), ` ${i.name}`) },

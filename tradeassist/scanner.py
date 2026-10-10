@@ -168,38 +168,50 @@ def _mid(c: dict[str, Any]) -> float | None:
     return m if m is not None and m > 0 else None
 
 
+def _add(total: float | None, value: float | None) -> float | None:
+    """Running sum that stays None (unknown) until a value is known."""
+    return total if value is None else (value if total is None else total + value)
+
+
+def _ratio(a: float | None, b: float | None) -> float | None:
+    return a / b if a is not None and b else None
+
+
 def flow_summary(analyses: Sequence[Any], *, min_volume: int = 250, min_vol_oi: float = 1.0,
                  min_premium: float = 0.0) -> dict[str, Any]:
-    """Calls against puts and the unusually active contracts across the chains in `analyses`."""
-    totals = {"call": {"volume": 0.0, "open_interest": 0.0, "premium": 0.0, "unpriced_volume": 0.0},
-              "put": {"volume": 0.0, "open_interest": 0.0, "premium": 0.0, "unpriced_volume": 0.0}}
+    """Calls against puts and the unusually active contracts across the chains in `analyses`.
+
+    Each figure is kept per side and per expiration, and stays None (unknown) when no contract
+    reported it; a contract whose open interest is not reported cannot be judged unusual."""
+    sides = {k: {"volume": None, "open_interest": None, "premium": None, "unpriced_volume": 0.0} for k in ("call", "put")}
     by_exp, unusual = [], []
-    known_volume = known_oi = False
+    unmeasured = 0
     for a in analyses:
-        row = {"expiration": a.expiration, "call_volume": 0.0, "put_volume": 0.0, "call_oi": 0.0, "put_oi": 0.0}
+        row = {"expiration": a.expiration, "call_volume": None, "put_volume": None, "call_oi": None, "put_oi": None}
         for c in a.contracts:
-            kind = c["option_type"]
+            kind = c.get("option_type")
+            if kind not in sides:
+                continue
             vol, oi = _f(c.get("volume")), _f(c.get("open_interest"))
-            t = totals[kind]
+            t = sides[kind]
+            mid = _mid(c)
+            t["volume"] = _add(t["volume"], vol)
+            row[f"{kind}_volume"] = _add(row[f"{kind}_volume"], vol)
             if vol is not None:
-                known_volume = True
-                t["volume"] += vol
-                row[f"{kind}_volume"] += vol
-                mid = _mid(c)
                 if mid is None:
                     t["unpriced_volume"] += vol
                 else:
-                    t["premium"] += vol * mid * 100
-            if oi is not None:
-                known_oi = True
-                t["open_interest"] += oi
-                row[f"{kind}_oi"] += oi
+                    t["premium"] = _add(t["premium"], vol * mid * 100)
+            t["open_interest"] = _add(t["open_interest"], oi)
+            row[f"{kind}_oi"] = _add(row[f"{kind}_oi"], oi)
             if vol is None or vol < min_volume:
                 continue
-            ratio = vol / oi if oi else None
-            if oi and ratio < min_vol_oi:
+            if oi is None:
+                unmeasured += 1                        # cannot tell whether this is unusual
                 continue
-            mid = _mid(c)
+            ratio = vol / oi if oi > 0 else None
+            if ratio is not None and ratio < min_vol_oi:
+                continue
             premium = vol * mid * 100 if mid is not None else None
             if min_premium and (premium is None or premium < min_premium):
                 continue
@@ -207,27 +219,26 @@ def flow_summary(analyses: Sequence[Any], *, min_volume: int = 250, min_vol_oi: 
                             "open_interest": oi, "volume_to_oi": ratio, "mid": mid, "bid": c.get("bid"), "ask": c.get("ask"),
                             "premium": premium, "moneyness_pct": _f(c.get("moneyness_pct")), "delta": _f(c.get("delta")),
                             "iv": _f(c.get("iv")),
-                            "why": ("no open interest before today" if not oi else
-                                    f"volume {ratio:.1f} times open interest")})
-        row["put_call_volume"] = row["put_volume"] / row["call_volume"] if row["call_volume"] else None
+                            "why": "no open interest before today" if ratio is None else f"volume {ratio:.1f} times open interest"})
+        row["put_call_volume"] = _ratio(row["put_volume"], row["call_volume"])
         by_exp.append(row)
-    cv, pv = totals["call"]["volume"], totals["put"]["volume"]
-    coi, poi = totals["call"]["open_interest"], totals["put"]["open_interest"]
-    cp, pp = totals["call"]["premium"], totals["put"]["premium"]
-    share = cp / (cp + pp) if cp + pp > 0 else None
+    cv, pv = sides["call"]["volume"], sides["put"]["volume"]
+    coi, poi = sides["call"]["open_interest"], sides["put"]["open_interest"]
+    cp, pp = sides["call"]["premium"], sides["put"]["premium"]
+    share = cp / (cp + pp) if cp is not None and pp is not None and cp + pp > 0 else None
     unusual.sort(key=lambda u: (u["premium"] or 0, u["volume"]), reverse=True)
+    both_vol = cv + pv if cv is not None and pv is not None else None
+    both_oi = coi + poi if coi is not None and poi is not None else None
     return {
-        "call_volume": cv if known_volume else None, "put_volume": pv if known_volume else None,
-        "call_open_interest": coi if known_oi else None, "put_open_interest": poi if known_oi else None,
-        "put_call_volume": pv / cv if known_volume and cv else None,
-        "put_call_open_interest": poi / coi if known_oi and coi else None,
-        "call_premium": cp if known_volume else None, "put_premium": pp if known_volume else None,
-        "unpriced_volume": totals["call"]["unpriced_volume"] + totals["put"]["unpriced_volume"],
+        "call_volume": cv, "put_volume": pv, "call_open_interest": coi, "put_open_interest": poi,
+        "put_call_volume": _ratio(pv, cv), "put_call_open_interest": _ratio(poi, coi),
+        "call_premium": cp, "put_premium": pp,
+        "unpriced_volume": sides["call"]["unpriced_volume"] + sides["put"]["unpriced_volume"],
         "call_premium_share": share,
         "lean": (None if share is None else "CALL_HEAVY" if share >= CALL_HEAVY else
                  "PUT_HEAVY" if share <= PUT_HEAVY else "BALANCED"),
-        "turnover": (cv + pv) / (coi + poi) if known_oi and coi + poi > 0 and known_volume else None,
-        "unusual": unusual, "expirations": by_exp,
+        "turnover": _ratio(both_vol, both_oi),
+        "unusual": unusual, "unusual_unmeasured": unmeasured, "expirations": by_exp,
     }
 
 

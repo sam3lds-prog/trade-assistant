@@ -32,6 +32,48 @@ def _n(v: Any, d: int = 2) -> str:
     return f"{v:,.{d}f}" if isinstance(v, (int, float)) and math.isfinite(v) else "unknown"
 
 
+def _c(v: Any) -> str:
+    """A count, or "unknown" when it was not measured."""
+    return str(v) if isinstance(v, int) and not isinstance(v, bool) else "unknown"
+
+
+def _number(v: Any) -> float | None:
+    """A finite number from whatever the model wrote, or None (booleans, huge values and text are not)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, str):
+        try:
+            v = float(v.strip())
+        except ValueError:
+            return None
+    if not isinstance(v, (int, float)):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _has_summary(text: str) -> bool:
+    j = extract_json(text)
+    return isinstance(j, dict) and bool(_text(j.get("summary")))
+
+
+def _scores(j: Any, count: int) -> dict[int, dict[str, Any]]:
+    """Headline number -> tone (clamped to -1..+1) and reason, from the model's reply."""
+    out: dict[int, dict[str, Any]] = {}
+    rows = j.get("items") if isinstance(j, dict) else None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        i, tone = _number(row.get("i")), _number(row.get("tone"))
+        if i is None or tone is None or i != int(i) or not 1 <= i <= count:
+            continue
+        out[int(i)] = {"tone": max(-1.0, min(1.0, tone)), "why": _text(row.get("why"), 200)}
+    return out
+
+
 def _headlines(items: list[dict[str, Any]], limit: int = 12) -> str:
     rows = []
     for i, it in enumerate(items[:limit], 1):
@@ -64,9 +106,10 @@ def makeup_text(m: dict[str, Any]) -> str:
     b = m["breadth"]
     if b["stocks"]:
         lines.append(f"Breadth over {b['stocks']} {'large US companies' if b['universe'] == 'large_caps' else 'watchlist stocks'}: "
-                     f"{b['advancing']} up, {b['declining']} down on the day; {_p(b['above_50d_pct'], 0, False)} above their "
-                     f"50-day average and {_p(b['above_200d_pct'], 0, False)} above their 200-day; {b['new_highs']} new "
-                     f"52-week highs and {b['new_lows']} new lows.")
+                     f"{_c(b['advancing'])} up, {_c(b['declining'])} down on the day; {_p(b['above_50d_pct'], 0, False)} "
+                     f"above their 50-day average and {_p(b['above_200d_pct'], 0, False)} above their 200-day; "
+                     f"{_c(b['new_highs'])} new 52-week highs and {_c(b['new_lows'])} new lows"
+                     + (" (52-week range not measurable: too little history)." if b.get("new_highs") is None else "."))
     for o in m["options"]:
         lines.append(f"{o['symbol']} options (nearest expirations): put/call volume {_n(o['put_call_volume'])}, put/call "
                      f"open interest {_n(o['put_call_open_interest'])}.")
@@ -99,7 +142,8 @@ class Briefs:
                     '"watch": ["up to four upcoming events, with dates when known"], "tone": "risk-on, risk-off or mixed"}')
         hour = datetime.now(NY).strftime("%Y-%m-%d %H")
         answer = self.ai.ask(purpose="market_brief", prompt=prompt, web_search=web_search, max_tokens=1800,
-                             cache_key=f"market|{hour}|{m['data_source']}", max_age=1800, refresh=refresh)
+                             cache_key=f"market|{hour}|{m['data_source']}", max_age=1800, refresh=refresh,
+                             accept=_has_summary)
         j = extract_json(answer["text"])
         fields = None
         if isinstance(j, dict) and _text(j.get("summary")):
@@ -190,7 +234,8 @@ class Briefs:
                     '"sentiment": "positive, negative, mixed or unclear"}')
         hour = datetime.now(NY).strftime("%Y-%m-%d %H")
         answer = self.ai.ask(purpose="stock_brief", prompt=prompt, web_search=web_search, max_tokens=1800,
-                             cache_key=f"stock|{symbol}|{hour}|{self.svc.market.info.mode}", max_age=1800, refresh=refresh)
+                             cache_key=f"stock|{symbol}|{hour}|{self.svc.market.info.mode}", max_age=1800, refresh=refresh,
+                             accept=_has_summary)
         j = extract_json(answer["text"])
         fields = None
         if isinstance(j, dict) and _text(j.get("summary")):
@@ -217,26 +262,17 @@ class Briefs:
                     '"summary": "one sentence on the overall tone"}')
         ids = ",".join(i["id"] for i in items)
         answer = self.ai.ask(purpose="headline_tone", prompt=prompt, max_tokens=1500, cache_key=f"tone|{ids}",
-                             max_age=6 * 3600)
+                             max_age=6 * 3600, accept=lambda t: bool(_scores(extract_json(t), len(items))))
         j = extract_json(answer["text"])
-        scored = []
-        if isinstance(j, dict) and isinstance(j.get("items"), list):
-            by_i = {}
-            for row in j["items"]:
-                try:
-                    i, tone = int(row.get("i")), float(row.get("tone"))
-                except (TypeError, ValueError, AttributeError):
-                    continue
-                if 1 <= i <= len(items) and math.isfinite(tone):
-                    by_i[i] = {"tone": max(-1.0, min(1.0, tone)), "why": _text(row.get("why"), 200)}
-            for n, it in enumerate(items, 1):
-                if n in by_i:
-                    scored.append({**it, "tone": by_i[n]["tone"], "why": by_i[n]["why"], "tone_method": "ai"})
+        by_i = _scores(j, len(items))
+        scored = [{**it, "tone": by_i[n]["tone"], "why": by_i[n]["why"], "tone_method": "ai"}
+                  for n, it in enumerate(items, 1) if n in by_i]
         if not scored:
             raise AIError("The model's answer could not be read as scores. Try again.")
         from .news import summarize_tone
         return {"symbol": data.get("symbol"), "items": scored, "tone": summarize_tone(scored),
-                "summary": _text((j or {}).get("summary"), 300), "model": answer["model"], "usage": answer["usage"],
+                "summary": _text(j.get("summary"), 300) if isinstance(j, dict) else None,
+                "model": answer["model"], "usage": answer["usage"],
                 "cached": answer["cached"], "at": answer["at"],
                 "note": "Tone of the headlines as an AI model reads them, not a forecast."}
 
@@ -257,44 +293,40 @@ class Briefs:
                     '"after_earnings": true or false}')
         try:
             answer = self.ai.ask(purpose="strategy_reader", prompt=prompt, max_tokens=300,
-                                 cache_key=f"strategy|{text.strip().lower()}", max_age=86400)
-        except AIError:
+                                 cache_key=f"strategy|{text.strip().lower()}", max_age=86400,
+                                 accept=lambda t: _usable_reading(extract_json(t), TEMPLATES))
+            return _strategy_spec(extract_json(answer["text"]), TEMPLATES)
+        except Exception:                               # noqa: BLE001 - an unreadable answer means "cannot tell"
             return None
-        j = extract_json(answer["text"])
-        if not isinstance(j, dict) or j.get("strategy") not in TEMPLATES:
-            return None
-        out: dict[str, Any] = {"strategy": j["strategy"]}
-        sym = j.get("symbol")
-        if isinstance(sym, str) and re.fullmatch(r"[A-Za-z]{1,5}(\.[A-Za-z])?", sym.strip()):
-            out["symbol"] = sym.strip().upper()
 
-        def num(name: str, lo: float, hi: float, kind: type = float) -> None:
-            v = j.get(name)
-            try:
-                v = kind(v)
-            except (TypeError, ValueError):
-                return
-            if isinstance(v, float) and not math.isfinite(v):
-                return
-            if lo <= v <= hi:
-                out[name] = v
 
-        num("dte", 1, 1000, int)
-        num("delta", 0.02, 0.98)
-        num("width", 0.01, 10_000)
-        num("contracts", 1, 100, int)
-        num("center", 0.01, 1_000_000)
-        ks = j.get("strikes")
-        if isinstance(ks, list) and 1 <= len(ks) <= 4:
-            try:
-                vals = [float(k) for k in ks]
-            except (TypeError, ValueError):
-                vals = []
-            if vals and all(math.isfinite(k) and k > 0 for k in vals):
-                out["strikes"] = vals
-        if j.get("after_earnings") is True:
-            out["after_earnings"] = True
-        return out
+def _usable_reading(j: Any, templates: dict[str, Any]) -> bool:
+    """Worth keeping: a valid template, or a plain "cannot tell" (null)."""
+    return isinstance(j, dict) and (j.get("strategy") is None or _strategy_spec(j, templates) is not None)
+
+
+def _strategy_spec(j: Any, templates: dict[str, Any]) -> dict[str, Any] | None:
+    """The settings the model gave, each checked for type and range; None unless it names a template."""
+    if not isinstance(j, dict) or not isinstance(j.get("strategy"), str) or j["strategy"] not in templates:
+        return None
+    out: dict[str, Any] = {"strategy": j["strategy"]}
+    sym = j.get("symbol")
+    if isinstance(sym, str) and re.fullmatch(r"[A-Za-z]{1,5}(\.[A-Za-z])?", sym.strip()):
+        out["symbol"] = sym.strip().upper()
+    for name, lo, hi, whole in (("dte", 1, 1000, True), ("delta", 0.02, 0.98, False), ("width", 0.01, 10_000, False),
+                                ("contracts", 1, 100, True), ("center", 0.01, 1_000_000, False)):
+        v = _number(j.get(name))
+        if v is None or not lo <= v <= hi or (whole and v != int(v)):
+            continue
+        out[name] = int(v) if whole else v
+    ks = j.get("strikes")
+    if isinstance(ks, list) and 1 <= len(ks) <= 4:
+        vals = [_number(k) for k in ks]
+        if all(v is not None and 0 < v < 1_000_000 for v in vals):
+            out["strikes"] = vals
+    if j.get("after_earnings") is True:
+        out["after_earnings"] = True
+    return out
 
 
 __all__ = ["Briefs", "makeup_text"]

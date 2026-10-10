@@ -9,7 +9,7 @@ import math
 from datetime import date, datetime
 from typing import Any
 
-from ..optionmath import NY, days_to_expiry
+from ..optionmath import NY, days_to_expiry, years_to_expiry
 from ..providers.base import DataError
 from . import volatility
 
@@ -84,18 +84,29 @@ class OptionsLab:
         if not sigma:
             raise ValueError("This contract has no usable volatility (no two-sided quotes near it)")
         event_move = event_t = None
+        jump_note = None
         if req.get("earnings_jump"):
             prof = self.volatility(symbol, 6)
             ev = prof.get("event") or {}
             when = (prof.get("earnings") or {}).get("date")
-            if ev.get("available") and when and when <= expiration:
-                event_move = ev["move_pct"] / 100
-                event_t = max((date.fromisoformat(when) - datetime.now(NY).date()).days, 0) / 365.0
+            # The jump is placed at the close of the report day, on the same clock as the option's own time
+            # (to 4 pm New York on expiration). A report on the expiration day itself is left out, as the
+            # implied move is: whether it lands before the option ends depends on the time of the report.
+            t_event = years_to_expiry(when) if when else None
+            if not (ev.get("available") and when):
+                jump_note = "no implied earnings move could be measured before this expiration"
+            elif when >= expiration:
+                jump_note = "the report is not before this expiration"
+            elif t_event is None or not 0 < t_event < analysis.t or date.fromisoformat(when) < datetime.now(NY).date():
+                jump_note = "the report date has passed"
+            else:
+                move = ev["move_pct"] / 100
                 # Remove the event's variance from this strike's volatility, so it is not counted twice.
-                base_var = sigma * sigma * analysis.t - event_move ** 2
+                base_var = sigma * sigma * analysis.t - move ** 2
                 if base_var <= 0:
-                    event_move = None
+                    jump_note = "this strike's volatility is smaller than the implied earnings move"
                 else:
+                    event_move, event_t = move, t_event
                     sigma = math.sqrt(base_var / analysis.t)
         premium = req.get("premium")
         if premium is None:
@@ -111,9 +122,8 @@ class OptionsLab:
                        "volatility_source": row.get("model_source"), "bid": row.get("bid"), "ask": row.get("ask"),
                        "mid": row.get("mid"), "premium_source": "you" if req.get("premium") is not None else "midpoint",
                        "data_source": self.svc.market.info.mode})
-        if req.get("earnings_jump") and event_move is None:
-            result["notes"].append("No earnings jump was added: no implied earnings move could be measured before this "
-                                   "expiration.")
+        if req.get("earnings_jump") and result.get("event") is None:
+            result["notes"].append(f"No earnings jump was added: {jump_note or 'it would fall outside the option life'}.")
         return result
 
 
