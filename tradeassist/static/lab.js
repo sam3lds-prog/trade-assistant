@@ -598,6 +598,7 @@ function renderBrief(b) {
   } else {
     box.append(banner("warn", "The answer did not come back in the expected form; here it is as written."), el("p", { class: "pre-wrap", text: b.text || "" }));
   }
+  if (b.truncated) box.prepend(banner("info", "The model reached its length limit, so the last part may be cut short. \"Write a fresh one\" asks again."));
   box.append(sourcesList(b.sources));
   const u = b.usage || {};
   box.append(el("p", { class: "small muted", text: `${b.model} · ${new Date(b.at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` +

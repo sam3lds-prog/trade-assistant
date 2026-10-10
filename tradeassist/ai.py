@@ -61,7 +61,63 @@ def extract_json(text: str) -> Any | None:
         return None
 
 
+CITE_TAG = re.compile(r"</?cite\b[^>]*>")
+CITE_TAIL = re.compile(r"</?cite\b[^>]*$")        # a tag cut off at the end of a reply
+
+
+def strip_markup(text: str) -> str:
+    """Citation tags the model sometimes writes into its text (the sources are listed separately)."""
+    return CITE_TAIL.sub("", CITE_TAG.sub("", text))
+
+
+def _repair(s: str) -> Any | None:
+    """A JSON object cut off part-way (a reply that ran out of length), closed so it can be read:
+    the open string is ended, a dangling key or trailing comma dropped, and open brackets closed."""
+    stack: list[str] = []
+    in_str = esc = False
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack:
+                return None
+            stack.pop()
+            if not stack:
+                return None                         # complete, so not a cut-off object
+    if not stack:
+        return None
+    t = s[:-1] if (in_str and esc) else s
+    if in_str:
+        t += '"'
+    t = t.rstrip()
+    for _ in range(3):
+        before = t
+        t = re.sub(r",\s*$", "", t)
+        if stack[-1] == "{":
+            t = re.sub(r'([{,])\s*"(?:[^"\\]|\\.)*"\s*:?\s*$', r"\1", t)    # a key with no value yet
+            t = re.sub(r",\s*$", "", t)
+        if t == before:
+            break
+    t += "".join("}" if c == "{" else "]" for c in reversed(stack))
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) and obj else None
+
+
 def _extract_json(text: str) -> Any | None:
+    text = CITE_TAG.sub("", text)
     fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
     for chunk in reversed(fenced):
         try:
@@ -75,6 +131,10 @@ def _extract_json(text: str) -> Any | None:
         try:
             obj, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
+            # An object that runs to the end of the text was cut off: close it and use it.
+            fixed = _repair(re.sub(r"\s*```\s*$", "", text[i:]))
+            if fixed is not None:
+                return fixed
             i = text.find("{", i + 1)
             continue
         if isinstance(obj, dict):
@@ -91,11 +151,15 @@ def _texts(value: Any, limit: int = 8, size: int = 400) -> list[str]:
         value = [value]
     if not isinstance(value, list):
         return []
-    return [str(v).strip()[:size] for v in value if isinstance(v, (str, int, float)) and str(v).strip()][:limit]
+    out = [strip_markup(str(v)).strip()[:size] for v in value if isinstance(v, (str, int, float))]
+    return [v for v in out if v][:limit]
 
 
 def _text(value: Any, size: int = 1500) -> str | None:
-    return str(value).strip()[:size] if isinstance(value, (str, int, float)) and str(value).strip() else None
+    if not isinstance(value, (str, int, float)):
+        return None
+    v = strip_markup(str(value)).strip()[:size]
+    return v or None
 
 
 def _count(value: Any) -> int:
@@ -245,6 +309,7 @@ class AIClient:
         content: list[dict[str, Any]] = []
         started = time.time()
         finished = False
+        stop = None
         for _ in range(MAX_CONTINUATIONS + 1):
             row = self._reserve(purpose)
             usage = {"input_tokens": 0, "output_tokens": 0, "web_searches": 0}
@@ -254,7 +319,8 @@ class AIClient:
                 part = parse_response(self._post(body))
                 usage = part["usage"]
                 content.extend(part["content"])
-                finished = part["stop_reason"] != "pause_turn"
+                stop = part["stop_reason"]
+                finished = stop != "pause_turn"
                 self._settle(row, usage, True)
             except Exception as exc:                   # noqa: BLE001 - every failure is recorded, then shown safely
                 err = exc if isinstance(exc, AIError) else AIError(
@@ -278,10 +344,12 @@ class AIClient:
         out = {"text": parsed["text"], "sources": parsed["sources"], "searches": parsed["searches"], "usage": total,
                "model": self.settings.ai_model, "web_search": web_search,
                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-               "seconds": round(time.time() - started, 1), "cached": False}
+               "seconds": round(time.time() - started, 1), "cached": False,
+               "truncated": stop == "max_tokens"}
         emit("ai_request", purpose=purpose, model=self.settings.ai_model, input_tokens=total["input_tokens"],
              output_tokens=total["output_tokens"], web_searches=total["web_searches"])
-        if key and (accept is None or _accepts(accept, out["text"])):
+        # A reply cut off at the length limit is shown, but asked again next time rather than kept.
+        if key and not out["truncated"] and (accept is None or _accepts(accept, out["text"])):
             self.db.cache_put(key, out)
         return out
 

@@ -14,7 +14,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from .ai import AIClient, AIError, _text, _texts, extract_json
+from .ai import AIClient, AIError, _text, _texts, extract_json, strip_markup
 from .optionmath import NY
 from .providers.base import DataError
 
@@ -122,7 +122,8 @@ class Briefs:
 
     def _finish(self, kind: str, answer: dict[str, Any], prompt: str, fields: dict[str, Any] | None,
                 extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        return {"kind": kind, "brief": fields, "text": None if fields else answer["text"][:4000],
+        return {"kind": kind, "brief": fields, "text": None if fields else strip_markup(answer["text"])[:6000],
+                "truncated": bool(answer.get("truncated")),
                 "sources": answer["sources"][:12], "searches": answer["searches"], "usage": answer["usage"],
                 "model": answer["model"], "web_search": answer["web_search"], "at": answer["at"],
                 "cached": answer["cached"], "sent": prompt, **(extra or {}),
@@ -137,11 +138,12 @@ class Briefs:
                   + ("Search the web for today's most important market news (economic data, central banks, big earnings, "
                      "large moves) from reputable outlets, and use it alongside the figures. If the figures and the news "
                      "disagree, say so.\n" if web_search else "Use only the figures and headlines above.\n")
+                  + "Keep the whole reply under 450 words: each list item one or two sentences. Write plain text inside the JSON, with no citation tags or other markup (the sources are collected separately). "
                   + 'Write today\'s market brief. Reply with only a JSON object: {"headline": "one line", "summary": '
                     '"three to five sentences", "drivers": ["up to five things moving markets"], "risks": ["up to four"], '
                     '"watch": ["up to four upcoming events, with dates when known"], "tone": "risk-on, risk-off or mixed"}')
         hour = datetime.now(NY).strftime("%Y-%m-%d %H")
-        answer = self.ai.ask(purpose="market_brief", prompt=prompt, web_search=web_search, max_tokens=1800,
+        answer = self.ai.ask(purpose="market_brief", prompt=prompt, web_search=web_search, max_tokens=4000,
                              cache_key=f"market|{hour}|{m['data_source']}", max_age=1800, refresh=refresh,
                              accept=_has_summary)
         j = extract_json(answer["text"])
@@ -227,13 +229,14 @@ class Briefs:
                      "or regulatory news) from reputable outlets. If you find discussion on social media or forums, you "
                      "may summarise it in the social field, clearly as unverified chatter.\n" if web_search else
                      "Use only the figures and headlines above.\n")
+                  + "Keep the whole reply under 450 words: each list item one or two sentences. Write plain text inside the JSON, with no citation tags or other markup (the sources are collected separately). "
                   + f'Write a brief on {symbol}. Reply with only a JSON object: {{"headline": "one line", "summary": '
                     '"three to five sentences", "news": ["up to five recent items that matter"], "options_view": "what '
                     'the options figures imply, in one or two sentences", "bull_points": ["up to three"], "bear_points": '
                     '["up to three"], "events": ["upcoming dates that matter"], "social": "a sentence, or null", '
                     '"sentiment": "positive, negative, mixed or unclear"}')
         hour = datetime.now(NY).strftime("%Y-%m-%d %H")
-        answer = self.ai.ask(purpose="stock_brief", prompt=prompt, web_search=web_search, max_tokens=1800,
+        answer = self.ai.ask(purpose="stock_brief", prompt=prompt, web_search=web_search, max_tokens=4000,
                              cache_key=f"stock|{symbol}|{hour}|{self.svc.market.info.mode}", max_age=1800, refresh=refresh,
                              accept=_has_summary)
         j = extract_json(answer["text"])
