@@ -1,4 +1,4 @@
-# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.3.1)
+# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.4)
 
 This is the engineering record for the improvement programme that follows 2.1.0: the
 baseline it started from, what was found in the code, what each sprint changed, the tests
@@ -432,3 +432,34 @@ What this means for a real database:
 | Every screen opens without a script error, desktop and phone width | pass (`test_static_assets.py`; screenshots) |
 | Version numbers | `tradeassist.__version__` 2.3.1; the page warns when it was loaded from an older version |
 | CI | the workflow is in `.github/workflows/tests.yml`, but GitHub Actions has not run on this repository (no runs recorded; it appears to be switched off in the repository's settings) |
+
+## 2.4: options analytics, scanner, strategies, AI and news
+
+Requested: implied volatility and pricing analytics (Black-Scholes and Monte Carlo), sentiment
+from news and market flow, scanners for unusual activity and technical signals, strategy
+modelling for multi-leg trades described in plain language, and an AI plug-in that pulls
+the latest news and the market's make-up. Built in five parts, each merged into `main`
+separately, under the same rules as before: the app never places an order, unknown values
+are never shown as zero, historical frequencies are labelled as such, and new capabilities
+have a feature flag.
+
+### Part 1: options lab (volatility and pricing)
+
+| Requirement | Done | Where | Tests (`test_options_lab.py` unless noted) |
+| --- | --- | --- | --- |
+| Implied volatility across expirations | At-the-money volatility, 1-sd expected move and range, straddle, 25-delta call and put volatility, skew and butterfly for up to eight expirations spread from a week to a year; term-structure shape; 30-day volatility by total-variance interpolation | `options/volatility.py`, `options/lab.py` | `test_iv_at_delta_*`, `test_expiration_row_*`, `test_shape_*`, `test_iv30_*`, `test_pick_expirations_*` |
+| Implied earnings move | From the extra variance after the report, with either an expiration before it or two after it; report-day expirations left out; reasons when not measurable | `options/volatility.py` | `test_implied_earnings_move_*` (3) |
+| Implied against realized | 10, 20 and 60-day realized volatility from finished bars; premium and ratio against the 20-day figure, not shown when the stock has not moved | `options/volatility.py` | `test_realized_*`, `test_profile_*` |
+| Monte Carlo | Risk-neutral paths, antithetic, seed 7, bounded size; value with standard error checked against Black-76; finish and touch odds (closing price simulated, BGK and reflection formulas); outcome histogram; buyer's profit share and percentiles at a given price; optional earnings jump with its variance removed from the contract's volatility | `options/volatility.py`, `options/lab.py` | `test_monte_carlo_*` (8), `test_touch_*` (2), `test_an_earnings_jump_*`, `test_the_buyer_block_*`, `test_histogram_*` |
+| API and screen | `GET /v2/options/{symbol}/volatility`, `POST /v2/options/montecarlo` (a model: nothing recorded); Options lab screen with the term-structure chart, expirations table and the simulation; `options_lab` flag | `api_v2.py`, `features.py`, `static/lab.js`, `index.html`, `api.py` | `test_volatility_endpoint_*`, `test_monte_carlo_endpoint_*`, `test_the_options_lab_can_be_switched_off`, `test_static_assets.py` (now covers three scripts) |
+
+Found and fixed during this part:
+
+| Finding | Status |
+| --- | --- |
+| A stock with no movement gave a realized volatility of about 1e-16 rather than exactly zero, so implied over realized came out in the trillions | Fixed: no ratio below 0.01 volatility points; test added |
+| `test_followup_an_option_on_a_held_stock_is_not_blocked_by_the_shares_risk` failed on main from October 2026: the demo chain now puts a 5% out-of-the-money put above the $200 per-trade limit by itself, so the test no longer tested what its name says | Test now picks a put that fits the limit on its own; the check it guards (the shares' risk is not added to the option's) is unchanged and passes |
+
+Known limitations: one volatility per path (no fat tails or volatility changes); the implied
+earnings move assumes the base volatility is the same before and after the report; American
+early exercise is not modelled (the chain's Black-76 prices are European on the forward).

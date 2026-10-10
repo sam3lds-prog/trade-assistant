@@ -300,7 +300,7 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
     @app.get("/")
     def index():
         html = (STATIC / "index.html").read_text()
-        for name in ("app.css", "app.js", "v2.js"):
+        for name in ("app.css", "app.js", "v2.js", "lab.js"):
             stamp = f"{__version__}-{int((STATIC / name).stat().st_mtime)}"
             html = html.replace(f'"/{name}"', f'"/{name}?v={stamp}"')
         return HTMLResponse(html, headers=fresh)

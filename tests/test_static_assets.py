@@ -1,7 +1,7 @@
-"""The page's two scripts load together.
+"""The page's scripts load together.
 
-app.js and v2.js are classic scripts sharing one global scope, so a name declared at the top
-level of both (`function ageText` in one, `const ageText` in the other) makes the browser
+app.js, v2.js and lab.js are classic scripts sharing one global scope, so a name declared at the top
+level of two of them (`function ageText` in one, `const ageText` in the other) makes the browser
 reject the second script whole, and every V2 screen with it. 2.2.0 shipped that way; these
 checks keep it from happening again. The browser test runs only where Playwright and Chromium
 are installed.
@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
+SCRIPTS = ("app.js", "v2.js", "lab.js")                 # in the order index.html loads them
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -27,14 +28,24 @@ def top_level(name: str) -> set[str]:
     return set(TOP_LEVEL.findall((STATIC / name).read_text()))
 
 
-def test_no_name_is_declared_at_the_top_of_both_scripts():
-    assert top_level("app.js") & top_level("v2.js") == set()
+def test_no_name_is_declared_at_the_top_of_two_scripts():
+    for i, a in enumerate(SCRIPTS):
+        for b in SCRIPTS[i + 1:]:
+            assert top_level(a) & top_level(b) == set(), (a, b)
+
+
+def test_index_loads_every_script_in_order_with_a_fresh_address():
+    from tradeassist import api
+    html = (STATIC / "index.html").read_text()
+    found = re.findall(r'<script src="/(\w+\.js)"', html)
+    assert tuple(found) == SCRIPTS
+    assert all(f'"{name}"' in Path(api.__file__).read_text() for name in SCRIPTS)
 
 
 def test_every_navigation_button_has_a_screen():
     html = (STATIC / "index.html").read_text()
     views = set(re.findall(r'data-view="(\w+)"', html))
-    js = (STATIC / "app.js").read_text() + (STATIC / "v2.js").read_text()
+    js = "".join((STATIC / name).read_text() for name in SCRIPTS)
     registered = set()
     for block in re.findall(r"BUILDERS = \{([^}]*)\}|Object\.assign\(BUILDERS, \{([^}]*)\}\)", js):
         for part in block:
@@ -47,7 +58,7 @@ def test_every_navigation_button_has_a_screen():
 def test_the_scripts_compile_as_one_page(tmp_path):
     # One script made of both files: a clashing declaration is an early SyntaxError when compiled.
     joined = tmp_path / "page.js"
-    joined.write_text((STATIC / "app.js").read_text() + "\n;\n" + (STATIC / "v2.js").read_text())
+    joined.write_text("\n;\n".join((STATIC / name).read_text() for name in SCRIPTS))
     check = "const vm = require('vm'); new vm.Script(require('fs').readFileSync(process.argv[1], 'utf8'));"
     out = subprocess.run(["node", "-e", check, str(joined)], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr[-2000:]
@@ -98,7 +109,7 @@ def test_every_screen_opens_without_a_script_error(tmp_path):
             page.goto(f"http://127.0.0.1:{port}/")
             page.wait_for_function("document.querySelectorAll('#main > section').length > 0", timeout=20000)
             views = page.eval_on_selector_all(".rail button.nav:not(.hidden)", "bs => bs.map(b => b.dataset.view)")
-            assert {"positions", "portfolio", "health"} <= set(views)
+            assert {"positions", "portfolio", "health", "lab"} <= set(views)
             for v in views:
                 page.click(f'.rail button.nav[data-view="{v}"]')
                 page.wait_for_timeout(400)

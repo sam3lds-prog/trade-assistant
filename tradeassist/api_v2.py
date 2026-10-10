@@ -183,6 +183,18 @@ class OptionsCompare(OptionsEvaluate):
     contracts_to_compare: list[ContractRef] = Field(..., min_length=1, max_length=8)
 
 
+class MonteCarloRequest(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    expiration: str
+    option_type: Literal["call", "put"]
+    strike: float = Field(..., gt=0)
+    premium: float | None = Field(None, ge=0)
+    contracts: int = Field(1, ge=1, le=500)
+    paths: int = Field(20_000, ge=2_000, le=100_000)
+    seed: int = Field(7, ge=0, le=2**31 - 1)
+    earnings_jump: bool = False
+
+
 class ReversalOptions(Strict):
     symbol: str
     side: Literal["auto", "bottom", "top"] = "auto"
@@ -493,6 +505,27 @@ def build_router(svc: Any) -> APIRouter:
         need("reversal_analysis")
         try:
             return clean(analyst.reversal_options(req.model_dump()))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- options lab (2.4) ------------------------------------------------------------------------
+    from .options.lab import OptionsLab
+    lab = svc.lab if getattr(svc, "lab", None) else OptionsLab(svc)
+    svc.lab = lab
+
+    @router.get("/options/{symbol}/volatility")
+    def option_volatility(symbol: str, expirations: int = 8):
+        need("options_lab")
+        try:
+            return clean(lab.volatility(symbol, expirations))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/options/montecarlo")
+    def option_monte_carlo(req: MonteCarloRequest):
+        need("options_lab")
+        try:
+            return clean(lab.monte_carlo(req.model_dump()))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
