@@ -150,7 +150,13 @@ class NewsClient:
         except requests.RequestException as exc:
             raise RuntimeError(f"Could not reach Finnhub ({exc.__class__.__name__})") from exc
         if r.status_code in (401, 403):
-            raise RuntimeError("Finnhub refused the key. Check FINNHUB_API_KEY in .env.")
+            detail = self._detail(r)
+            if r.status_code == 401:
+                raise RuntimeError("Finnhub refused the key: check FINNHUB_API_KEY in .env (the API key from your "
+                                   "Finnhub dashboard, not the webhook secret)" + (f". Finnhub said: {detail}" if detail else "."))
+            raise RuntimeError(f"Finnhub says this key may not use {path}" + (f" ({detail})" if detail else "")
+                               + ". Free keys cover general market news and news on US-listed companies; a new key can "
+                                 "also take a few minutes to start working.")
         if r.status_code == 429:
             raise RuntimeError("Finnhub's rate limit was reached (free keys allow about 60 requests a minute).")
         if r.status_code != 200:
@@ -159,6 +165,20 @@ class NewsClient:
             return r.json()
         except ValueError as exc:
             raise RuntimeError("Finnhub sent a reply this app could not read") from exc
+
+    def _detail(self, r: Any) -> str:
+        """Finnhub's own reason for refusing, short, without the key."""
+        try:
+            body = r.json()
+            text = body.get("error") if isinstance(body, dict) else None
+        except ValueError:
+            text = getattr(r, "text", None)
+        if not isinstance(text, str):
+            return ""
+        key = self.settings.finnhub_api_key
+        if key:
+            text = text.replace(key, "[redacted]")
+        return redact(" ".join(text.split()))[:160]
 
     def _failed(self, what: str, exc: Exception) -> str:
         msg = redact(str(exc))
