@@ -26,6 +26,9 @@ V2_WRITES = {
     "/v2/diagnostics/repair",
     # 2.4: options lab. Models only; no orders.
     "/v2/options/montecarlo",
+    # 2.4: strategy builder. Models only; no orders and nothing recorded.
+    "/v2/strategies/build",
+    "/v2/strategies/parse",
 }
 
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."

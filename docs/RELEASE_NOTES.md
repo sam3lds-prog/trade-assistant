@@ -42,6 +42,15 @@ than their open interest. Option volume does not show who bought and who sold, s
 screen never calls it bullish or bearish. Switch it off with `FEATURE_SCANNER=0`. Details:
 [V2.md](V2.md#scanner-24).
 
+**Strategy builder** (on the Simulate screen). Describe a trade in plain words ("AAPL iron
+condor 45 days 16 delta 5 wide") or pick one of 16 strategies: verticals, straddles,
+strangles, iron condors and butterflies, butterflies and calendars. The app picks real listed
+contracts by delta and width, shows the net debit or credit, the most it can make and lose,
+breakevens, the market-implied chance of a profit and whether it fits your per-trade risk
+limit, lets you move the strikes or wings one strike at a time, and loads it into the
+simulator. Modelled only: nothing is placed or recorded. Switch it off with
+`FEATURE_STRATEGY_BUILDER=0`. Details: [V2.md](V2.md#strategy-builder-24).
+
 ## 2.3.1
 
 Fixes from an independent review of 2.1.0 to 2.3.0. Every one was reproduced first and has a
