@@ -463,3 +463,17 @@ Found and fixed during this part:
 Known limitations: one volatility per path (no fat tails or volatility changes); the implied
 earnings move assumes the base volatility is the same before and after the report; American
 early exercise is not modelled (the chain's Black-76 prices are European on the forward).
+
+### Part 2: scanner (technical signals and options activity)
+
+| Requirement | Done | Where | Tests (`test_scanner.py` unless noted) |
+| --- | --- | --- | --- |
+| Scan many stocks for technical signals | RSI, MACD against its signal, 50 and 200-day averages, 52-week range, volume against its 20-day average and every pattern-lab pattern in the last 1 to 10 bars, for the watchlist, 100 large US companies or typed tickers (at most 120); filters; most recent signals first | `scanner.py`, `GET /v2/scan/technical` | `test_universes`, `test_readings_*`, `test_unknown_readings_*`, `test_a_volume_spike_*`, `test_technical_row_*`, `test_filters_and_order`, `test_technical_scan_endpoint` |
+| Signals with honest odds | Each signal carries the signal history's pooled 10-day frequency with the overlap-aware interval and the lab's verdicts, labelled as a historical frequency; nothing is shown before the history is built | `scanner.py`, `signalbook.py` | `test_technical_scan_attaches_past_cases_*`, `test_technical_row_*` |
+| Unusual options activity | Call and put volume, open interest, put/call ratios, approximate premium traded, call-heavy / put-heavy / balanced, and contracts trading at least their open interest; at most 30 stocks and six expirations each; never labelled bullish or bearish, and unknown volume stays unknown | `scanner.py`, `GET /v2/scan/flow` | `test_flow_summary_*`, `test_flow_thresholds_*`, `test_flow_with_no_volume_*`, `test_flow_expirations_*`, `test_options_activity_endpoint` |
+| Screen and flag | Scanner screen with both scans, linked to Analyze and the Options lab; `scanner` flag | `static/lab.js`, `index.html`, `app.css`, `features.py` | `test_the_scanner_can_be_switched_off`, `test_static_assets.py` |
+| Demo data | The occasional demo contract trades more than its open interest, so the scan has something to find | `providers/demo.py` | `test_demo_chains_now_and_then_*` |
+
+Known limitations: the large-company list is fixed; volume and open interest are the
+provider's (open interest is usually as of the previous close), and there is no record of
+each contract's usual volume, so "unusual" is measured against open interest only.

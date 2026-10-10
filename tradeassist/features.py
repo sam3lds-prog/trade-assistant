@@ -20,6 +20,7 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "signal_calibration": True,
     "reversal_analysis": True,
     "options_lab": True,
+    "scanner": True,
     "options_backtest": False,
 }
 
