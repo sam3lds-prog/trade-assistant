@@ -245,7 +245,8 @@ def test_company_news_from_finnhub(tmp_path):
     db.close()
 
 
-@pytest.mark.parametrize("status,message", [(401, "refused the key"), (429, "rate limit"), (500, "returned 500")])
+@pytest.mark.parametrize("status,message", [(401, "refused the key"), (403, "may not use company-news"),
+                                            (429, "rate limit"), (500, "returned 500")])
 def test_news_failures_are_reported_without_the_key(tmp_path, caplog, status, message):
     db = Database(tmp_path / "t.db")
     client = nw.NewsClient(settings(tmp_path, finnhub_api_key="fh-secret-1"), db, None,
@@ -464,4 +465,15 @@ def test_migration_10_adds_the_usage_table(tmp_path):
     cols = [r["name"] for r in db.query("PRAGMA table_info(ai_usage)")]
     assert cols == ["id", "at", "day", "purpose", "model", "input_tokens", "output_tokens", "web_searches", "ok", "error"]
     assert db.schema_version() >= 10
+    db.close()
+
+
+def test_news_refusals_carry_finnhubs_reason_without_the_key(tmp_path):
+    db = Database(tmp_path / "t.db")
+    for status, body, words in ((401, {"error": "Invalid API key fh-secret-1"}, "Finnhub said: Invalid API key [redacted]"),
+                                (403, {"error": "You don't have access to this resource."}, "You don't have access")):
+        client = nw.NewsClient(settings(tmp_path, finnhub_api_key="fh-secret-1"), db, None,
+                               session=FakeFinnhub(status=status, body=body))
+        err = client.company("ACME")["errors"][0]
+        assert words in err and "fh-secret-1" not in err
     db.close()
