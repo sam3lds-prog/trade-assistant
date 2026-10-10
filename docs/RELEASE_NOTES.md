@@ -33,6 +33,15 @@ outcomes for a buyer at the midpoint or your price, optionally with the earnings
 These are what the market implies under a model, not forecasts, and nothing is recorded.
 Switch it off with `FEATURE_OPTIONS_LAB=0`. Details: [V2.md](V2.md#options-lab-24).
 
+**Scanner** (new screen). Scan the watchlist, 100 large US companies or your own tickers for
+RSI, MACD, moving-average and 52-week readings, volume spikes and every pattern-lab signal of
+the last few days; each signal shows how often it was followed by a move its way before
+(once the signal history is built), as a historical frequency, not a forecast. A second tab
+lists calls against puts, put/call ratios, premium traded and the contracts trading more
+than their open interest. Option volume does not show who bought and who sold, so the
+screen never calls it bullish or bearish. Switch it off with `FEATURE_SCANNER=0`. Details:
+[V2.md](V2.md#scanner-24).
+
 ## 2.3.1
 
 Fixes from an independent review of 2.1.0 to 2.3.0. Every one was reproduced first and has a

@@ -4,6 +4,9 @@
 
 const ivPct = v => isNum(v) ? `${(100 * v).toFixed(1)}%` : "n/a";
 const points = v => isNum(v) ? `${v > 0 ? "+" : ""}${v.toFixed(1)} pts` : "n/a";
+// Another screen can open the lab on a ticker: openInLab("MSFT").
+const LAB_NEXT = { symbol: null };
+function openInLab(symbol) { LAB_NEXT.symbol = symbol; show("lab"); }
 const SHAPE_TAG = { UPWARD: ["pass", "Upward sloping"], FLAT: ["info", "Flat"], INVERTED: ["warn", "Inverted: event priced soon"] };
 
 /* ---------- chart: implied volatility by days to expiration ---------- */
@@ -220,8 +223,192 @@ function buildOptionsLab() {
     el("p", { class: "lede", text: "What option prices say about a stock: implied volatility across expirations and strikes, the move they price in, earnings, how implied compares with what the stock has actually done, and a simulation of any contract. These are what the market implies under a model, not forecasts." }),
     el("div", { class: "panel" }, el("div", { class: "row" }, field("Ticker", sym), go), error),
     el("div", { class: "panel" }, volBox), mcPanel);
-  view.onShow = () => { if (!loaded) load(); };
+  view.onShow = () => {
+    if (LAB_NEXT.symbol) { sym.value = LAB_NEXT.symbol; LAB_NEXT.symbol = null; load(); }
+    else if (!loaded) load();
+  };
   return view;
 }
 
-Object.assign(BUILDERS, { lab: buildOptionsLab });
+/* ---------- scanner: technical signals and options activity ---------- */
+const bigMoney = v => {
+  if (!isNum(v)) return "n/a";
+  const a = Math.abs(v);
+  return a >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` : a >= 1e6 ? `$${(v / 1e6).toFixed(1)}M` : a >= 1e3 ? `$${(v / 1e3).toFixed(0)}K` : money(v, 0);
+};
+const ratioText = v => isNum(v) ? v.toFixed(2) : "n/a";
+const LEAN_TAG = { CALL_HEAVY: ["info", "Call-heavy"], PUT_HEAVY: ["info", "Put-heavy"], BALANCED: ["info", "Balanced"] };
+const RSI_WORDS = { OVERSOLD: "oversold", OVERBOUGHT: "overbought", NEUTRAL: "" };
+const MACD_WORDS = { ABOVE_SIGNAL: "Above signal", BELOW_SIGNAL: "Below signal" };
+const AVERAGE_WORDS = { ABOVE_BOTH: "Above both", BELOW_BOTH: "Below both", MIXED: "Between" };
+const WHEN_WORDS = n => n === 0 ? "last bar" : n === 1 ? "1 bar ago" : `${n} bars ago`;
+
+function openStock(symbol) {
+  if (BUILDERS.analyze) { show("analyze"); state.views.analyze.analyze(symbol); }
+  else openInLab(symbol);
+}
+
+function signalList(row) {
+  if (!row.signals.length) return el("span", { class: "muted", text: "none" });
+  return el("ul", { class: "signal-list" }, row.signals.map(s => el("li", {},
+    el("span", { class: s.direction > 0 ? "dir up" : "dir down", "aria-label": s.direction > 0 ? "expects a rise" : "expects a fall", text: s.direction > 0 ? "▲" : "▼" }),
+    " ", el("strong", { text: s.label }), s.status === "PROVISIONAL" ? el("span", {}, " ", statusTag("warn", "Provisional")) : null,
+    el("div", { class: "small muted" }, WHEN_WORDS(s.bars_ago),
+      s.past ? el("span", {}, " · past cases ", freqText(s.past)) : null,
+      s.lab && s.lab.length ? ` · lab: ${s.lab.map(v => `${v.horizon}d ${VERDICT_WORDS[v.verdict] || v.verdict}`).join(", ")}` : null))));
+}
+
+function renderTechnicalScan(d, reload) {
+  const frag = el("div");
+  for (const n of d.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
+  if (!d.history_built) frag.append(buildHistoryButton(reload));
+  frag.append(el("p", { class: "small", text: `${d.matched} of ${d.scanned} stocks shown · signals from the last ${d.lookback} bar${d.lookback === 1 ? "" : "s"} · checked ${new Date(d.checked_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}. Select a row to analyze the stock.` }));
+  if (d.errors.length) frag.append(banner("warn", `Not scanned: ${d.errors.map(e => `${e.symbol} (${e.error})`).join("; ")}.`));
+  if (!d.rows.length) { frag.append(el("p", { class: "muted", text: "No stock matches these filters." })); return frag; }
+  // Each stock is a row of readings with its signals on a full-width line underneath.
+  const cols = [
+    { label: "Stock", cell: r => el("strong", { text: r.symbol }) },
+    { label: "Close", num: true, cell: r => el("span", {}, money(r.close), r.bar_finished ? null : el("span", { class: "small muted", text: " so far" })) },
+    { label: "Day", num: true, cell: r => signedPct(r.change_pct, 1) },
+    { label: "RSI", num: true, cell: r => isNum(r.rsi) ? `${r.rsi.toFixed(0)}${RSI_WORDS[r.rsi_zone] ? ` ${RSI_WORDS[r.rsi_zone]}` : ""}` : "n/a" },
+    { label: "MACD", cell: r => MACD_WORDS[r.macd] || "n/a" },
+    { label: "50 & 200-day avg", cell: r => AVERAGE_WORDS[r.averages] || "n/a" },
+    { label: "52-week range", num: true, cell: r => isNum(r.range_52w_pct) ? `${r.range_52w_pct.toFixed(0)}%` : "n/a" },
+    { label: "Volume vs 20-day", num: true, cell: r => isNum(r.volume_ratio) ? el("span", {}, `${r.volume_ratio.toFixed(1)}×`, r.volume_spike ? el("span", {}, " ", statusTag("info", "Spike")) : null) : "n/a" }];
+  const tbody = el("tbody");
+  for (const r of d.rows) {
+    const open = () => openStock(r.symbol);
+    const main = el("tr", { class: "click", tabindex: "0" }, cols.map(c => el("td", { class: c.num ? "num" : null }, c.cell(r))));
+    const sub = el("tr", { class: "click sub" }, el("td", { colspan: cols.length }, signalList(r)));
+    for (const tr of [main, sub]) tr.addEventListener("click", open);
+    main.addEventListener("keydown", e => { if (e.key === "Enter") open(); });
+    tbody.append(main, sub);
+  }
+  frag.append(el("div", { class: "scroll scan-table tech" }, el("table", {},
+    el("thead", {}, el("tr", {}, cols.map(c => el("th", { class: c.num ? "num" : null, text: c.label })))), tbody)));
+  frag.append(el("p", { class: "small muted", text: "RSI is the 14-day relative strength index (30 or under oversold, 70 or over overbought). MACD is 12/26 against its 9-day signal line. The 52-week range is where the close sits between the year's low (0%) and high (100%). A volume spike is at least twice the 20-day average on a finished bar." }));
+  return frag;
+}
+
+function renderFlowScan(d) {
+  const frag = el("div");
+  for (const n of d.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
+  if (d.errors.length) frag.append(banner("warn", `Not scanned: ${d.errors.map(e => `${e.symbol} (${e.error})`).join("; ")}.`));
+  const st = d.settings;
+  frag.append(el("p", { class: "small", text: `${d.rows.length} stocks · the nearest ${st.expirations} expiration${st.expirations === 1 ? "" : "s"} within ${st.max_dte} days · unusual means at least ${num(st.min_volume, 0)} contracts traded and volume at least ${st.min_vol_oi}× open interest. Select a row to open the stock in the options lab.` }));
+  frag.append(el("h4", { text: "Calls against puts" }), table([
+    { label: "Stock", cell: r => el("strong", { text: r.symbol }) },
+    { label: "Calls", num: true, cell: r => num(r.call_volume, 0) },
+    { label: "Puts", num: true, cell: r => num(r.put_volume, 0) },
+    { label: "P/C volume", num: true, cell: r => ratioText(r.put_call_volume) },
+    { label: "P/C open int.", num: true, cell: r => ratioText(r.put_call_open_interest) },
+    { label: "Call premium", num: true, cell: r => bigMoney(r.call_premium) },
+    { label: "Put premium", num: true, cell: r => bigMoney(r.put_premium) },
+    { label: "Activity", cell: r => r.lean ? tagOf(LEAN_TAG, r.lean) : "n/a" },
+    { label: "Unusual", num: true, cell: r => String(r.unusual_count) }], d.rows, { onRow: r => openInLab(r.symbol) }));
+  frag.lastChild.classList.add("scan-table");
+  frag.append(el("h4", { text: `Unusually active contracts${d.unusual_total > d.unusual.length ? ` (largest ${d.unusual.length} of ${d.unusual_total})` : ""}` }));
+  if (!d.unusual.length) frag.append(el("p", { class: "muted", text: "None at these thresholds." }));
+  else frag.append(table([
+    { label: "Stock", cell: u => el("strong", { text: u.symbol }) },
+    { label: "Contract", cell: u => `${shortDate(u.expiration)} ${num(u.strike, u.strike % 1 ? 2 : 0)} ${u.option_type}` },
+    { label: "Days", num: true, cell: u => String(u.dte) },
+    { label: "Volume", num: true, cell: u => num(u.volume, 0) },
+    { label: "Open int.", num: true, cell: u => num(u.open_interest, 0) },
+    { label: "Volume / OI", num: true, cell: u => isNum(u.volume_to_oi) ? `${u.volume_to_oi.toFixed(1)}×` : "new" },
+    { label: "Premium", num: true, cell: u => bigMoney(u.premium) },
+    { label: "Strike vs price", num: true, cell: u => signedPct(u.moneyness_pct, 1) },
+    { label: "Delta", num: true, cell: u => isNum(u.delta) ? u.delta.toFixed(2) : "n/a" },
+    { label: "IV", num: true, cell: u => ivPct(u.iv) }], d.unusual, { onRow: u => openInLab(u.symbol) }));
+  if (d.unusual.length) frag.lastChild.classList.add("scan-table");
+  frag.append(el("p", { class: "small muted", text: "Premium traded is volume times the bid/ask midpoint times 100, so it is approximate. P/C is puts divided by calls: above 1 means more puts than calls. Activity is call-heavy when calls take 65% or more of the premium traded, put-heavy at 35% or less." }));
+  return frag;
+}
+
+function buildScanner() {
+  const tab = segmented("scantab", [["tech", "Technical signals"], ["flow", "Options activity"]], "tech");
+  const watchCount = () => ((state.status && state.status.watchlist) || []).length;
+  // technical
+  const uni = el("select", { "aria-label": "Stocks to scan" }, el("option", { value: "watchlist", text: "Watchlist" }),
+    el("option", { value: "large_caps", text: "100 large US companies" }), el("option", { value: "custom", text: "These tickers" }));
+  const syms = el("input", { type: "text", placeholder: "AAPL, MSFT, NVDA", autocomplete: "off", spellcheck: "false", "aria-label": "Tickers" });
+  const symsField = field("Tickers", syms); symsField.classList.add("hidden");
+  const look = el("select", { "aria-label": "Signals within" }, [1, 3, 5, 10].map(n => el("option", { value: n, text: n === 1 ? "the last bar" : `the last ${n} bars`, selected: n === 5 })));
+  const dir = el("select", { "aria-label": "Direction" }, el("option", { value: "", text: "Any" }), el("option", { value: "bullish", text: "Expects a rise" }), el("option", { value: "bearish", text: "Expects a fall" }));
+  const rsiSel = el("select", { "aria-label": "RSI" }, el("option", { value: "", text: "Any" }), el("option", { value: "oversold", text: "Oversold (30 or under)" }), el("option", { value: "overbought", text: "Overbought (70 or over)" }));
+  const sig = el("select", { "aria-label": "Signal" }, el("option", { value: "", text: "Any signal" }));
+  const spike = el("input", { type: "checkbox" });
+  const onlySig = el("input", { type: "checkbox" });
+  const runTech = el("button", { class: "primary", text: "Scan" });
+  const techErr = el("div", { class: "error", role: "alert" });
+  const techOut = el("div");
+  const techPanel = el("div", {},
+    el("div", { class: "panel" }, el("div", { class: "inline-form" }, field("Stocks", uni), symsField, field("Signals within", look),
+      field("Direction", dir), field("RSI", rsiSel), field("Signal", sig),
+      el("label", { class: "check" }, spike, " Volume at least twice its average"),
+      el("label", { class: "check" }, onlySig, " Only stocks with a signal"), runTech), techErr),
+    el("div", { class: "panel" }, techOut));
+  uni.addEventListener("change", () => symsField.classList.toggle("hidden", uni.value !== "custom"));
+  const techQuery = () => {
+    const q = new URLSearchParams({ universe: uni.value === "custom" ? "watchlist" : uni.value, lookback: look.value });
+    if (uni.value === "custom") { if (!syms.value.trim()) throw new Error("Enter at least one ticker."); q.set("symbols", syms.value); }
+    if (dir.value) q.set("direction", dir.value);
+    if (rsiSel.value) q.set("rsi", rsiSel.value);
+    if (sig.value) q.set("signal", sig.value);
+    if (spike.checked) q.set("min_volume_ratio", "2");
+    if (onlySig.checked) q.set("only_signals", "true");
+    return q;
+  };
+  const scanTech = () => withBusy(runTech, techErr, async () => {
+    techOut.classList.add("refetching");
+    try {
+      const d = await api(`/v2/scan/technical?${techQuery()}`);
+      if (sig.options.length === 1) sig.append(...d.signals.map(s => el("option", { value: s.key, text: `${s.direction > 0 ? "▲" : "▼"} ${s.label}` })));
+      techOut.replaceChildren(renderTechnicalScan(d, scanTech));
+    } finally { techOut.classList.remove("refetching"); }
+  });
+  runTech.addEventListener("click", scanTech);
+  // options activity
+  const fUni = el("select", { "aria-label": "Stocks to scan" }, el("option", { value: "watchlist", text: "Watchlist" }), el("option", { value: "custom", text: "These tickers" }));
+  const fSyms = el("input", { type: "text", placeholder: "AAPL, MSFT, NVDA", autocomplete: "off", spellcheck: "false", "aria-label": "Tickers" });
+  const fSymsField = field("Tickers", fSyms); fSymsField.classList.add("hidden");
+  const maxDte = el("select", { "aria-label": "Expirations within" }, [14, 30, 60, 90].map(n => el("option", { value: n, text: `${n} days`, selected: n === 60 })));
+  const nExp = el("select", { "aria-label": "Expirations" }, [1, 2, 3, 4, 6].map(n => el("option", { value: n, text: String(n), selected: n === 3 })));
+  const minVol = el("input", { type: "number", min: 1, step: 50, value: 250, "aria-label": "Minimum volume" });
+  const minRatio = el("input", { type: "number", min: 0, step: 0.5, value: 1, "aria-label": "Volume to open interest" });
+  const runFlow = el("button", { class: "primary", text: "Scan options" });
+  const flowErr = el("div", { class: "error", role: "alert" });
+  const flowOut = el("div");
+  const flowPanel = el("div", { class: "hidden" },
+    el("div", { class: "panel" }, el("div", { class: "inline-form" }, field("Stocks", fUni), fSymsField, field("Expirations within", maxDte),
+      field("How many", nExp), field("At least this volume", minVol), field("Volume / open interest", minRatio), runFlow), flowErr,
+      el("p", { class: "small muted", text: "Reads up to 30 stocks, each with its nearest expirations: about one request per expiration." })),
+    el("div", { class: "panel" }, flowOut));
+  fUni.addEventListener("change", () => fSymsField.classList.toggle("hidden", fUni.value !== "custom"));
+  const scanFlow = () => withBusy(runFlow, flowErr, async () => {
+    const q = new URLSearchParams({ universe: "watchlist", max_dte: maxDte.value, expirations: nExp.value,
+      min_volume: Math.max(1, Math.round(Number(minVol.value) || 250)), min_vol_oi: Math.max(0, Number(minRatio.value) || 0) });
+    if (fUni.value === "custom") { if (!fSyms.value.trim()) throw new Error("Enter at least one ticker."); q.set("symbols", fSyms.value); }
+    flowOut.classList.add("refetching");
+    try { flowOut.replaceChildren(renderFlowScan(await api(`/v2/scan/flow?${q}`))); }
+    finally { flowOut.classList.remove("refetching"); }
+  });
+  runFlow.addEventListener("click", scanFlow);
+  let flowRan = false;
+  tab.addEventListener("change", () => {
+    const flow = tab.value() === "flow";
+    techPanel.classList.toggle("hidden", flow); flowPanel.classList.toggle("hidden", !flow);
+    if (flow && !flowRan) { flowRan = true; scanFlow(); }
+  });
+  const view = el("section", {}, el("h2", { text: "Scanner" }),
+    el("p", { class: "lede", text: "Technical signals across many stocks, each with how the same signal turned out before, and options trading unusually heavily against its open interest. Past cases are historical frequencies, not forecasts; options volume does not show who bought and who sold." }),
+    el("div", { class: "row" }, tab), techPanel, flowPanel);
+  let ran = false;
+  view.onShow = () => {
+    uni.options[0].textContent = `Watchlist (${watchCount()})`; fUni.options[0].textContent = `Watchlist (${watchCount()})`;
+    if (!ran) { ran = true; scanTech(); }
+  };
+  return view;
+}
+
+Object.assign(BUILDERS, { lab: buildOptionsLab, scanner: buildScanner });

@@ -227,6 +227,9 @@ class DemoData:
                 weight = math.exp(-((k / 0.09) ** 2))
                 open_interest = float(int(6000 * weight * liquidity * (0.4 + noise.random())))
                 volume = float(int(open_interest * 0.15 * noise.random()))
+                if weight > 0.05 and _seed("flow", occ, self.today.isoformat()) % 45 == 0:
+                    # Now and then a contract trades more than its open interest, as new positions open.
+                    volume = float(int(max(open_interest, 200) * (1.2 + (_seed("flow2", occ) % 30) / 10)))
                 greeks = None
                 if self.with_greeks:
                     g = black76_greeks(spot, forward, float(strike), t, RATE, quote_vol, option_type)

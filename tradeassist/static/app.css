@@ -332,3 +332,13 @@ dl.pairs dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   dl.pairs { grid-template-columns: 1fr; gap: 0; }
   dl.pairs dd { margin-bottom: 6px; }
 }
+
+/* 2.4 scanner */
+.scan-table td { white-space: nowrap; }
+.scan-table.tech tr:not(.sub) td { border-bottom: none; padding-bottom: 2px; }
+.scan-table.tech tr.sub td { white-space: normal; padding-top: 0; }
+ul.signal-list { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 4px 22px; }
+ul.signal-list li { line-height: 1.35; }
+.dir { font-size: 0.75rem; }
+.dir.up { color: var(--pass); }
+.dir.down { color: var(--fail); }

@@ -529,6 +529,38 @@ def build_router(svc: Any) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # --- scanners (2.4): technical signals and options activity; read only -----------------------
+    from .scanner import Scanner
+    scanner = Scanner(svc, analyst)
+
+    def _symbols(raw: str | None) -> list[str] | None:
+        return [x for x in (raw or "").replace(" ", ",").split(",") if x.strip()] or None
+
+    @router.get("/scan/technical")
+    def scan_technical(universe: str = "watchlist", symbols: str | None = None, lookback: int = 5,
+                       direction: str | None = None, signal: str | None = None, rsi: str | None = None,
+                       min_volume_ratio: float | None = None, only_signals: bool = False):
+        need("scanner")
+        try:
+            return clean(scanner.technical(universe_name=universe, symbols=_symbols(symbols), lookback=lookback,
+                                           direction=direction, signal=signal, rsi=rsi,
+                                           min_volume_ratio=min_volume_ratio, only_signals=only_signals))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/scan/flow")
+    def scan_flow(universe: str = "watchlist", symbols: str | None = None, max_dte: int = 60, expirations: int = 3,
+                  min_volume: int = 250, min_vol_oi: float = 1.0, min_premium: float = 0.0):
+        need("scanner")
+        if min_volume < 1 or min_vol_oi < 0 or min_premium < 0:
+            raise HTTPException(status_code=400, detail="Thresholds must be positive")
+        try:
+            return clean(scanner.flow(universe_name=universe, symbols=_symbols(symbols), max_dte=max_dte,
+                                      expirations=expirations, min_volume=min_volume, min_vol_oi=min_vol_oi,
+                                      min_premium=min_premium))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # --- portfolio risk ------------------------------------------------------------------------
     @router.get("/portfolio/risk")
     def portfolio_risk():
