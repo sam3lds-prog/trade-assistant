@@ -548,7 +548,10 @@ def test_followup_an_option_on_a_held_stock_is_not_blocked_by_the_shares_risk(ap
                                   "entry": {"price": round(spot, 2)}})
     exp = c.get("/api/expirations", params={"symbol": "AAPL"}).json()["expirations"][3]["date"]
     chain = c.get("/api/chain", params={"symbol": "AAPL", "expiration": exp}).json()
-    k = min((x for x in chain["contracts"] if x["option_type"] == "put"), key=lambda x: abs(x["moneyness_pct"] + 5))
+    # A put that fits the 2% ($200) per-trade limit by itself, whatever date the demo chain is built for:
+    # the check under test is that the shares' own risk is not added to the option's.
+    k = min((x for x in chain["contracts"] if x["option_type"] == "put" and x["ask"] and x["ask"] <= 1.8),
+            key=lambda x: abs(x["moneyness_pct"] + 5))
     t = c.post("/api/ticket", json={"symbol": "AAPL", "expiration": exp, "option_type": "put", "strike": k["strike"],
                                     "contracts": 1, "limit_price": k["ask"], "thesis": "A protective put on the shares I hold."}).json()
     trade = next(x for x in t["priced"]["scorecard"]["checks"] if x["key"] == "trade_risk")

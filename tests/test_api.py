@@ -24,6 +24,8 @@ V2_WRITES = {
     "/v2/positions/{position_id}/option/adjust",
     # 2.3: recompute stored figures from the fills, after a backup. Records only; no orders.
     "/v2/diagnostics/repair",
+    # 2.4: options lab. Models only; no orders.
+    "/v2/options/montecarlo",
 }
 
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."

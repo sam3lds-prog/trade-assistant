@@ -18,6 +18,21 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.4.0 (in progress)
+
+Built in parts; each part is on `main` once it is finished. No new database migration so far.
+
+**Options lab** (new screen). Pick a ticker to see what its option prices imply: implied
+volatility for expirations from a week to a year (chart and table), the expected move and
+range for each, the straddle price, put-against-call skew, whether the term structure is
+upward, flat or inverted, the move priced in for the next earnings report, and implied
+against realized volatility. A Monte Carlo check of any contract simulates 20,000 price
+paths with a fixed seed, compares its value with Black-76, and gives the chance of finishing
+in the money, of touching the strike (on a close and at any moment), and the spread of
+outcomes for a buyer at the midpoint or your price, optionally with the earnings move added.
+These are what the market implies under a model, not forecasts, and nothing is recorded.
+Switch it off with `FEATURE_OPTIONS_LAB=0`. Details: [V2.md](V2.md#options-lab-24).
+
 ## 2.3.1
 
 Fixes from an independent review of 2.1.0 to 2.3.0. Every one was reproduced first and has a

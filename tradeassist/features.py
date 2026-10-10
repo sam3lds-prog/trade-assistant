@@ -19,6 +19,7 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "portfolio_risk": True,
     "signal_calibration": True,
     "reversal_analysis": True,
+    "options_lab": True,
     "options_backtest": False,
 }
 
