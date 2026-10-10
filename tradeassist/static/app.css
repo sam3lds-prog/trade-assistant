@@ -349,7 +349,7 @@ ul.headlines li:last-child { border-bottom: none; }
 ul.headlines a { color: var(--ink); }
 ol.sources { padding-left: 20px; margin: 4px 0 8px; }
 ol.sources li { margin: 2px 0; overflow-wrap: anywhere; }
-.brief h4 { margin-top: 4px; }
+.brief h4 { margin: 8px 0 4px; font-size: 1.08rem; color: var(--ink); }
 .brief h5 { margin: 10px 0 4px; font-size: 0.86rem; color: var(--muted); font-weight: 600; }
 .brief-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px 20px; }
 pre.sent { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sunk); padding: 10px; border-radius: 6px; font-size: 0.8rem; max-height: 320px; overflow: auto; }

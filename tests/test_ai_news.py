@@ -477,3 +477,34 @@ def test_news_refusals_carry_finnhubs_reason_without_the_key(tmp_path):
         err = client.company("ACME")["errors"][0]
         assert words in err and "fh-secret-1" not in err
     db.close()
+
+
+# --- replies with citation tags, and replies cut off at the length limit -----------------------------
+
+CUT_OFF = ('{"headline":"Stocks close the week higher","summary":"Today is Saturday. <cite index=\\"15-3,15-4\\">The '
+           'Nasdaq rose 0.64%.</cite> Breadth is narrow.","drivers":["Tech rebounded.","<cite index=\\"5-6\\">Yields '
+           'climbed.</cite>"],"risks":["CPI on Wednesday."],"watch":["Tue 13 Oct: banks report.","Weds 28 Oct, 2:00 pm '
+           'ET: <cite index=\\"23')
+
+
+def test_a_reply_cut_off_mid_answer_is_still_read():
+    from tradeassist.ai import _repair
+    j = extract_json(CUT_OFF)
+    assert j["headline"] == "Stocks close the week higher" and j["drivers"][1] == "Yields climbed."
+    assert "<cite" not in j["summary"] and j["summary"] == "Today is Saturday. The Nasdaq rose 0.64%. Breadth is narrow."
+    assert j["watch"][0] == "Tue 13 Oct: banks report." and len(j["watch"]) == 2
+    assert _repair('{"a": "x", "unfinished') == {"a": "x"} and _repair('{"a": ["x", "y') == {"a": ["x", "y"]}
+    assert _repair('{"a": 1, "b":') == {"a": 1} and _repair('{"a": {"b": [1, 2') == {"a": {"b": [1, 2]}}
+    assert _repair('{"a": 1}') is None and extract_json('{"a": tr') is None
+
+
+def test_a_cut_off_brief_is_shown_cleanly_and_asked_again_next_time(tmp_path):
+    c, svc, fake = make_app(tmp_path, ai_replies=[Reply(200, {**answer(CUT_OFF), "stop_reason": "max_tokens"})])
+    b = c.post("/v2/ai/market-brief", json={"web_search": False}).json()
+    assert b["truncated"] is True and b["brief"]["headline"] == "Stocks close the week higher"
+    assert all("<cite" not in x for x in [b["brief"]["summary"], *b["brief"]["drivers"], *b["brief"]["watch"]])
+    assert b["brief"]["watch"][-1] == "Weds 28 Oct, 2:00 pm ET:"
+    c.post("/v2/ai/market-brief", json={"web_search": False})
+    assert len(fake.calls) == 2                                          # not served from the cache
+    assert fake.calls[0]["json"]["max_tokens"] == 4000 and "no citation tags" in fake.calls[0]["json"]["messages"][0]["content"]
+    svc.db.close()
