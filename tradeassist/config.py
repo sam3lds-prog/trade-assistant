@@ -50,8 +50,8 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    live_token: str = ""
-    sandbox_token: str = ""
+    live_token: str = field(default="", repr=False)
+    sandbox_token: str = field(default="", repr=False)
     data_mode: str = "auto"  # auto | live | sandbox | demo | robinhood
     db_path: Path = ROOT / "data" / "tradeassist.db"
 
@@ -78,6 +78,13 @@ class Settings:
     sec_user_agent: str = ""
 
     watchlist: list[str] = field(default_factory=lambda: list(DEFAULT_WATCHLIST))
+
+    # AI briefs and news (2.4). The keys never leave the server and never appear in logs.
+    anthropic_api_key: str = field(default="", repr=False)
+    ai_model: str = "claude-sonnet-5-5"
+    ai_web_search: bool = True
+    ai_daily_requests: int = 40
+    finnhub_api_key: str = field(default="", repr=False)
 
     # Robinhood data connection (DATA_MODE=robinhood)
     robinhood_callback_port: int = 8421
@@ -147,6 +154,11 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         risk_free_rate=_float("RISK_FREE_RATE", 0.04),
         stock_cost_bps=_float("STOCK_COST_BPS", 5.0),
         sec_user_agent=_clean_token(os.getenv("SEC_USER_AGENT")),
+        anthropic_api_key=_clean_token(os.getenv("ANTHROPIC_API_KEY")),
+        ai_model=(os.getenv("AI_MODEL") or "").strip() or "claude-sonnet-5-5",
+        ai_web_search=(os.getenv("AI_WEB_SEARCH") or "1").strip().lower() not in ("0", "false", "no", "off"),
+        ai_daily_requests=max(_int("AI_DAILY_REQUESTS", 40), 0),
+        finnhub_api_key=_clean_token(os.getenv("FINNHUB_API_KEY")),
         watchlist=watchlist,
         robinhood_callback_port=_int("ROBINHOOD_CALLBACK_PORT", 8421),
         robinhood_poll_seconds=max(_float("ROBINHOOD_POLL_SECONDS", 3.0), 1.0),

@@ -20,7 +20,8 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 ## 2.4.0 (in progress)
 
-Built in parts; each part is on `main` once it is finished. No new database migration so far.
+Built in parts; each part is on `main` once it is finished. Migration 10 (a table of AI
+requests) runs on the first start; a copy of the database is taken first.
 
 **Options lab** (new screen). Pick a ticker to see what its option prices imply: implied
 volatility for expirations from a week to a year (chart and table), the expected move and
@@ -50,6 +51,18 @@ breakevens, the market-implied chance of a profit and whether it fits your per-t
 limit, lets you move the strikes or wings one strike at a time, and loads it into the
 simulator. Modelled only: nothing is placed or recorded. Switch it off with
 `FEATURE_STRATEGY_BUILDER=0`. Details: [V2.md](V2.md#strategy-builder-24).
+
+**Market & news, and AI briefs** (new screen; migration 10). The market's make-up from the
+app's own prices: the main indexes, VIX (or realized volatility), the regime, sector funds
+against SPY, breadth over 100 large companies, and SPY's put/call balance. Headlines for the
+market and any stock from Finnhub (`FINNHUB_API_KEY`, free) with SEC filings, each with a
+word-list tone. With `ANTHROPIC_API_KEY`, Claude writes a market brief and stock briefs from
+those figures and headlines, searches the web for the latest news, shows its sources and
+exactly what was sent, reads headline tone, and reads trade descriptions the rules cannot.
+AI requests are billed by Anthropic to that key's account and capped at `AI_DAILY_REQUESTS`
+a day (40 by default). The key never leaves the server and is never logged; nothing about
+your account is sent. The Analyze screen gets a News panel, and Data health shows AI and
+news status. Details: [V2.md](V2.md#market--news-and-the-ai-plug-in-24).
 
 ## 2.3.1
 

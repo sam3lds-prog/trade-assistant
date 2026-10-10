@@ -49,6 +49,8 @@ RULES = (
      r"\1[redacted]"),
     # Query-string values that are credentials in OAuth and signed URLs.
     (re.compile(r"(?i)([?&](?:code|key|sig|signature)=)[^&\s\"']+"), r"\1[redacted]"),
+    # Anthropic API keys, whatever surrounds them.
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]+"), "[redacted]"),
     # JSON web tokens.
     (re.compile(r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]*)?"), "[redacted]"),
     # Long runs of letters and digits mixed: the shape of an API key.

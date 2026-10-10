@@ -68,6 +68,8 @@ What to put in `.env`:
 | `TRADIER_SANDBOX_TOKEN` | Works for research and backtests, but quotes are 15 minutes late and the app says so on every price. |
 | `ACCOUNT_SIZE` and the limits | The sizing checks are percentages of this. The default is a placeholder of $10,000. |
 | `SEC_USER_AGENT` | Your name and email, which the SEC requires. Switches on filings and the earnings-date estimate. |
+| `FINNHUB_API_KEY` | Optional (free at finnhub.io). Company and market headlines on the Market & news and Analyze screens. |
+| `ANTHROPIC_API_KEY` | Optional. Lets Claude write market and stock briefs with web sources, read headline tone, and read trade descriptions. Billed by Anthropic to that API account; capped by `AI_DAILY_REQUESTS`. Never sent to the browser or logged. |
 
 With no token the app runs on made-up demo data so you can learn the screens.
 Demo data is stored in a separate database file and never mixes with real history.
@@ -553,12 +555,16 @@ tradeassist/
   sectors.py               the sector fund for relative strength
   signalbook.py            signal history and score calibration
   evaluator.py             trade grades for stock ideas
-  options/                 the option picker, reversal option scores; historical option data (none connected)
+  options/                 the option picker, reversal option scores; historical option data (none connected);
+                           volatility.py lab.py (options lab), strategies.py (strategy builder)
+  scanner.py               technical signals and options activity across many stocks
+  makeup.py news.py        the market's make-up; headlines and their tone
+  ai.py briefs.py          the AI plug-in (Anthropic API) and what it is asked
   portfolio.py analytics.py alerts.py   portfolio risk, journal analytics, alerts
   backtest_v2.py           condition strategies, Monte Carlo
   analysis.py api_v2.py    the version 2 operations and the /v2 HTTP API
   versions.py              version labels recorded with every result
-  static/                  the web page (app.js classic screens, v2.js version 2 screens)
+  static/                  the web page (app.js classic screens, v2.js version 2 screens, lab.js 2.4 screens)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
 docs/IMPROVEMENTS.md       the 2.1.1 to 2.3 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade

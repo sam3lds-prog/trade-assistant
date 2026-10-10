@@ -491,3 +491,27 @@ each contract's usual volume, so "unusual" is measured against open interest onl
 Known limitations: four legs at most (the simulator's limit), so no broken-wing condors with
 extra legs; covered calls and protective puts need shares, which the simulator does not
 model; early assignment of sold options is not modelled.
+
+### Part 4: AI plug-in, news, sentiment and the market's make-up
+
+Migration 10 adds `ai_usage`.
+
+| Requirement | Done | Where | Tests (`test_ai_news.py` unless noted) |
+| --- | --- | --- | --- |
+| AI plug-in | Anthropic Messages API through `requests` (no new dependency): key in the header only, configurable model, server-side web search with its sources, paused turns resumed, daily request limit, cache, usage table, safe error messages; POST-only routes behind the same-origin check | `ai.py`, `config.py`, `schema_v2.py`, `api_v2.py` | `test_parse_response_*`, `test_extract_json` (7), `test_a_request_carries_the_key_*`, `test_web_search_can_be_switched_off`, `test_answers_are_cached_*`, `test_a_paused_web_search_turn_*`, `test_failures_have_safe_messages_*` (8), `test_without_a_key_*`, `test_another_web_page_cannot_spend_*`, `test_migration_10_*` |
+| Latest news | Finnhub company and market headlines and SEC filings, deduplicated, cached, failures reported and not cached; demo headlines in demo mode | `news.py` | `test_company_news_from_finnhub`, `test_news_failures_*` (3), `test_demo_headlines_*`, `test_sec_filings_*` |
+| Sentiment | Word-list tone for every headline (labelled as counting words), AI tone from -1 to +1 with reasons when set up; both labelled as the tone of headlines, not forecasts. Options-flow sentiment comes from the scanner's put/call figures (part 2) | `news.py`, `briefs.py` | `test_word_tone`, `test_headline_tone_by_ai` |
+| Market make-up | Indexes, VIX or realized volatility, regime, sector funds against SPY, breadth over 100 large companies or the watchlist (unknowns left out), SPY and QQQ put/call | `makeup.py` | `test_changes_over_each_horizon`, `test_breadth_counts_*`, `test_market_makeup_endpoint` |
+| Briefs | Market and stock briefs from the app's figures and headlines, with web search, sources, usage and the exact prompt shown; nothing about the account is sent; malformed replies shown as written | `briefs.py`, `static/lab.js` | `test_market_brief_sends_figures_but_nothing_about_the_account`, `test_stock_brief_and_a_reply_that_is_not_json` |
+| Plain-language trades | The strategy builder's fallback reader: AI answers must be a template, a ticker and in range, then are built and checked like any other | `briefs.py`, `options/strategies.py` | `test_the_strategy_reader_*`, `test_strategy_reader_refuses_*` |
+| Screens, health, flags | Market & news screen, News panel on Analyze, AI and news on Data health; `market_news` and `ai_assistant` flags; keys never in any reply | `static/lab.js`, `static/v2.js`, `api_v2.py`, `features.py` | `test_health_shows_ai_and_news_without_keys`, `test_ai_routes_without_a_key_*`, `test_market_news_can_be_switched_off`, `test_settings_read_the_ai_and_news_keys`, `test_static_assets.py` |
+
+Not verified here: live calls to the Anthropic API and Finnhub. This workspace cannot reach
+either, so every test uses recorded-shape fake replies; the request format follows Anthropic's
+published Messages API (version 2023-06-01, web search tool `web_search_20250305`). The first
+real use should be checked on the screen (the brief shows its sources, usage and model), and
+`AI_MODEL` changed if the account uses another model name.
+
+Known limitations: tone by word list is crude by design; the AI reads headlines, not
+articles (web search reads pages); Finnhub's free tier limits requests and its company news
+covers US listings best; breadth covers 100 large companies, not the whole market.

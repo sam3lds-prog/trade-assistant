@@ -29,6 +29,10 @@ V2_WRITES = {
     # 2.4: strategy builder. Models only; no orders and nothing recorded.
     "/v2/strategies/build",
     "/v2/strategies/parse",
+    # 2.4: AI briefs and headline tone. They call the AI model; nothing is recorded but usage counts.
+    "/v2/ai/market-brief",
+    "/v2/ai/brief/{symbol}",
+    "/v2/ai/tone",
 }
 
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."

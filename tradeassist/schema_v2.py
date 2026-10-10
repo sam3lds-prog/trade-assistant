@@ -381,3 +381,22 @@ def option_leg_rules(cur: sqlite3.Cursor) -> None:
         for op, when in (("INSERT", condition), ("UPDATE", f"({condition}) AND NOT ({was_bad})")):
             cur.execute(f"CREATE TRIGGER IF NOT EXISTS check_option_{name}_{op.lower()} BEFORE {op} ON option_contracts "
                         f"WHEN {when} BEGIN SELECT RAISE(ABORT, '{quoted}'); END")
+
+
+@migration(10, "a record of AI requests, for the daily limit and the health screen")
+def ai_usage(cur: sqlite3.Cursor) -> None:
+    """2.4: one row per request to the AI model: when, what for, the model, tokens and web
+    searches used, and whether it worked. No prompt, answer or key is stored."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_usage (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        at            TEXT NOT NULL,
+        day           TEXT NOT NULL,               -- New York date, for the daily limit
+        purpose       TEXT NOT NULL,
+        model         TEXT NOT NULL,
+        input_tokens  INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        web_searches  INTEGER NOT NULL DEFAULT 0,
+        ok            INTEGER NOT NULL,
+        error         TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS ai_usage_day ON ai_usage (day)")
