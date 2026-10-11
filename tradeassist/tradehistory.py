@@ -317,12 +317,23 @@ def remove_import(db: Any, import_id: int) -> dict[str, Any]:
     return {"import_id": import_id, "rows_removed": removed}
 
 
-def activity(db: Any) -> list[dict[str, Any]]:
+REPORT_SOURCES = ("robinhood_csv", "sample")
+
+
+def activity(db: Any, skipped: list[int] | None = None) -> list[dict[str, Any]]:
     """Every kept row, oldest first; within one day in the order things happened (the report lists newest
-    first, so a later line in the same file is earlier in the day)."""
+    first, so a later line in the same file is earlier in the day). Where an imported report covers a day,
+    rows pulled through the Robinhood connection for that day are left out (the report has the fees), so
+    the same trade is never counted twice; their number is added to `skipped`."""
+    cut = db.one(f"SELECT MAX(activity_date) AS d FROM broker_activity WHERE source IN ({','.join('?' * len(REPORT_SOURCES))})",
+                 REPORT_SOURCES)["d"]
     rows = db.query("SELECT * FROM broker_activity ORDER BY activity_date ASC, import_id ASC, file_order DESC")
     out = []
     for r in rows:
+        if cut and r["source"] == "robinhood_link" and r["activity_date"] <= cut:
+            if skipped is not None:
+                skipped.append(r["id"])
+            continue
         d = dict(r)
         d["raw"] = json.loads(d.pop("raw_json"))
         d["short_flag"] = bool(d["short_flag"])
@@ -481,6 +492,24 @@ def sample_report(today: date, seed: int = 11, months: int = 18,
     return buf.getvalue()
 
 
+def compare_holdings(history: list[dict[str, Any]], broker: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each holding by your history against what Robinhood's connection says you hold now."""
+    def key(h: dict[str, Any]) -> tuple:
+        if h["kind"] == "OPTION":
+            return ("OPTION", h["symbol"], h["option_type"], round(float(h["strike"]), 4), h["expiration"], h["side"])
+        return ("STOCK", h["symbol"], h["side"])
+    mine = {key(h): h for h in history}
+    theirs = {key(h): h for h in broker}
+    out = []
+    for k in sorted(set(mine) | set(theirs), key=str):
+        a, b = mine.get(k), theirs.get(k)
+        qa, qb = (a or {}).get("quantity"), (b or {}).get("quantity")
+        out.append({"what": (a or b).get("contract") or (f"{k[1]} shares" if k[0] == "STOCK" else
+                    f"{k[1]} {k[4]} {k[3]:g} {k[2].lower()}"), "side": k[-1], "history": qa, "robinhood": qb,
+                    "agrees": qa is not None and qb is not None and abs(qa - qb) < 1e-6})
+    return out
+
+
 # --- the service behind /v2/history ----------------------------------------------------------------
 
 class TradeHistory:
@@ -525,7 +554,8 @@ class TradeHistory:
         v = self._version()
         if self._book is None or self._book[0] != v:
             self._closes = {}
-            book = rebuild(activity(self.svc.db))
+            self._skipped: list[int] = []
+            book = rebuild(activity(self.svc.db, self._skipped))
             self._book = (v, book, [])
             trades = summarize(book, today or date.today(), self._price_on)
             self._book = (v, book, trades)
@@ -559,9 +589,55 @@ class TradeHistory:
         if not book.groups and not book.unmatched:
             return {"empty": True, "imports": imports(self.svc.db), "data_source": self.svc.market.info.mode}
         out = analyse(book, trades, date.today(), start, end, by, basis)
+        skipped = len(getattr(self, "_skipped", []))
+        if skipped:
+            out["notes"].append(f"{skipped} order row{'s' if skipped != 1 else ''} from the Robinhood connection fell on days "
+                                "your imported report already covers, so the report's rows were used (they include fees) and "
+                                "the same trades are not counted twice.")
         out["imports"] = imports(self.svc.db)
+        out["link"] = self.link_status()
         out["sample"] = any(i["source"] == "sample" for i in out["imports"])
         out["data_source"] = self.svc.market.info.mode
+        return out
+
+    # --- the Robinhood connection (off unless ROBINHOOD_ACCOUNT_READ=1) ------------------------------
+    def _account(self) -> Any:
+        from .robinhood_account import RobinhoodAccount
+        s = self.svc.settings
+        provider = getattr(self.svc.market, "provider", None)
+        bridge = getattr(provider, "bridge", None)
+        if not s.robinhood_account_read:
+            raise HistoryImportError("Reading your account through the Robinhood connection is switched off. To switch it "
+                                     "on, add ROBINHOOD_ACCOUNT_READ=1 to .env (with DATA_MODE=robinhood) and restart the app. "
+                                     "Or import the account activity report, which also has your option trades.")
+        if self.svc.market.info.mode != "robinhood" or bridge is None or not getattr(bridge, "account_reads", None):
+            raise HistoryImportError("The app is not using the Robinhood connection right now (DATA_MODE=robinhood), so it "
+                                     "cannot read your account through it. Import the account activity report instead.")
+        return RobinhoodAccount(bridge)
+
+    def link_status(self) -> dict[str, Any]:
+        s = self.svc.settings
+        on = bool(s.robinhood_account_read)
+        out = {"enabled": on, "using_robinhood": self.svc.market.info.mode == "robinhood", "offered": None}
+        if on and out["using_robinhood"]:
+            try:
+                out["offered"] = self._account().offered()
+            except Exception as exc:                  # noqa: BLE001 - shown, not raised: the screen still works
+                out["error"] = str(exc)[:300]
+        return out
+
+    def pull(self) -> dict[str, Any]:
+        from .robinhood_account import store_pulled
+        acct = self._account()
+        rows, unreadable, offered = acct.order_rows()
+        if not any(offered[j] for j in ("share orders", "option orders")):
+            raise HistoryImportError("Robinhood's connection does not offer your order history to this app (it lists no "
+                                     "tool for it). Import the account activity report instead.")
+        out = store_pulled(self.svc.db, rows, unreadable, offered)
+        if not offered["option orders"]:
+            out["note"] = ("Robinhood's connection offers share orders only; your option trades are in the account "
+                           "activity report.")
+        self._book = None
         return out
 
     def trade(self, trade_id: int) -> dict[str, Any]:
@@ -591,7 +667,14 @@ class TradeHistory:
                     sign = 1 if h["side"] == "long" else -1
                     h["price"], h["value"] = px, sign * px * h["quantity"]
                     h["unrealized"] = sign * (px * h["quantity"] - h["cash"])
-        return {"holdings": items, "as_of_history": book.last_date, "first_date": book.first_date,
+        connection = None
+        if self.svc.settings.robinhood_account_read and self.svc.market.info.mode == "robinhood":
+            try:
+                connection = self._account().holdings()
+                connection["compare"] = compare_holdings(items, connection["holdings"])
+            except Exception as exc:                  # noqa: BLE001 - shown, not raised
+                connection = {"error": str(exc)[:300]}
+        return {"holdings": items, "connection": connection, "as_of_history": book.last_date, "first_date": book.first_date,
                 "unmatched": len(book.unmatched), "data_source": self.svc.market.info.mode,
                 "note": "From your imported history: correct only if the history reaches back to when each of these "
                         "was opened. Stock prices are the app's current quotes; option values are not estimated here "

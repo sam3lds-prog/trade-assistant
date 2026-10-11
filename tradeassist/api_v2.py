@@ -604,6 +604,14 @@ def build_router(svc: Any) -> APIRouter:
     def history_analysis(start: str | None = None, end: str | None = None, by: str = "month", basis: str = "close"):
         return history_call(lambda: history.analysis(start or None, end or None, by, basis))
 
+    @router.post("/history/pull")
+    def history_pull():
+        return history_call(history.pull)
+
+    @router.get("/history/link")
+    def history_link():
+        return history_call(history.link_status)
+
     @router.get("/history/trade/{trade_id}")
     def history_trade(trade_id: int):
         return history_call(lambda: history.trade(trade_id))

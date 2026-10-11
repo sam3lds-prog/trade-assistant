@@ -45,6 +45,11 @@ ACCOUNT_FRAGMENTS = ("account", "portfolio", "position", "holding", "held", "bal
                      "watchlist", "margin", "alert", "user", "profile", "document", "statement", "tax", "bank",
                      "card", "activity", "transaction", "dividend", "fill", "_me", "my_")
 
+# Account reads (2.6, only when ROBINHOOD_ACCOUNT_READ=1): a separate, exact list. A name on it must still
+# start with get_, contain none of the action words above, and may mention orders only as a list it reads
+# (ending in _orders). The account words are allowed here, and only here.
+ACTION_FRAGMENTS = tuple(f for f in FORBIDDEN_FRAGMENTS if f != "order")
+
 CALL_TIMEOUT = 20.0
 SIGN_IN_TIMEOUT = 300.0
 
@@ -60,6 +65,16 @@ def acceptable_tool_name(name: str) -> bool:
             and re.fullmatch(r"[a-z0-9_]+", lowered) is not None
             and not any(fragment in lowered for fragment in FORBIDDEN_FRAGMENTS)
             and not any(fragment in lowered for fragment in ACCOUNT_FRAGMENTS))
+
+
+def acceptable_account_tool_name(name: str) -> bool:
+    """Whether a name may be on the account-read list: a plain read of holdings or past orders."""
+    lowered = name.lower()
+    if name != lowered or not lowered.startswith(READ_PREFIX) or re.fullmatch(r"[a-z0-9_]+", lowered) is None:
+        return False
+    if any(fragment in lowered for fragment in ACTION_FRAGMENTS):
+        return False
+    return "order" not in lowered or (lowered.endswith("_orders") and lowered.count("order") == 1)
 
 
 def is_read_only(name: str, annotations: Any = None, allowed: frozenset[str] = frozenset()) -> bool:
@@ -131,13 +146,17 @@ class ReadOnlyBridge:
 
     def __init__(self, connect: Callable[[], AbstractAsyncContextManager[Any]], allowed: frozenset[str],
                  label: str = "the data source", first_call_timeout: float = CALL_TIMEOUT,
-                 call_timeout: float = CALL_TIMEOUT):
+                 call_timeout: float = CALL_TIMEOUT, account_reads: frozenset[str] = frozenset()):
         """`connect` returns an async context manager that yields a connected MCP client.
-        `allowed` is the complete list of tool names this bridge will ever call."""
+        `allowed` is the complete list of market-data tool names this bridge will ever call;
+        `account_reads` (empty unless the person switched account reads on) the complete list of
+        account tools it may read, each a plain read of holdings or past orders."""
         bad = sorted(name for name in allowed if not acceptable_tool_name(name))
+        bad += sorted(name for name in account_reads if not acceptable_account_tool_name(name))
         if bad:
             raise ValueError(f"These tool names may not be called by a read-only bridge: {', '.join(bad)}")
-        self._allowed = frozenset(allowed)
+        self._account = frozenset(account_reads)
+        self._allowed = frozenset(allowed) | self._account
         self._connect = connect
         self.label = label
         self._first_call_timeout = first_call_timeout
@@ -267,19 +286,33 @@ class ReadOnlyBridge:
                 self._tools = {t.name: t for t in listed}
             return self._tools
 
+    def _permitted(self, name: str, annotations: Any) -> bool:
+        if name in self._account:
+            if not acceptable_account_tool_name(name):
+                return False
+            if annotations is not None and (getattr(annotations, "destructive_hint", None) is True
+                                            or getattr(annotations, "read_only_hint", None) is False):
+                return False
+            return True
+        return is_read_only(name, annotations, self.allowed)
+
+    @property
+    def account_reads(self) -> frozenset[str]:
+        return self._account
+
     def may_call(self, name: str) -> bool:
         tool = self.tools().get(name)
-        return tool is not None and is_read_only(name, getattr(tool, "annotations", None), self.allowed)
+        return tool is not None and self._permitted(name, getattr(tool, "annotations", None))
 
     def call(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call one listed read-only tool and return its payload. Anything else is refused."""
         if name not in self.allowed:
-            raise PermissionError(f"Refusing to call {name!r}: it is not on this app's list of market-data tools. "
+            raise PermissionError(f"Refusing to call {name!r}: it is not on this app's list of tools to read. "
                                   "This app only reads data and never calls tools that can change an account.")
         tool = self.tools().get(name)
         if tool is None:
             raise DataError(f"{self.label} has no tool named {name}")
-        if not is_read_only(name, getattr(tool, "annotations", None), self.allowed):
+        if not self._permitted(name, getattr(tool, "annotations", None)):
             raise PermissionError(f"Refusing to call {name}: the server does not describe it as a read-only tool.")
         self.calls.append(name)
         del self.calls[:-500]
