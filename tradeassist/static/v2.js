@@ -521,13 +521,17 @@ function buildAnalyze() {
   const go = el("button", { class: "primary", text: "Analyze" });
   const error = el("div", { class: "error", role: "alert" });
   const out = el("div");
+  let ticket = 0;                       // only the newest request may draw the screen
   const run = () => withBusy(go, error, async () => {
+    const mine = ++ticket;
     out.classList.add("refetching");
     try {
       const d = await api(`/v2/analysis/${encodeURIComponent(sym.value.trim())}`);
+      if (mine !== ticket) return;
       sym.value = d.symbol;
       out.replaceChildren(renderAnalysis(d));
-    } finally { out.classList.remove("refetching"); }
+    } catch (e) { if (mine === ticket) throw e; }
+    finally { if (mine === ticket) out.classList.remove("refetching"); }
   });
   go.addEventListener("click", run);
   sym.addEventListener("keydown", e => { if (e.key === "Enter") run(); });
@@ -608,6 +612,13 @@ function scoreBars(day) {
     el("p", { class: "small muted", text: `Net ${isNum(day.net_score) ? (day.net_score > 0 ? "+" : "") + num(day.net_score, 0) : "n/a"} points. Evidence points out of 100 on each side, not probabilities.` }));
 }
 
+function weekdaysBetween(fromIso, toIso) {
+  const a = new Date(fromIso + "T12:00:00Z"), b = new Date(toIso + "T12:00:00Z");
+  let k = 0;
+  for (let d = new Date(a.getTime() + 864e5); d <= b; d = new Date(d.getTime() + 864e5)) if (d.getUTCDay() % 6 !== 0) k++;
+  return k;
+}
+
 // The closing price over the last year on its trend state. With a `plan` (2.5, from the thesis on Decide) the
 // axis runs on to the horizon date and adds the plan: target and invalidation lines, the range option prices
 // imply by then (one standard deviation, widening with time), and where the chosen contract breaks even then.
@@ -615,8 +626,10 @@ function trendHistoryChart(t, plan) {
   const rows = t.history, n = rows.length;
   const wrap = el("div", { class: "panel trend-chart" }, el("h3", { text: plan ? `Trend state over the last year, and your plan to ${shortDate(plan.horizonDate)}` : "Trend state over the last year" }));
   wrap.trend = t;
+  wrap.plan = plan || null;
   if (n < 2) return wrap;
-  const f = plan ? Math.max(1, plan.horizonDays) : 0, last = rows[n - 1].close;
+  // Trading days (weekdays) from the last bar drawn to the horizon date, so the plan lands on its date.
+  const f = plan ? Math.max(1, weekdaysBetween(rows[n - 1].date, plan.horizonDate)) : 0, last = rows[n - 1].close;
   const W = 760, H = plan ? 290 : 250, pad = { l: 58, r: plan ? 118 : 16, t: plan ? 18 : 10, b: 54 }, L = pad.l, R = W - pad.r, bandTop = H - pad.b + 8, bandH = 14;
   const X = i => L + (R - L) * i / (n - 1 + f);
   const levels = plan ? plan.levels.filter(lv => isNum(lv.price)) : [];
@@ -845,8 +858,12 @@ state.thesis = null;
 // it and graded straight away; without one the form starts from the stock's trend and waits.
 state.openDecide = (symbol, direction, hint) => {
   symbol = String(symbol || "").trim().toUpperCase();
-  const kept = state.thesis && state.thesis.symbol === symbol ? state.thesis : {};
-  if (direction) { state.thesis = FLOW.thesis({ ...kept, symbol, direction }); state.decideHint = hint || "run"; }
+  let kept = state.thesis && state.thesis.symbol === symbol ? state.thesis : {};
+  // Prices belong to one direction: turning the thesis round keeps the holding days, contracts and budget only.
+  if (direction && kept.direction && kept.direction !== direction) {
+    kept = { horizonDays: kept.horizonDays, contracts: kept.contracts, budget: kept.budget };
+  }
+  if (direction) { state.thesis = FLOW.thesis({ ...kept, symbol, direction }); state.decideHint = { symbol, hint: hint || "run" }; }
   else { state.thesis = kept.symbol ? state.thesis : null; state.decideHint = null; }
   show("analyze");
   state.views.analyze.analyze(symbol);
@@ -883,6 +900,12 @@ function thesisSection(d) {
   go.addEventListener("click", () => withBusy(go, err, async () => {
     const t = read();
     state.thesis = t;
+    // A new run starts clean: the last run's comparison, plan on the chart and decision go first, so a run
+    // that fails part way never leaves the previous levels showing.
+    state.decision = null;
+    out.replaceChildren();
+    const section = panel.closest("section"), planned = section && section.querySelector(".trend-chart");
+    if (planned && planned.plan) planned.replaceWith(trendHistoryChart(planned.trend));
     out.classList.add("refetching");
     try {
       // The grade settles the levels (yours, or suggested from the chart); the picker then uses the same ones.
@@ -906,8 +929,8 @@ function thesisSection(d) {
     el("div", { class: "inline-form" }, field("Direction", dir), field("Entry", entry), field("Invalidation", inv), field("Target 1", t1), field("Target 2", t2),
       field("Holding days", horizon), field("Contracts", qty), field("Option budget ($)", budget), go), err, out);
   // Arriving from Today or the scanner with a direction set: run it straight away and bring it into view.
-  const hint = state.decideHint;
-  state.decideHint = null;
+  const hint = state.decideHint && state.decideHint.symbol === d.symbol ? state.decideHint.hint : null;
+  if (hint) state.decideHint = null;
   if (kept && hint) {
     setTimeout(() => { go.click(); panel.scrollIntoView({ behavior: "smooth", block: "start" }); }, 0);
   }
@@ -1800,7 +1823,12 @@ function reversalScanPanel(open) {
   box.append(el("div", { class: "row" }, go), err, out);
   return box;
 }
-BUILDERS.analyze = buildAnalyze;
+// With the Scanner switched off the reversal scan stays where it was before 2.5, on Analyze.
+BUILDERS.analyze = () => {
+  const view = buildAnalyze();
+  if (!featureOn("scanner") && featureOn("reversal_analysis")) view.insertBefore(reversalScanPanel(x => view.analyze(x.symbol)), view.children[3] || null);
+  return view;
+};
 
 /* ---------- view: data health (2.3) ---------- */
 const SOURCE_TAG = { OK: ["pass", "Working"], DEGRADED: ["warn", "Failing"], PAUSED: ["fail", "Paused after repeated failures"], NOT_USED_YET: ["info", "Not used yet"] };

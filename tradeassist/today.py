@@ -20,7 +20,7 @@ reads an account, a balance or a position at a broker.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
 
 from .evaluator import REGIME_FIT_LONG, REGIME_FIT_SHORT
 from .optionmath import NY
@@ -28,8 +28,15 @@ from .providers.base import DataError
 from .scanner import universe
 
 LIST_SIZE = 8
-HOSTILE_FIT = 25          # the bottom two rows of each regime-fit table
+HOSTILE_ROWS = 2          # the bottom of each regime-fit table: both bear regimes for longs, both bull ones for shorts
 UNDER_WAY = ("CANDIDATE", "CONFIRMED")
+
+
+def _bottom(table: dict[str, float]) -> frozenset[str]:
+    return frozenset(sorted(table, key=table.get)[:HOSTILE_ROWS])
+
+
+HOSTILE = {"LONG": _bottom(REGIME_FIT_LONG), "SHORT": _bottom(REGIME_FIT_SHORT)}
 MAX_NAMES = 100
 
 REGIME_WORDS = {"BULL_CALM": "a calm bull market", "BULL_VOLATILE": "a volatile bull market", "RANGE": "a range-bound market",
@@ -39,11 +46,7 @@ REGIME_WORDS = {"BULL_CALM": "a calm bull market", "BULL_VOLATILE": "a volatile 
 
 def hostile(direction: str, regime: str | None) -> bool:
     """Whether the market regime sits at the bottom of the fit table for this direction."""
-    if regime is None:
-        return False
-    table = REGIME_FIT_LONG if direction == "LONG" else REGIME_FIT_SHORT
-    fit = table.get(regime)
-    return fit is not None and fit <= HOSTILE_FIT
+    return regime is not None and regime in HOSTILE[direction]
 
 
 def lean(net: float | None, regime: str | None, bottom_stage: str | None, top_stage: str | None,
@@ -91,8 +94,8 @@ class Today:
         self.analyst = analyst
         self.features = features
 
-    def candidates(self, universe_name: str | None = "watchlist", symbols: Iterable[str] | None = None) -> dict[str, Any]:
-        name, names = universe(universe_name, self.svc.settings.watchlist, symbols)
+    def candidates(self, universe_name: str | None = "watchlist") -> dict[str, Any]:
+        name, names = universe(universe_name, self.svc.settings.watchlist)
         names = list(dict.fromkeys(n.strip().upper() for n in names if n.strip()))
         if not names:
             raise ValueError("Give at least one symbol")
@@ -115,7 +118,10 @@ class Today:
             except (DataError, ValueError) as exc:
                 errors.append({"symbol": sym, "error": str(exc)})
                 continue
-            day = t["confirmed"]
+            day = t.get("confirmed")
+            if not day:                     # no finished bar to read: unknown, not a lean and not "no lean"
+                errors.append({"symbol": t.get("symbol", sym), "error": "no finished bar to read the trend on"})
+                continue
             net = day.get("net_score")
             bottom = top = None
             # The reversal reading is the slow part, so it is read only where it can change the answer.
@@ -136,7 +142,9 @@ class Today:
                          "net_score": net, "bullish_score": day.get("bullish_score"),
                          "bearish_score": day.get("bearish_score"), "coverage": day.get("coverage"),
                          "close": close, "change_pct": 100 * (close / prev - 1) if close and prev else None,
-                         "reversal": {"bottom": bottom, "top": top} if read else None, **verdict})
+                         "reversal": {"bottom": bottom, "top": top} if read else None,
+                         # A lean kept only because its reversal could not be read says so on its own row.
+                         "reversal_unread": bool(check_reversal and verdict["lean"] and not read), **verdict})
         if unread:
             notes.append("The reversal reading failed for " + ", ".join(unread) + ": their leans were not checked "
                          "for a forming top or bottom.")
@@ -144,8 +152,7 @@ class Today:
             notes.insert(0, "Demo prices are synthetic: these leans say nothing about real stocks.")
         meta = self.analyst.history_meta() if self.features.get("signal_calibration") else None
         size = len(names)
-        words = ("your watchlist" if name == "watchlist" else "100 large US companies" if name == "large_caps"
-                 else "the names you gave")
+        words = "your watchlist" if name == "watchlist" else "100 large US companies"
         return {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "universe": name, "scanned": len(rows),
                 "universe_size": size,
                 "universe_text": f"From {words} ({size} stock{'s' if size != 1 else ''}), on the last finished bar. "
@@ -158,4 +165,4 @@ class Today:
                         "Scores count evidence; they are not chances."}
 
 
-__all__ = ["Today", "lean", "rank", "hostile", "LIST_SIZE", "HOSTILE_FIT"]
+__all__ = ["Today", "lean", "rank", "hostile", "LIST_SIZE", "HOSTILE", "HOSTILE_ROWS"]

@@ -11,7 +11,8 @@ function leanTable(rows, side) {
     el("span", { class: "score-track mini" }, el("i", { class: side === "LONG" ? "pos" : "neg", style: `width:${Math.min(100, Math.abs(r.net_score))}%` })),
     el("strong", { text: `${r.net_score > 0 ? "+" : ""}${num(r.net_score, 0)}` }));
   const wrap = table([
-    { label: "Stock and trend", cell: r => el("div", {}, el("strong", { text: r.symbol }), el("div", { class: "small" }, trendTag(r.state))) },
+    { label: "Stock and trend", cell: r => el("div", {}, el("strong", { text: r.symbol }), el("div", { class: "small" }, trendTag(r.state)),
+      r.reversal_unread ? el("div", { class: "small muted", text: "Reversal not checked" }) : null) },
     { label: "Net score", cell: bar },
     { label: "Day", num: true, cell: r => isNum(r.change_pct) ? signedPct(r.change_pct, 1) : null }],
   rows, { onRow: r => state.openDecide(r.symbol, side) });
@@ -81,10 +82,18 @@ function buildToday() {
       limitsBox.replaceChildren(...lines);
     } catch (e) { limitsBox.replaceChildren(el("p", { class: "small error", text: `Your limits: ${e.message}` })); }
   }
+  let ticket = 0;                       // the list on screen is always the one the menu names
   const loadLists = () => withBusy(go, err, async () => {
+    const mine = ++ticket;
     out.classList.add("refetching");
-    try { out.replaceChildren(renderCandidates(await api(`/v2/today/candidates?universe=${uni.value}`), loadLists)); }
-    finally { out.classList.remove("refetching"); }
+    try {
+      const d = await api(`/v2/today/candidates?universe=${uni.value}`);
+      if (mine === ticket) out.replaceChildren(renderCandidates(d, loadLists));
+    } catch (e) {
+      if (mine !== ticket) return;
+      out.replaceChildren();
+      throw e;
+    } finally { if (mine === ticket) out.classList.remove("refetching"); }
   });
   go.addEventListener("click", loadLists);
   uni.addEventListener("change", loadLists);
@@ -110,12 +119,12 @@ const DECIDE_AFTER = [];
 
 // What option prices imply a position is worth in expectation, next to what it costs. `pnl` is that worth
 // less the cost, from the whole distribution (server side); null is unknown, never $0.
-function expectationText(pnl, paid, received) {
+function expectationText(pnl, paid, received, note = "") {
   if (!isNum(pnl) || !isNum(paid)) return el("span", { class: "muted", text: "unknown" });
   const worth = received ? paid - pnl : paid + pnl;
   const near = Math.abs(pnl) < Math.max(1, 0.01 * Math.abs(paid));
   const gap = near ? "about $0" : signedMoney(pnl, 0);
-  return el("span", {}, received ? `${money(worth, 0)} to buy back against ${money(paid, 0)} received` : `${money(worth, 0)} against ${money(paid, 0)} paid`,
+  return el("span", {}, received ? `${money(worth, 0)} to buy back against ${money(paid, 0)} received${note}` : `${money(worth, 0)} against ${money(paid, 0)} paid${note}`,
     el("span", { class: "muted", text: ` (${gap})` }));
 }
 
@@ -126,12 +135,19 @@ function compareRows(dec) {
   const g = dec.grade, o = dec.options, m = o.market, lv = g.levels, entry = g.entry;
   const dir = g.direction === "LONG" ? 1 : -1, n = g.sizing.shares, date = shortDate(o.thesis.horizon_date);
   const rows = [];
-  const pastTarget = m && isNum(m.reach_target_1_by_horizon) ? `${chanceText(m.reach_target_1_by_horizon)} chance past target 1 on ${date}` : null;
+  // Both rows read the chance of being ahead on the horizon date from the same distribution; for the shares
+  // that is bought (or sold short) at today's price, and the expected figure is from today's price too, so a
+  // typed entry below the market never shows up as an expected gain.
+  const spot = o.thesis.spot, atSpot = Math.abs(entry - spot) < 0.005 * spot;
+  const ahead = m && isNum(m.stock_profit_at_horizon) ? `${chanceText(m.stock_profit_at_horizon)} chance of a profit on ${date}` : null;
+  const past = m && isNum(m.reach_target_1_by_horizon) ? `${chanceText(m.reach_target_1_by_horizon)} past target 1` : null;
   rows.push(n > 0 ? {
     kind: "shares", name: `${num(n, 0)} share${n === 1 ? "" : "s"} ${dir > 0 ? "long" : "short"} at ${money(entry)}`,
     sub: `Sized for ${money(g.sizing.risk_budget, 0)} at risk to the invalidation`,
     pay: n * entry, received: dir < 0, atTarget: dir * n * (lv.target_1 - entry), ifInvalid: dir * n * (lv.invalidation - entry),
-    chance: pastTarget, ev: m && isNum(m.expected_price_at_horizon) ? dir * n * (m.expected_price_at_horizon - entry) : null,
+    chance: ahead ? `${ahead}${atSpot ? "" : ` if bought at today's ${money(spot)}`}${past ? `; ${past}` : ""}` : null,
+    ev: m && isNum(m.expected_price_at_horizon) ? dir * n * (m.expected_price_at_horizon - spot) : null,
+    evPaid: n * spot, evNote: atSpot ? "" : ` at today's ${money(spot)}`,
     line: p => dir * n * (p - entry),
   } : { kind: "shares", name: "Shares", sub: `No whole share fits the ${money(g.sizing.risk_budget, 0)} risk budget: ${money(g.sizing.risk_per_share)} at risk per share.`, empty: true });
   const pick = o.picks.find(x => x.category === "BEST RISK-ADJUSTED") || o.picks[0];
@@ -152,7 +168,7 @@ function compareChart(rows, sim, dec) {
   const series = [];
   if (shares) series.push({ name: "Shares", color: "--series-1", ys: xs.map(shares.line) });
   series.push({ name: "Contract", color: "--series-2", ys: sim.curve.pnl_at_date });
-  const W = 760, H = 290, pad = { l: 72, r: 92, t: 26, b: 44 };
+  const W = 760, H = 304, pad = { l: 72, r: 92, t: 40, b: 44 };
   const all = series.flatMap(s2 => s2.ys);
   const ys = niceScale(Math.min(0, ...all), Math.max(0, ...all), 5);
   const xlo = xs[0], xhi = xs[n - 1];
@@ -164,9 +180,16 @@ function compareChart(rows, sim, dec) {
   const xt = niceScale(xlo, xhi, 6);
   for (const v of xt.ticks) if (v >= xlo && v <= xhi) root.append(svg("text", { x: X(v), y: H - pad.b + 18, "text-anchor": "middle", text: money(v, xt.step < 1 ? 2 : 0) }));
   root.append(svg("text", { x: (pad.l + W - pad.r) / 2, y: H - 4, "text-anchor": "middle", text: `Stock price on ${shortDate(o.thesis.horizon_date)}` }));
-  const marks = [[lv.invalidation, "Invalidation"], [o.thesis.spot, "Now"], [lv.target_1, "Target 1"]].filter(([v]) => isNum(v) && v > xlo && v < xhi);
-  for (const [v, word] of marks) root.append(svg("line", { class: word === "Now" ? "now-line" : "grid", x1: X(v), x2: X(v), y1: pad.t, y2: H - pad.b, "stroke-dasharray": word === "Now" ? null : "4 3" }),
-    halo({ x: X(v), y: pad.t - 8, "text-anchor": "middle", class: "lbl", text: `${word} ${money(v, 0)}` }));
+  const marks = [[lv.invalidation, "Invalidation"], [o.thesis.spot, "Now"], [lv.target_1, "Target 1"]].filter(([v]) => isNum(v) && v > xlo && v < xhi)
+    .sort((a, b) => a[0] - b[0]);
+  let lastEnd = [-Infinity, -Infinity];               // right edge of the last label on each of two rows
+  for (const [v, word] of marks) {
+    const text = `${word} ${money(v, 0)}`, half = 3.4 * text.length, x = X(v);
+    const row = x - half > lastEnd[0] + 6 ? 0 : 1;      // ~6.8 px a character at this size
+    lastEnd[row] = x + half;
+    root.append(svg("line", { class: word === "Now" ? "now-line" : "grid", x1: x, x2: x, y1: pad.t, y2: H - pad.b, "stroke-dasharray": word === "Now" ? null : "4 3" }),
+      halo({ x, y: pad.t - 22 + 14 * row, "text-anchor": "middle", class: "lbl", text }));
+  }
   const ends = [];
   for (const sr of series) {
     root.append(svg("path", { d: sr.ys.map((v, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)} ${Y(v).toFixed(1)}`).join(" "), fill: "none", stroke: `var(${sr.color})`, "stroke-width": 2, "stroke-linejoin": "round" }));
@@ -193,16 +216,15 @@ function compareChart(rows, sim, dec) {
 }
 
 function pastCasesLine(g, reload) {
-  const h = g.analogs && g.analogs.history
-    ? (g.analogs.history.same_regime && g.analogs.history.same_regime.cases ? g.analogs.history.same_regime : g.analogs.history.all) : null;
-  if (!g.history_built) {
-    const box = el("div", {}, el("p", { class: "small" }, el("strong", { text: "Past cases: " }), "the signal history has not been built, so there is no past frequency to show."));
-    if (featureOn("signal_calibration")) box.append(buildHistoryButton(reload));
-    return box;
-  }
-  if (!h || !h.cases || !isNum(h.frequency)) return el("p", { class: "small" }, el("strong", { text: "Past cases: " }), "none like this in the signal history.");
-  return el("p", { class: "small" }, el("strong", { text: "Past cases: " }),
-    `when a stock's trend turned to ${trendWord(g.trend_state).toLowerCase()} before, it moved the expected way over 10 days in ${pct(100 * h.frequency, 0)} of ${num(h.cases, 0)} cases.`);
+  const head = el("strong", { text: "Past cases: " });
+  if (g.history_built === null || g.history_built === undefined) return el("p", { class: "small" }, head, "the signal history is switched off here, so there are none to show.");
+  if (!g.history_built) return el("div", {}, el("p", { class: "small" }, head, "the signal history has not been built, so there is no past frequency to show."), buildHistoryButton(reload));
+  const hist = g.analogs && g.analogs.history;
+  // The same-regime figure only when it has enough cases on its own, as in the grade; otherwise all stocks.
+  const h = hist ? (hist.same_regime && hist.same_regime.enough ? hist.same_regime : hist.all) : null;
+  if (!h || !h.cases || !isNum(h.frequency)) return el("p", { class: "small" }, head, "the trend has not changed recently, so there is no matching past signal to count.");
+  return el("p", { class: "small" }, head, `when a stock's trend turned to ${trendWord(g.trend_state).toLowerCase()} before, it moved the expected way over 10 days in `,
+    freqText(h), ` cases${h === hist.same_regime ? " in the same market regime" : ""}.`);
 }
 
 function comparePanel(dec, rerun) {
@@ -219,7 +241,7 @@ function comparePanel(dec, rerun) {
     { label: "At target 1", num: true, cell: r => r.empty ? "" : signedMoney(r.atTarget, 0) },
     { label: "If invalidated", num: true, cell: r => r.empty ? "" : signedMoney(r.ifInvalid, 0) },
     { label: "Option prices imply", cell: r => r.empty ? "" : r.chance || el("span", { class: "muted", text: "unknown" }) },
-    { label: "What option prices imply it is worth in expectation", cell: r => r.empty ? "" : expectationText(r.ev, r.pay, r.received) },
+    { label: "What option prices imply it is worth in expectation", cell: r => r.empty ? "" : expectationText(r.ev, r.evPaid ?? r.pay, r.received, r.evNote || "") },
     { label: "", cell: actions }], rows));
   const chart = el("div", {}, el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Drawing both on one chart…" })));
   box.append(chart);
@@ -248,7 +270,7 @@ function comparePanel(dec, rerun) {
     }));
     box.append(el("div", { class: "row", style: "margin-top:8px" }, mcBtn), mcErr, mcOut);
   }
-  box.append(el("p", { class: "small muted", text: "Close to what you pay by construction: option prices price options. A gap of a few percent comes from valuing each contract on its own volatility and the stock on the at-the-money one; it is not an edge." }));
+  box.append(el("p", { class: "small muted", text: "Close to what you pay by construction: each contract is read on the volatility its own price implies, and the stock on the at-the-money one, so what remains is carry to the horizon and rounding. It is not an edge." }));
   return box;
 }
 

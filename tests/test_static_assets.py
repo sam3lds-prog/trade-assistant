@@ -75,8 +75,8 @@ def _browser():
 
 
 @contextmanager
-def demo_page(tmp_path):
-    """The app on demo data in a real Chromium page; yields (page, script errors)."""
+def demo_page(tmp_path, features=None):
+    """The app on demo data in a real Chromium page; yields (page, script errors). `features` overrides flags."""
     import uvicorn
     from playwright.sync_api import sync_playwright
 
@@ -86,7 +86,8 @@ def demo_page(tmp_path):
     from tradeassist.providers.demo import DemoData
     from tradeassist.service import TradeAssistant
 
-    settings = Settings(data_mode="demo", db_path=tmp_path / "t.db")
+    from tradeassist.features import FEATURE_DEFAULTS
+    settings = Settings(data_mode="demo", db_path=tmp_path / "t.db", features={**FEATURE_DEFAULTS, **(features or {})})
     svc = TradeAssistant(settings, provider=DemoData(), db=Database(tmp_path / "t.db"))
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -141,7 +142,7 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
     with demo_page(tmp_path) as (page, errors):
         page.goto(page.base + "#analyze")
         page.click("section:not([hidden]) button.primary:text-is('Analyze')")
-        page.wait_for_selector("text=Your thesis", timeout=30000)
+        page.wait_for_selector(".panel.thesis", timeout=30000)
         page.click("text=Grade and find a contract")
         page.wait_for_selector(".panel.thesis .pick", timeout=60000)
         assert page.locator(".panel.thesis .grade-title, .panel.thesis .grade").count() >= 1
@@ -202,7 +203,7 @@ def test_every_scanner_tab_opens_decide(tmp_path):
         page.goto(page.base + "#scanner")
         page.wait_for_selector(".scan-table.tech tr.click", timeout=60000)
         page.locator(".scan-table.tech tr.click").first.click()
-        page.wait_for_selector("text=Your thesis", timeout=60000)
+        page.wait_for_selector(".panel.thesis", timeout=60000)
         assert page.evaluate("location.hash") == "#analyze"
         page.click('.rail button.nav[data-view="scanner"]')
         page.click('section:not(.hidden) .seg label:has-text("Reversals")')
@@ -215,4 +216,45 @@ def test_every_scanner_tab_opens_decide(tmp_path):
         page.wait_for_selector(".scan-table:not(.tech) tr.click", timeout=60000)
         page.locator(".scan-table:not(.tech) tr.click").first.locator("button:has-text('Options lab')").click()
         page.wait_for_function("location.hash === '#lab'", timeout=30000)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_without_the_trend_engine_the_app_lands_on_price_and_keeps_the_reversal_scan_reachable(tmp_path):
+    """Today needs the trend engine too; with the Scanner off the reversal scan stays on Analyze."""
+    with demo_page(tmp_path, {"trend_engine_v2": False}) as (page, errors):
+        page.goto(page.base)
+        page.wait_for_function("document.querySelectorAll('#main > section').length > 0", timeout=20000)
+        assert page.evaluate("location.hash") == "#price"
+        assert page.locator('.rail button.nav[data-view="today"]').is_hidden()
+        assert page.locator('.rail .nav-group[data-group="decide"]').is_hidden()
+    assert errors == []
+    with demo_page(tmp_path / "b", {"scanner": False}) as (page, errors):
+        page.goto(page.base + "#analyze")
+        page.wait_for_selector(".reversal-scan", timeout=20000)
+        assert page.locator('.rail .nav-group[data-group="find"]').is_hidden()
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_turning_the_thesis_round_drops_its_prices_and_a_new_ticker_drops_the_earnings_date(tmp_path):
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#analyze")
+        page.wait_for_function("typeof state !== 'undefined' && state.views.analyze", timeout=30000)
+        page.evaluate("state.thesis = FLOW.thesis({symbol: 'AAPL', direction: 'SHORT', invalidation: 210, target1: 180, horizonDays: 30, contracts: 3})")
+        page.evaluate("state.openDecide('AAPL', 'LONG', 'manual')")
+        th = page.evaluate("state.thesis")
+        assert (th["direction"], th["invalidation"], th["target1"], th["horizonDays"], th["contracts"]) == ("LONG", None, None, 30, 3)
+        # An earnings date typed for one stock is not carried to another by Set the limit.
+        page.click('.rail button.nav[data-view="price"]')
+        page.wait_for_selector("section:not(.hidden) input[type=date]", timeout=20000)
+        page.fill("section:not(.hidden) input[type=date]", "2026-10-20")
+        k = page.evaluate("""async () => {
+          const r = await api("/v2/options/evaluate", { symbol: "MSFT", direction: "BULLISH" });
+          return r.picks[0].contract;
+        }""")
+        page.evaluate(f"state.openPricing(FLOW.pricingRequest('MSFT', {{option_type: '{k['option_type']}', strike: {k['strike']}, expiration: '{k['expiration']}'}}, 1))")
+        page.wait_for_selector("text=Simulate this trade", timeout=30000)
+        assert page.input_value("section:not(.hidden) input[type=date]") == ""
+        assert page.input_value("section:not(.hidden) input.sym") == "MSFT"
     assert errors == []
