@@ -78,13 +78,21 @@ function statusTag(status, word) {
 function banner(level, text) { return el("div", { class: `banner ${level}`, role: level === "fail" ? "alert" : null }, text); }
 
 async function withBusy(button, errorBox, fn) {
-  const label = button.textContent;
+  // Calls can overlap (a screen opened on a new stock while the last one loads): the button keeps its own
+  // label and comes back only when the last of them has finished.
+  const depth = Number(button.dataset.busy || 0);
+  if (!depth) button.dataset.label = button.textContent;
+  button.dataset.busy = String(depth + 1);
   button.disabled = true;
   button.textContent = "Working…";
   if (errorBox) errorBox.textContent = "";
   try { await fn(); }
   catch (e) { if (errorBox) errorBox.textContent = e.message; else console.error(e); }
-  finally { button.disabled = false; button.textContent = label; }
+  finally {
+    const left = Number(button.dataset.busy) - 1;
+    if (left > 0) button.dataset.busy = String(left);
+    else { delete button.dataset.busy; button.disabled = false; button.textContent = button.dataset.label; }
+  }
 }
 
 function field(label, control) {
@@ -390,14 +398,16 @@ function buildPrice() {
     contracts: Number(contracts.value) || 1, earnings_date: earnings.value || null, ...extra,
   });
 
+  let priceTicket = 0;
   go.addEventListener("click", () => withBusy(go, error, async () => {
+    const mine = ++priceTicket;
     if (sym.value.trim().toUpperCase() !== loadedFor) await loadExpirations();
     if (!loadedFor || strike.disabled) throw new Error("Choose a ticker, expiration and strike first.");
     // Freeze the contract that was priced: live updates and the ticket must keep referring to
     // it even if the form above is changed afterwards.
     const priced = request({ side: side.value() });
     const data = await api("/api/price", priced);
-    out.replaceChildren(renderPrice(data, extra => ({ ...priced, ...extra })));
+    if (mine === priceTicket) out.replaceChildren(renderPrice(data, extra => ({ ...priced, ...extra })));
   }));
 
   const view = el("section", {},
@@ -411,14 +421,23 @@ function buildPrice() {
     out);
   // Arrive on a contract chosen elsewhere (2.5): fill the form and price it, so the limit ladder is the
   // first thing shown. Changing the type or expiration afterwards reloads the strikes as usual.
+  let contractTicket = 0;
   view.loadContract = async spec => {
+    const mine = ++contractTicket, stale = () => mine !== contractTicket;
     error.textContent = "";
+    out.replaceChildren();                              // the last contract's ladder must not sit under this one
+    priceTicket++;                                      // nor may a pricing still on its way land here
     const pick = (seg, v) => { const input = seg.querySelector(`input[value="${v}"]`); if (input) input.checked = true; };
+    if (spec.symbol !== loadedFor) earnings.value = "";  // an earnings date belongs to the stock it was typed for
     sym.value = spec.symbol;
     pick(type, spec.option_type); pick(side, spec.side || "buy");
     contracts.value = String(spec.contracts || 1);
     if (spec.symbol !== loadedFor) await loadExpirations();
-    if (!loadedFor) return;                             // loading failed; the error is already shown
+    if (stale()) return;
+    if (loadedFor !== spec.symbol) {
+      if (!error.textContent) error.textContent = `Could not load ${spec.symbol}. Check the ticker and try again.`;
+      return;
+    }
     if (expiry.value !== spec.expiration) {
       if (![...expiry.options].some(o => o.value === spec.expiration)) {
         error.textContent = `${spec.expiration} is no longer a listed ${spec.symbol} expiration. Choose one above.`;
@@ -426,7 +445,12 @@ function buildPrice() {
       }
       expiry.value = spec.expiration;
       await loadStrikes();
+      if (stale()) return;
     } else fillStrikes();
+    if (!chain || chain.symbol !== spec.symbol || chain.expiration !== spec.expiration) {
+      if (!error.textContent) error.textContent = `Could not load the ${spec.symbol} ${shortDate(spec.expiration)} contracts.`;
+      return;
+    }
     const wanted = [...strike.options].find(o => Number(o.value) === Number(spec.strike));
     if (!wanted) { error.textContent = `The ${spec.strike} ${spec.option_type} is not listed for ${shortDate(spec.expiration)}. Choose a strike above.`; return; }
     strike.value = wanted.value;
@@ -1609,7 +1633,8 @@ async function start() {
   await loadStatus();
   const features = (state.status && state.status.features) || {};
   for (const btn of document.querySelectorAll(".rail button.nav[data-feature]")) {
-    const on = features[btn.dataset.feature] === true && BUILDERS[btn.dataset.view];
+    // A screen can need more than one area: data-feature lists them, and all must be on.
+    const on = btn.dataset.feature.split(" ").every(f => features[f] === true) && BUILDERS[btn.dataset.view];
     btn.classList.toggle("hidden", !on);
     if (!on) delete BUILDERS[btn.dataset.view];
   }

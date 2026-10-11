@@ -1,4 +1,4 @@
-# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.4)
+# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.5)
 
 This is the engineering record for the improvement programme that follows 2.1.0: the
 baseline it started from, what was found in the code, what each sprint changed, the tests
@@ -559,3 +559,114 @@ correction, all 16 templates' legs, sides, ratios and payoffs, the implied earni
 realized volatility, the expected move, skew, premium and put/call arithmetic.
 
 Version set to 2.4.0.
+
+## 2.5: one decision path
+
+Requested in a product review:
+
+- one path from which way to lean, to which stock, to shares or an option, to what it might
+  make or lose, to the limit to type at the broker;
+- one thesis carried across the screens;
+- a comparison with an honest expected value;
+- a Today screen;
+- a grouped menu.
+
+The review's diagnosis was checked against the code first. All nine points held. Two
+corrections: the reversal scan lived on Analyze, not the Scanner; and Market & news was
+missing from the proposed menu groups, so it went under Today.
+
+The lean rule needed a choice. Capping a lean whenever the reversal reading was "none" on the
+same side would have emptied the long list. Rule (b) was chosen: hold back a lean only when
+the *opposite* reversal is under way.
+
+Built in four parts, each merged into `main` separately: #20, #21, #22, then part 4 with the
+review fixes. The rules were kept throughout:
+
+- nothing places an order or reads the broker;
+- unknown is never shown as zero;
+- a score is never called a chance;
+- the three chances are never blended;
+- no option backtests;
+- no share legs in the simulator.
+
+### Part 1: one thesis form and Set the limit (#20)
+
+- `static/flow.js`: pure mappings, run under Node in `tests/test_flow.py` and checked
+  against the server's request models.
+  - `pricingRequest`: contract card to `/api/price` body.
+  - `thesis`: blanks stay null.
+  - `gradeRequest`.
+  - `optionsRequest`: on the grade's levels.
+- Analyze: one form replaced the separate grade and option-picker forms.
+- Price an option: gained `loadContract`, and Set the limit went on every contract card.
+
+### Part 2: Today and the grouped menu (#21)
+
+- `today.py` and `GET /v2/today/candidates`: the lean rule above, with lists of 8 sorted by
+  |net score|.
+- Unknown scores are "not measured", never a lean and never "no lean".
+- A new `FEATURE_TODAY` flag.
+- The grouped menu, with Today as the landing screen.
+- All scanner tabs open Decide, and the reversal scan became a Scanner tab.
+
+### Part 3: shares or a contract (#22)
+
+- `simulate.implied_expectation` and `market_odds.expected_pnl`: the expectation over the
+  whole distribution, with the same weights.
+- New response fields, listed in [V2.md](V2.md#today-and-decide-25).
+- The comparison panel and chart.
+- `history_built` on the grade, so a missing frequency reads "not built".
+
+### Part 4: the plan on the chart
+
+The trend chart on Decide runs on to the horizon date with the targets, the invalidation, the
+one-standard-deviation range option prices imply (widening with time) and the contract's
+breakeven.
+
+### Independent review of 2.5 and fixes
+
+Two reviewers checked the release before it shipped: one for the calculations and the
+product rules, one for the screens, in a real browser with every flag combination. Neither
+had seen the code being written.
+
+| # | Finding | Severity | Fix |
+| --- | --- | --- | --- |
+| M1 | The contract's expected figure used the at-the-money volatility for the stock and each strike's own volatility for the option. With a normal equity skew that alone showed out-of-the-money calls worth up to 40% more than their price and puts up to 64% less, beside a note saying the gap was a few percent | High | Each contract's expected figure and horizon chance are read at its own implied volatility, the one its price implies. Gaps are now about 1% (carry and the smile's fit), and the test bound went from 25% of the premium to 3% |
+| F1 | Opening Decide while an earlier analysis was loading could leave the earlier stock on screen, or use up the new stock's hint so it was not graded. A button could be left reading "Working…" | High | Analyze, the Today lists and Price an option draw only their newest response. The hint belongs to one ticker. `withBusy` keeps the button's label when calls overlap |
+| M2 | Shares' expected figure counted from a typed entry while the distribution starts at today's price, so an entry below the market showed as an expected gain | Medium | Counted from today's price, said on the row when the entry differs |
+| F2 | A second grade that failed left the first plan on the chart and the first decision in memory | Medium | Each run clears the comparison, the chart plan and the decision first |
+| F3, M10 | Opening Decide in the other direction kept the typed levels and graded them on the wrong side (a 400 error) | Medium | Turning a thesis round drops its prices and keeps days, contracts and budget |
+| F4 | Set the limit carried an earnings date typed for one ticker to another, which raised a false earnings flag | Medium | Cleared when the ticker changes. The last ladder is also cleared, and a stop for any reason says why |
+| M3 | Past cases on Decide used the same-regime figure with as few as one case, without the "Few" tag or range. They read "not built" when only this stock's signals failed | Medium | Same-regime figure only with enough cases, shown with its range and tag. `history_built` is read from the history itself and is `null` when switched off |
+| M4 | The shares row showed the chance of passing target 1 and the contract row the chance of a profit, so the two did not compare | Medium-low | Both show the chance of a profit on the horizon date. Shares add the target-1 chance after it (`market.stock_profit_at_horizon` is new) |
+| F5, M7 | With the trend engine off the app still landed on Today, which could not load (its spinner never stopped) | Medium-low | `data-feature` takes several flags and Today needs both. A failed list replaces the spinner with the error |
+| F6 | Switching the Today stock menu quickly could leave the other universe's list on screen | Low | The newest request wins |
+| F7 | The labels above the comparison chart overlapped | Low | Labels go on a second row when they would touch |
+| F8, M7b | With the Scanner off, the reversal scan was gone (it moved to a Scanner tab) | Low | It stays on Analyze when the Scanner is off |
+| M5 | The market block used two different times to the horizon | Low | One time and one forward for every horizon figure |
+| M6 | `/v2/today/candidates` accepted any tickers | Low | Watchlist or the 100 large names only |
+| M8 | One stock without a finished bar made the whole Today list fail | Low | That stock is listed under "Not read" |
+| M9 | The plan on the chart could land a day early before the open | Low | The horizon is counted in weekdays from the last bar drawn |
+| M11 | The hostile-regime cap was a hard-coded 25 | Note | Derived as the two lowest rows of each fit table. A lean kept without its reversal reading says so on its row |
+| F10 | With the trend engine and the options lab both off, a scanner row raised a script error (older than 2.5) | Low | A no-op |
+
+The reviewers checked these and found them sound:
+
+- Advisory only: Set the limit fills and prices a form, nothing more. "Your limits" reads the
+  app's own positions, not the broker's.
+- Scores are never called chances.
+- The expected figure matches closed-form Black-76:
+  - at expiration, within 3e-5 per share;
+  - before it, within 3e-7;
+  - across carry from −2% to +3%, volatility from 15% to 80%, and in- and out-of-the-money
+    calls and puts.
+- The one-standard-deviation range holds 15.8% of the distribution on each side.
+- The expected price equals the forward.
+- Responses only gained fields.
+- The lean rule uses the last finished bar's regime and reversal.
+- Every screen opens without a script error with each flag off.
+- Keyboard access works on rows and on the link inside a row.
+- The new charts have `role="img"` and labels.
+- No missing value is shown as $0 or 0%.
+
+Tests: 767 passed, 2 skipped, including the Chromium tests; ruff is clean.

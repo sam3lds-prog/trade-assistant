@@ -63,6 +63,18 @@ market's make-up (indexes, VIX, regime, sectors, breadth, put/call) and headline
 tone, and, with an Anthropic API key, Claude writes market and stock briefs that pull in the
 latest news with their sources. Everything is modelled only: the app still places no orders.
 
+Version 2.5 joins the screens into one path, from which way to lean to the limit to type at
+your broker. The app opens on **Today**: the market regime, your daily stop and open risk, and
+up to eight stocks leaning long and eight leaning short. Pick one and **Analyze a stock**
+(Decide) opens with that direction, grades the stock trade and finds calls or puts on the same
+levels from one thesis form. It sets the sized shares beside the best risk-adjusted contract:
+what each costs, makes at the target and loses if wrong, the chance option prices imply, and
+what option prices imply each is worth in expectation next to what you pay. The trend chart
+then runs on to your horizon date with the levels, the range option prices imply and where
+the contract breaks even. **Set the limit** on any contract opens Price an option on it,
+already priced on the limit ladder. Scanner rows open Decide too. The menu is grouped Today,
+Find, Decide, Price & simulate, Hold, Learn and Trust.
+
 ## Start it
 
 Needs Python 3.11 or newer (built and tested on 3.13 with pandas 3 and numpy 2).
@@ -356,6 +368,22 @@ and without rule overrides.
 
 ## Version 2
 
+**Today (2.5).** The landing screen, unless the address names another one. It shows:
+
+- **The market** in one line: the regime on the last finished bar.
+- **Your limits**: the daily stop and open risk, worded as on Portfolio risk. When some
+  positions could not be measured it says so and does not show $0.
+- **Leaning long and leaning short**: up to eight stocks each from the watchlist (or the 100
+  large companies), largest net score first, with a bar for the score.
+
+A stock leans the way its trend evidence points on the last finished bar. The lean is held
+back when the market regime works against that side (a long in a bear market, a short in a
+bull market) or when the opposite reversal is under way (a top at "potential" or "confirmed"
+holds back a long; a bottom holds back a short). Held-back stocks are counted, with the
+reason for each. Scores count evidence; they are not chances. Choosing a stock opens
+Decide with that direction. When the signal history is not built yet, the screen says so and
+offers to build it. Switch it off with `FEATURE_TODAY=0`.
+
 Six screens are new or extended. Each part can be switched off in `.env` (see the end of
 `.env.example`); the classic screens work as before.
 
@@ -368,10 +396,25 @@ evidence points, not chances. While the market is open, today's bar is still for
 reading from it is marked provisional and the confirmed reading from yesterday's close is
 shown beside it. Below that: the market regime and what RSI, the 52-week range and the
 Bollinger bands usually mean in it; the signals of the last ten days with how often they
-worked before (once the signal history is built); grading a stock trade, long or short,
-from A to AVOID with suggested invalidation, targets and size; and choosing a call or put
-for the thesis, with the best match, cheapest, best risk-adjusted and most conservative
-contract and the ones to avoid.
+worked before (once the signal history is built), and **your thesis** (2.5). The thesis form
+holds the direction, entry, invalidation, two targets, holding days, contracts and an
+option budget; leave a price blank and it is suggested from the chart. One button, **Grade
+and find a contract**:
+
+1. Grades the stock trade from A to AVOID, with the size for your per-trade risk.
+2. Finds calls (long) or puts (short) on the same levels: the best match, cheapest, best
+   risk-adjusted and most conservative contracts, and the ones to avoid.
+3. Sets **shares or a contract** side by side: what you pay, the result at target 1 and if
+   invalidated, the chance option prices imply of a profit on the horizon date, and what
+   option prices imply each is worth in expectation next to what you pay.
+
+That last figure is worked out over every stock price option prices allow, not just the target
+and the stop, so it comes out close to what you pay: options are priced fairly against
+themselves. It is not an edge. Past cases (once the signal history is built) and the Monte
+Carlo path range (the same model) are shown apart, never blended into one number. The
+trend chart then runs on to the horizon date with the targets, the invalidation, the range
+option prices imply by then and where the contract breaks even. **Set the limit** on any
+contract opens Price an option on it with the limit ladder ready.
 
 **Trend reversals (2.1).** On the Analyze screen, a section reads both sides at once: is a
 fall ending in a bottom, or a rise in a top? Exhaustion (a long move, RSI at an extreme, a
@@ -386,8 +429,10 @@ or put for this reversal" values calls (for a bottom) or puts (for a top) with t
 scores each out of 100 as GOOD, FAIR, POOR or AVOID with the reasons, and for the best one
 (or your own contract) shows the gain or loss at each target, with no move and at the stop,
 a full simulation, and what it would have made after the past cases of the same reading.
-The score is a summary of checks, not a probability. "Reversal scan of the watchlist" at the
-top of the screen lists every stock's reading, strongest first.
+The score is a summary of checks, not a probability. The **Reversals** tab of the Scanner (2.5;
+it was at the top of Analyze before, and stays there when the Scanner is switched off) lists
+every watchlist stock's reading, strongest first. Choosing one opens Decide: long at a bottom,
+short at a top.
 
 **Positions.** Record what you did at your broker: stock long or short, calls and puts,
 with every fill. Average cost, partial exits, fees, realized and unrealized profit and R
@@ -573,15 +618,17 @@ tradeassist/
   options/                 the option picker, reversal option scores; historical option data (none connected);
                            volatility.py lab.py (options lab), strategies.py (strategy builder)
   scanner.py               technical signals and options activity across many stocks
+  today.py                 which stocks lean long or short today, and why some are held back (2.5)
   makeup.py news.py        the market's make-up; headlines and their tone
   ai.py briefs.py          the AI plug-in (Anthropic API) and what it is asked
   portfolio.py analytics.py alerts.py   portfolio risk, journal analytics, alerts
   backtest_v2.py           condition strategies, Monte Carlo
   analysis.py api_v2.py    the version 2 operations and the /v2 HTTP API
   versions.py              version labels recorded with every result
-  static/                  the web page (app.js classic screens, v2.js version 2 screens, lab.js 2.4 screens)
+  static/                  the web page: flow.js (2.5 pure helpers, tested under Node), app.js classic screens,
+                           v2.js version 2 screens, lab.js 2.4 screens, decide.js Today and Decide (2.5)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
-docs/IMPROVEMENTS.md       the 2.1.1 to 2.3 engineering record: defects found, tests, reports
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.5 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```

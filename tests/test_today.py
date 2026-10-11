@@ -16,7 +16,7 @@ from tradeassist.db import Database
 from tradeassist.evaluator import REGIME_FIT_LONG, REGIME_FIT_SHORT
 from tradeassist.providers.demo import DemoData
 from tradeassist.service import TradeAssistant
-from tradeassist.today import HOSTILE_FIT, hostile, lean, rank
+from tradeassist.today import HOSTILE, Today, hostile, lean, rank
 
 
 def test_the_sign_of_the_net_score_sets_the_lean():
@@ -48,11 +48,11 @@ def test_a_bull_market_withdraws_short_leans_only(regime):
 
 
 def test_hostile_is_the_bottom_of_the_evaluator_fit_tables():
-    """The cap uses the same tables that score the regime in the stock grade."""
-    for regime, fit in REGIME_FIT_LONG.items():
-        assert hostile("LONG", regime) == (fit <= HOSTILE_FIT)
-    for regime, fit in REGIME_FIT_SHORT.items():
-        assert hostile("SHORT", regime) == (fit <= HOSTILE_FIT)
+    """The cap uses the same tables that score the regime in the stock grade: their two lowest rows."""
+    for table, side in ((REGIME_FIT_LONG, "LONG"), (REGIME_FIT_SHORT, "SHORT")):
+        worst = sorted(table, key=table.get)[:2]
+        assert HOSTILE[side] == set(worst)
+        assert all(table[r] < table[x] for r in worst for x in table if x not in worst)
     assert {r for r in REGIME_FIT_LONG if hostile("LONG", r)} == {"BEAR_CALM", "BEAR_VOLATILE"}
     assert {r for r in REGIME_FIT_SHORT if hostile("SHORT", r)} == {"BULL_CALM", "BULL_VOLATILE"}
     assert not hostile("LONG", None) and not hostile("SHORT", "SOMETHING_NEW")
@@ -103,7 +103,7 @@ def test_lists_are_sorted_by_the_size_of_the_net_score_and_capped_at_eight():
 
 @pytest.fixture
 def client(tmp_path):
-    settings = Settings(data_mode="demo", db_path=tmp_path / "t.db")
+    settings = Settings(data_mode="demo", db_path=tmp_path / "t.db", watchlist=["AAPL", "MSFT", "NVDA", "JPM", "KO"])
     svc = TradeAssistant(settings, provider=DemoData(), db=Database(tmp_path / "t.db"))
     with TestClient(create_app(settings, svc)) as c:
         yield c
@@ -111,7 +111,7 @@ def client(tmp_path):
 
 
 def test_the_endpoint_returns_both_lists_on_one_universe(client):
-    r = client.get("/v2/today/candidates?symbols=AAPL,MSFT,NVDA,JPM,KO")
+    r = client.get("/v2/today/candidates")
     assert r.status_code == 200
     d = r.json()
     assert d["universe_size"] == 5 and d["scanned"] + len(d["errors"]) == 5
@@ -126,8 +126,60 @@ def test_the_endpoint_returns_both_lists_on_one_universe(client):
 
 def test_the_universe_is_the_watchlist_or_the_large_company_list(client):
     assert client.get("/v2/today/candidates?universe=sp500").status_code == 400
-    too_many = ",".join(f"A{i}" for i in range(101))
-    assert client.get(f"/v2/today/candidates?symbols={too_many}").status_code == 400
+    # Tickers of one's own choosing are not a Today universe: the list stays the watchlist.
+    d = client.get("/v2/today/candidates?symbols=ZZZZ,FOO").json()
+    assert d["universe"] == "watchlist" and d["universe_size"] == 5
+
+
+class _Stub:
+    """An analyst whose readings are set by the test."""
+    def __init__(self, trends, reversals=None, regime="RANGE"):
+        self.trends, self.reversals, self.reg = trends, reversals or {}, regime
+
+    def regime(self):
+        return {"confirmed": {"regime": self.reg, "label": self.reg}}
+
+    def trend(self, sym):
+        return self.trends[sym]
+
+    def reversal(self, sym, history=False):
+        if sym not in self.reversals:
+            raise ValueError("no reversal reading")
+        return {"confirmed": {"bottom": {"stage": self.reversals[sym][0]}, "top": {"stage": self.reversals[sym][1]}}}
+
+    def history_meta(self):
+        return None
+
+
+class _Svc:
+    def __init__(self, names):
+        from types import SimpleNamespace
+        self.settings = SimpleNamespace(watchlist=names)
+        self.market = SimpleNamespace(info=SimpleNamespace(mode="tradier"))
+
+
+def _trend(sym, net):
+    day = None if net == "no bar" else {"date": "2026-10-09", "state": "UP", "label": "Uptrend", "net_score": net,
+                                          "bullish_score": 50, "bearish_score": 10, "coverage": 0.9}
+    return {"symbol": sym, "confirmed": day, "history": []}
+
+
+def test_a_stock_without_a_finished_bar_is_reported_not_crashed():
+    t = Today(_Svc(["A", "B", "C"]), _Stub({"A": _trend("A", 40.0), "B": _trend("B", "no bar"), "C": _trend("C", None)},
+                                         {"A": ("NONE", "NONE")}), {"reversal_analysis": True})
+    d = t.candidates()
+    assert [r["symbol"] for r in d["long"]] == ["A"]
+    assert d["errors"] == [{"symbol": "B", "error": "no finished bar to read the trend on"}]
+    assert d["not_measured"] == ["C"] and d["no_lean"]["total"] == 0
+
+
+def test_a_lean_kept_without_its_reversal_reading_says_so_on_its_row():
+    t = Today(_Svc(["A", "B"]), _Stub({"A": _trend("A", 40.0), "B": _trend("B", 30.0)}, {"B": ("NONE", "NONE")}),
+              {"reversal_analysis": True})
+    d = t.candidates()
+    rows = {r["symbol"]: r for r in d["long"]}
+    assert rows["A"]["reversal_unread"] is True and rows["B"]["reversal_unread"] is False
+    assert any("reversal reading failed for A" in n for n in d["notes"])
 
 
 def test_today_has_its_own_flag(tmp_path, monkeypatch):

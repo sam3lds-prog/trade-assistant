@@ -96,6 +96,7 @@ def test_the_option_picker_adds_the_new_fields_and_keeps_the_old(client):
     m = d["market"]
     assert m["range_1sd_at_horizon"]["low"] < d["thesis"]["spot"] < m["range_1sd_at_horizon"]["high"]
     assert m["expected_price_at_horizon"] == pytest.approx(d["thesis"]["spot"], rel=0.02)
+    assert 0.3 < m["stock_profit_at_horizon"] < 0.7
     usable = [k for k in d["contracts"] if k["usable"]]
     assert usable
     for k in usable:
@@ -103,8 +104,9 @@ def test_the_option_picker_adds_the_new_fields_and_keeps_the_old(client):
             assert old in k
         assert 0.0 <= k["market_implied_profit_at_horizon"] <= 1.0
         assert k["implied_value_at_horizon"] == pytest.approx(k["premium"] + k["implied_expected_pnl_at_horizon"])
-        # Option prices price options fairly against themselves: the expectation is near what is paid.
-        assert abs(k["implied_expected_pnl_at_horizon"]) < 0.25 * k["premium"] + 5
+        # Each contract read on its own implied volatility is priced fairly against itself: the expectation is
+        # what is paid, give or take the carry to the horizon and the smile's fit to the midpoint.
+        assert abs(k["implied_expected_pnl_at_horizon"]) < 0.03 * k["premium"] + 2, k
 
 
 def test_the_simulator_reports_the_expectation_too(client):

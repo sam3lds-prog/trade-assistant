@@ -246,7 +246,7 @@ const WHEN_WORDS = n => n === 0 ? "last bar" : n === 1 ? "1 bar ago" : `${n} bar
 // Every scanner row goes to one place, Decide (2.5), with a direction when the row has a clear one.
 function openStock(symbol, direction) {
   if (BUILDERS.analyze) state.openDecide(symbol, direction || null);
-  else openInLab(symbol);
+  else if (BUILDERS.lab) openInLab(symbol);
 }
 // A technical row leans the way its recent signals point, if they agree.
 const signalDirection = r => r.bullish > r.bearish ? "LONG" : r.bearish > r.bullish ? "SHORT" : null;

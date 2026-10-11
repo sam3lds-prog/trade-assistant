@@ -551,12 +551,11 @@ def build_router(svc: Any) -> APIRouter:
     today = Today(svc, analyst, svc.settings.features)
 
     @router.get("/today/candidates")
-    def today_candidates(universe: str = "watchlist", symbols: str | None = None):
+    def today_candidates(universe: str = "watchlist"):
         need("today")
         need("trend_engine_v2")
-        names = [x for x in (symbols or "").replace(" ", ",").split(",") if x.strip()] or None
         try:
-            return clean(today.candidates(universe, names))
+            return clean(today.candidates(universe))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
