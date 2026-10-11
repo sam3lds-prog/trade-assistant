@@ -104,4 +104,158 @@ function buildToday() {
   return view;
 }
 
+/* ---------- Decide: shares or a contract, side by side ---------- */
+// Run by the thesis form on Analyze once the grade and the contracts are in (v2.js thesisSection).
+const DECIDE_AFTER = [];
+
+// What option prices imply a position is worth in expectation, next to what it costs. `pnl` is that worth
+// less the cost, from the whole distribution (server side); null is unknown, never $0.
+function expectationText(pnl, paid, received) {
+  if (!isNum(pnl) || !isNum(paid)) return el("span", { class: "muted", text: "unknown" });
+  const worth = received ? paid - pnl : paid + pnl;
+  const near = Math.abs(pnl) < Math.max(1, 0.01 * Math.abs(paid));
+  const gap = near ? "about $0" : signedMoney(pnl, 0);
+  return el("span", {}, received ? `${money(worth, 0)} to buy back against ${money(paid, 0)} received` : `${money(worth, 0)} against ${money(paid, 0)} paid`,
+    el("span", { class: "muted", text: ` (${gap})` }));
+}
+
+// A chance that rounds to 0% or 100% is still a measured one: say how small or large, not "0%".
+const chanceText = p => p < 0.005 ? "under 1%" : p > 0.995 ? "over 99%" : pct(100 * p, 0);
+
+function compareRows(dec) {
+  const g = dec.grade, o = dec.options, m = o.market, lv = g.levels, entry = g.entry;
+  const dir = g.direction === "LONG" ? 1 : -1, n = g.sizing.shares, date = shortDate(o.thesis.horizon_date);
+  const rows = [];
+  const pastTarget = m && isNum(m.reach_target_1_by_horizon) ? `${chanceText(m.reach_target_1_by_horizon)} chance past target 1 on ${date}` : null;
+  rows.push(n > 0 ? {
+    kind: "shares", name: `${num(n, 0)} share${n === 1 ? "" : "s"} ${dir > 0 ? "long" : "short"} at ${money(entry)}`,
+    sub: `Sized for ${money(g.sizing.risk_budget, 0)} at risk to the invalidation`,
+    pay: n * entry, received: dir < 0, atTarget: dir * n * (lv.target_1 - entry), ifInvalid: dir * n * (lv.invalidation - entry),
+    chance: pastTarget, ev: m && isNum(m.expected_price_at_horizon) ? dir * n * (m.expected_price_at_horizon - entry) : null,
+    line: p => dir * n * (p - entry),
+  } : { kind: "shares", name: "Shares", sub: `No whole share fits the ${money(g.sizing.risk_budget, 0)} risk budget: ${money(g.sizing.risk_per_share)} at risk per share.`, empty: true });
+  const pick = o.picks.find(x => x.category === "BEST RISK-ADJUSTED") || o.picks[0];
+  if (pick) {
+    const k = pick.contract, qty = o.thesis.contracts;
+    rows.push({ kind: "contract", k, name: contractName(k), sub: `${qty} contract${qty === 1 ? "" : "s"} at the ${money(k.mid)} mid · the ${pick.category.toLowerCase()} pick below`,
+      pay: k.premium, received: false, atTarget: k.at_target, ifInvalid: k.if_invalidated,
+      chance: isNum(k.market_implied_profit_at_horizon) ? `${chanceText(k.market_implied_profit_at_horizon)} chance of a profit on ${date}` : null,
+      ev: k.implied_expected_pnl_at_horizon });
+  }
+  return rows;
+}
+
+// Profit or loss on the horizon date against the stock price then, for both rows on one dollar axis.
+function compareChart(rows, sim, dec) {
+  const g = dec.grade, o = dec.options, lv = g.levels;
+  const xs = sim.curve.prices, n = xs.length, shares = rows.find(r => r.kind === "shares" && !r.empty);
+  const series = [];
+  if (shares) series.push({ name: "Shares", color: "--series-1", ys: xs.map(shares.line) });
+  series.push({ name: "Contract", color: "--series-2", ys: sim.curve.pnl_at_date });
+  const W = 760, H = 290, pad = { l: 72, r: 92, t: 26, b: 44 };
+  const all = series.flatMap(s2 => s2.ys);
+  const ys = niceScale(Math.min(0, ...all), Math.max(0, ...all), 5);
+  const xlo = xs[0], xhi = xs[n - 1];
+  const X = v => pad.l + (W - pad.l - pad.r) * (v - xlo) / (xhi - xlo);
+  const Y = v => pad.t + (H - pad.t - pad.b) * (1 - (v - ys.lo) / (ys.hi - ys.lo));
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `Profit or loss on ${shortDate(o.thesis.horizon_date)} of the shares and the contract against the stock price` });
+  for (const v of ys.ticks) root.append(svg("line", { class: v === 0 ? "zero" : "grid", x1: pad.l, x2: W - pad.r, y1: Y(v), y2: Y(v) }),
+    svg("text", { x: pad.l - 8, y: Y(v) + 4, "text-anchor": "end", text: money(v, 0) }));
+  const xt = niceScale(xlo, xhi, 6);
+  for (const v of xt.ticks) if (v >= xlo && v <= xhi) root.append(svg("text", { x: X(v), y: H - pad.b + 18, "text-anchor": "middle", text: money(v, xt.step < 1 ? 2 : 0) }));
+  root.append(svg("text", { x: (pad.l + W - pad.r) / 2, y: H - 4, "text-anchor": "middle", text: `Stock price on ${shortDate(o.thesis.horizon_date)}` }));
+  const marks = [[lv.invalidation, "Invalidation"], [o.thesis.spot, "Now"], [lv.target_1, "Target 1"]].filter(([v]) => isNum(v) && v > xlo && v < xhi);
+  for (const [v, word] of marks) root.append(svg("line", { class: word === "Now" ? "now-line" : "grid", x1: X(v), x2: X(v), y1: pad.t, y2: H - pad.b, "stroke-dasharray": word === "Now" ? null : "4 3" }),
+    halo({ x: X(v), y: pad.t - 8, "text-anchor": "middle", class: "lbl", text: `${word} ${money(v, 0)}` }));
+  const ends = [];
+  for (const sr of series) {
+    root.append(svg("path", { d: sr.ys.map((v, i) => `${i ? "L" : "M"}${X(xs[i]).toFixed(1)} ${Y(v).toFixed(1)}`).join(" "), fill: "none", stroke: `var(${sr.color})`, "stroke-width": 2, "stroke-linejoin": "round" }));
+    ends.push({ text: sr.name, y: Y(sr.ys[n - 1]) + 4 });
+  }
+  for (const e of spreadLabels(ends, 13, pad.t + 4, H - pad.b)) root.append(svg("text", { x: W - pad.r + 8, y: e.y, text: e.text }));
+  const hover = svg("line", { class: "hover-line", y1: pad.t, y2: H - pad.b, visibility: "hidden" });
+  const dots = series.map(sr => svg("circle", { r: 4, fill: `var(${sr.color})`, stroke: "var(--panel)", "stroke-width": 2, visibility: "hidden" }));
+  root.append(hover, ...dots);
+  const tip = el("div", { class: "tip" });
+  root.addEventListener("pointermove", evt => {
+    const box = root.getBoundingClientRect();
+    const px = (evt.clientX - box.left) * W / box.width;
+    const i = Math.max(0, Math.min(n - 1, Math.round((px - pad.l) / (W - pad.l - pad.r) * (n - 1))));
+    hover.setAttribute("x1", X(xs[i])); hover.setAttribute("x2", X(xs[i])); hover.setAttribute("visibility", "visible");
+    series.forEach((sr, k) => { dots[k].setAttribute("cx", X(xs[i])); dots[k].setAttribute("cy", Y(sr.ys[i])); dots[k].setAttribute("visibility", "visible"); });
+    tip.replaceChildren(el("div", { class: "tip-head", text: `Stock ${money(xs[i])} on ${shortDate(o.thesis.horizon_date)}` }),
+      ...series.map(sr => tipRow(signedMoney(sr.ys[i], 0), sr.name.toLowerCase(), sr.color)));
+    tooltipAt(tip, box, X(xs[i]), W);
+  });
+  root.addEventListener("pointerleave", () => { hover.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); tip.style.display = "none"; });
+  return el("div", { class: "chart" }, el("div", { class: "chart-scroll" }, root, tip),
+    el("div", { class: "legend" }, series.map(sr => el("span", {}, el("i", { style: `background: var(${sr.color})` }), sr.name))));
+}
+
+function pastCasesLine(g, reload) {
+  const h = g.analogs && g.analogs.history
+    ? (g.analogs.history.same_regime && g.analogs.history.same_regime.cases ? g.analogs.history.same_regime : g.analogs.history.all) : null;
+  if (!g.history_built) {
+    const box = el("div", {}, el("p", { class: "small" }, el("strong", { text: "Past cases: " }), "the signal history has not been built, so there is no past frequency to show."));
+    if (featureOn("signal_calibration")) box.append(buildHistoryButton(reload));
+    return box;
+  }
+  if (!h || !h.cases || !isNum(h.frequency)) return el("p", { class: "small" }, el("strong", { text: "Past cases: " }), "none like this in the signal history.");
+  return el("p", { class: "small" }, el("strong", { text: "Past cases: " }),
+    `when a stock's trend turned to ${trendWord(g.trend_state).toLowerCase()} before, it moved the expected way over 10 days in ${pct(100 * h.frequency, 0)} of ${num(h.cases, 0)} cases.`);
+}
+
+function comparePanel(dec, rerun) {
+  const rows = compareRows(dec), o = dec.options, date = shortDate(o.thesis.horizon_date);
+  const box = el("div", { class: "compare" }, el("h3", { text: "Shares or a contract" }),
+    el("p", { class: "small muted", text: `Both on your levels, valued on ${date}. Chances and the expected figure are what option prices imply; past cases are counted apart. None of them is a forecast.` }));
+  const actions = r => {
+    if (r.kind !== "contract") return "";
+    return limitButton(o.symbol, r.k, o.thesis.contracts);
+  };
+  box.append(table([
+    { label: "", cell: r => el("div", {}, el("strong", { text: r.name }), el("div", { class: "small muted", text: r.sub })) },
+    { label: "You pay", num: true, cell: r => r.empty ? "" : r.received ? el("span", {}, money(r.pay, 0), el("div", { class: "small muted", text: "received (short)" })) : money(r.pay, 0) },
+    { label: "At target 1", num: true, cell: r => r.empty ? "" : signedMoney(r.atTarget, 0) },
+    { label: "If invalidated", num: true, cell: r => r.empty ? "" : signedMoney(r.ifInvalid, 0) },
+    { label: "Option prices imply", cell: r => r.empty ? "" : r.chance || el("span", { class: "muted", text: "unknown" }) },
+    { label: "What option prices imply it is worth in expectation", cell: r => r.empty ? "" : expectationText(r.ev, r.pay, r.received) },
+    { label: "", cell: actions }], rows));
+  const chart = el("div", {}, el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Drawing both on one chart…" })));
+  box.append(chart);
+  const c = rows.find(r => r.kind === "contract");
+  if (c) {
+    api("/api/simulate", { symbol: o.symbol, eval_date: o.thesis.horizon_date, legs: [{ expiration: c.k.expiration, option_type: c.k.option_type.toLowerCase(),
+      strike: c.k.strike, side: "buy", contracts: o.thesis.contracts, entry_price: c.k.mid }] })
+      .then(sim => chart.replaceChildren(compareChart(rows, sim, dec)))
+      .catch(e => chart.replaceChildren(el("p", { class: "small error", text: `Chart: ${e.message}` })));
+  } else chart.replaceChildren(el("p", { class: "small muted", text: "No contract passed the checks, so there is nothing to compare the shares with." }));
+  const one = rows.filter(r => !r.empty);
+  if (one.length === 2) {
+    const [sh, ct] = one;
+    box.append(el("p", {}, `The shares risk ${money(Math.abs(sh.ifInvalid), 0)} to make ${money(sh.atTarget, 0)} at target 1; the contract risks ${money(Math.abs(ct.ifInvalid), 0)} to make ${money(ct.atTarget, 0)} if the stock gets there by ${date}.`));
+  }
+  box.append(pastCasesLine(dec.grade, rerun));
+  if (c && featureOn("options_lab")) {
+    const mcBtn = el("button", { class: "plain", text: "Show the path range" });
+    const mcErr = el("div", { class: "error", role: "alert" });
+    const mcOut = el("div");
+    mcBtn.addEventListener("click", () => withBusy(mcBtn, mcErr, async () => {
+      const body = { symbol: o.symbol, expiration: c.k.expiration, option_type: c.k.option_type.toLowerCase(), strike: c.k.strike, contracts: o.thesis.contracts };
+      mcOut.replaceChildren(el("h4", { text: "Model: simulated paths to expiration" }),
+        el("p", { class: "small muted", text: "The same model as the option prices above, run as paths: it shows the spread of outcomes, not a second opinion on the chances." }),
+        renderMonteCarlo({ ...(await api("/v2/options/montecarlo", body)), contracts: body.contracts }));
+    }));
+    box.append(el("div", { class: "row", style: "margin-top:8px" }, mcBtn), mcErr, mcOut);
+  }
+  box.append(el("p", { class: "small muted", text: "Close to what you pay by construction: option prices price options. A gap of a few percent comes from valuing each contract on its own volatility and the stock on the at-the-money one; it is not an edge." }));
+  return box;
+}
+
+DECIDE_AFTER.push((out, dec) => {
+  const card = out.firstChild;
+  const rerun = () => { const go = out.parentNode && out.parentNode.querySelector("button.primary"); if (go) go.click(); };
+  out.insertBefore(comparePanel(dec, rerun), card ? card.nextSibling : null);
+});
+
 Object.assign(BUILDERS, { today: buildToday });

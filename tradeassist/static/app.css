@@ -387,3 +387,9 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .lean-table td { vertical-align: middle; }
 .lean-table .status-tag { font-size: 0.8rem; }
 @media (max-width: 520px) { .lean-grid { grid-template-columns: minmax(0, 1fr); } .lean-score .score-track.mini { width: 56px; } }
+
+/* 2.5: Decide, shares or a contract */
+.compare { margin: 18px 0 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.compare table th { white-space: normal; vertical-align: bottom; }
+.compare td { vertical-align: top; }
+.compare td .primary { white-space: nowrap; }

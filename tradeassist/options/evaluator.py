@@ -37,8 +37,8 @@ from typing import Any, Sequence
 import numpy as np
 
 from ..optionmath import NY, days_to_expiry, prob_finish_beyond
-from ..simulate import Leg, MULTIPLIER, eval_moment, expiry_moment, expiry_profile, market_odds, position_pnl, \
-    trading_days, years_between
+from ..simulate import Leg, MULTIPLIER, eval_moment, expiry_moment, expiry_profile, implied_distribution, \
+    implied_expectation, market_odds, position_pnl, trading_days, years_between
 from ..versions import OPTIONS_EVALUATOR_VERSION
 
 IV_SHIFTS = (-0.05, 0.0, 0.05)
@@ -143,6 +143,13 @@ def value_contract(row: dict[str, Any], analysis: Any, thesis: dict[str, Any], n
     atm = thesis.get("atm_iv") or leg.vol
     odds = market_odds([leg], thesis["spot"], rate, atm, leg.growth, expiry_moment(exp), now)
     out["market_implied_profit_at_expiration"] = odds["p_profit"]
+    # On the horizon date (2.5): the chance of a profit then, and what option prices imply the position is worth
+    # in expectation, from the whole distribution (the same weighting), next to what it costs.
+    at_h = market_odds([leg], thesis["spot"], rate, atm, leg.growth, when["horizon"], now)
+    exp_pnl = implied_expectation([leg], thesis["spot"], rate, atm, leg.growth, when["horizon"], now)
+    out["market_implied_profit_at_horizon"] = at_h["p_profit"]
+    out["implied_expected_pnl_at_horizon"] = exp_pnl
+    out["implied_value_at_horizon"] = premium + exp_pnl if exp_pnl is not None else None
 
     if thesis["horizon_date"] > exp_day:
         avoid.append(f"Expires {exp_day:%b} {exp_day.day}, before the {thesis['horizon']}-day horizon.")
@@ -241,7 +248,17 @@ def evaluate(*, symbol: str, direction: int, spot: float, analyses: list[Any], t
     if atm:
         p = prob_finish_beyond(spot, target_1, t_h, atm, above=direction > 0)
         q = prob_finish_beyond(spot, invalidation, t_h, atm, above=direction < 0)
+        near = min(analyses, key=lambda a: a.expiration)
+        growth = math.log(near.forward / near.spot) / near.t if near.t > 0 and near.spot else 0.0
+        h_moment = eval_moment(h_day, now)
+        prices, weights = implied_distribution(spot, atm, growth, h_moment, now)
+        fwd = spot * math.exp(growth * t_h)
+        sd = atm * math.sqrt(t_h)
         market = {"atm_iv": atm, "reach_target_1_by_horizon": p, "beyond_invalidation_at_horizon": q,
+                  # 2.5: the stock's expected price on the horizon date over the same distribution (for what the
+                  # shares are worth in expectation) and its one-standard-deviation range then.
+                  "expected_price_at_horizon": float((weights * prices).sum()), "atm_expiration": near.expiration,
+                  "range_1sd_at_horizon": {"low": fwd * math.exp(-0.5 * sd * sd - sd), "high": fwd * math.exp(-0.5 * sd * sd + sd)},
                   "note": "Market-implied from option prices (lognormal, at-the-money volatility, no drift beyond the "
                           "forward). Not a forecast, and it is the chance of being past the level on that date, not of "
                           "touching it before."}

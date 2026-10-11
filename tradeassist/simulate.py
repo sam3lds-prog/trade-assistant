@@ -152,6 +152,30 @@ WEIGHTS = np.exp(-0.5 * Z * Z)
 WEIGHTS /= WEIGHTS.sum()
 
 
+def implied_distribution(spot: float, vol: float | None, growth: float, when: datetime,
+                         now: datetime) -> tuple[np.ndarray, np.ndarray] | None:
+    """The stock prices at `when` and their weights, as market_odds uses them: a lognormal centred on
+    the forward at volatility `vol`. None when the volatility is unknown."""
+    if vol is None or not math.isfinite(vol) or vol <= 0 or not spot or spot <= 0:
+        return None
+    t = max(years_between(now, when), 0.0)
+    forward = spot * math.exp(growth * t)
+    sd = vol * math.sqrt(t)
+    return forward * np.exp(-0.5 * sd * sd + sd * Z), WEIGHTS
+
+
+def implied_expectation(legs: Sequence[Leg], spot: float, rate: float, vol: float | None, growth: float,
+                        when: datetime, now: datetime, iv_shift: float = 0.0) -> float | None:
+    """What option prices imply the position's profit or loss at `when` is in expectation: the P&L at
+    every price of the distribution, weighted as market_odds weights it (not two points). None when the
+    volatility is unknown, never 0."""
+    dist = implied_distribution(spot, vol, growth, when, now)
+    if dist is None:
+        return None
+    prices, weights = dist
+    return float((weights * position_pnl(legs, prices, when, rate, iv_shift)).sum())
+
+
 def market_odds(legs: Sequence[Leg], spot: float, rate: float, vol: float, growth: float, when: datetime,
                 now: datetime, iv_shift: float = 0.0, max_loss: float | None = None) -> dict[str, Any]:
     """Market-implied chances for the position at moment `when`, from a lognormal distribution of
@@ -160,12 +184,15 @@ def market_odds(legs: Sequence[Leg], spot: float, rate: float, vol: float, growt
     if t < 1e-6 or vol <= 0:
         pnl_now = float(position_pnl(legs, np.array([spot]), when, rate, iv_shift)[0])
         return {"p_profit": 1.0 if pnl_now > 0 else 0.0, "p_max_loss": None, "low": spot, "mid": spot,
-                "high": spot, "pnl_low": pnl_now, "pnl_mid": pnl_now, "pnl_high": pnl_now, "one_sd_move": 0.0}
+                "high": spot, "pnl_low": pnl_now, "pnl_mid": pnl_now, "pnl_high": pnl_now, "one_sd_move": 0.0,
+                # At expiry nothing is uncertain; with no volatility the expectation is unknown.
+                "expected_pnl": pnl_now if t < 1e-6 else None}
     forward = spot * math.exp(growth * t)
     sd = vol * math.sqrt(t)
     prices = forward * np.exp(-0.5 * sd * sd + sd * Z)
     pnl = position_pnl(legs, prices, when, rate, iv_shift)
-    out = {"p_profit": float(WEIGHTS[pnl > 0.005].sum()), "p_max_loss": None, "one_sd_move": spot * sd}
+    out = {"p_profit": float(WEIGHTS[pnl > 0.005].sum()), "p_max_loss": None, "one_sd_move": spot * sd,
+           "expected_pnl": float((WEIGHTS * pnl).sum())}      # the whole distribution, not a few points
     if max_loss is not None and max_loss < -0.005:
         out["p_max_loss"] = float(WEIGHTS[pnl <= max_loss + 0.5].sum())
     for name, z in (("low", -1.2815516), ("mid", 0.0), ("high", 1.2815516)):   # 10th, 50th, 90th percentiles
