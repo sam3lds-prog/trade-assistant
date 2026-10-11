@@ -145,6 +145,12 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
         page.click("text=Grade and find a contract")
         page.wait_for_selector(".panel.thesis .pick", timeout=60000)
         assert page.locator(".panel.thesis .grade-title, .panel.thesis .grade").count() >= 1
+        # Shares and the best risk-adjusted contract side by side, both on one chart.
+        page.wait_for_selector(".compare .chart svg path", timeout=60000)
+        assert page.locator(".compare tbody tr").count() == 2
+        assert page.locator(".compare .legend span").count() == 2
+        assert "unknown" not in page.locator(".compare tbody").inner_text().replace("Unknown", "")
+        assert "$0 against" not in page.locator(".compare tbody").inner_text()
         card = page.locator(".panel.thesis .pick").first
         chosen = page.evaluate("""() => {
           const k = state.decision.options.picks[0].contract;

@@ -446,6 +446,8 @@ class Analyst:
                        target_2=req.get("target_2"), horizon=int(req.get("horizon_days") or 20))
         out["position_id"] = req.get("position_id")
         out["entry_source"] = "yours" if req.get("entry_price") is not None else "current price"
+        # 2.5: whether past cases exist at all, so a missing frequency reads "not built", never 0%.
+        out["history_built"] = bool(signals and signals.get("history_built"))
         out["earnings"] = earnings
         out["data_source"] = self.market.info.mode
         return out
