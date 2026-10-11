@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
-SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js")                 # in the order index.html loads them
+SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js")                 # in the order index.html loads them
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -123,7 +123,10 @@ def test_every_screen_opens_without_a_script_error(tmp_path):
         page.goto(page.base)
         page.wait_for_function("document.querySelectorAll('#main > section').length > 0", timeout=20000)
         views = page.eval_on_selector_all(".rail button.nav:not(.hidden)", "bs => bs.map(b => b.dataset.view)")
-        assert {"positions", "portfolio", "health", "lab", "scanner", "market"} <= set(views)
+        assert {"today", "positions", "portfolio", "health", "lab", "scanner", "market"} <= set(views)
+        assert page.evaluate("location.hash") == "#today"            # the landing screen (2.5)
+        groups = page.eval_on_selector_all(".rail .nav-group:not(.hidden) .nav-group-label", "ls => ls.map(l => l.textContent)")
+        assert groups == ["Today", "Find", "Decide", "Price & simulate", "Hold", "Learn", "Trust"]
         for v in views:
             page.click(f'.rail button.nav[data-view="{v}"]')
             page.wait_for_timeout(400)
@@ -159,4 +162,47 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
         }""")
         assert form == {"symbol": chosen["symbol"], "expiration": chosen["expiration"], "strike": chosen["strike"],
                         "type": chosen["type"], "side": "buy"}
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_today_lists_lead_to_a_graded_thesis_in_that_direction(tmp_path):
+    """2.5: a stock on Today's long or short list opens Decide with that direction and grades it."""
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base)
+        page.wait_for_selector(".lean-table tr.click", timeout=60000)
+        side = "LONG" if page.locator(".lean-grid > .panel:first-child .lean-table tr.click").count() else "SHORT"
+        panel = 1 if side == "LONG" else 2
+        row = page.locator(f".lean-grid > .panel:nth-child({panel}) .lean-table tr.click").first
+        symbol = row.locator("td strong").first.inner_text().strip()
+        row.click()
+        page.wait_for_selector(".panel.thesis .grade-title", timeout=60000)
+        assert page.evaluate("location.hash") == "#analyze"
+        assert page.evaluate("state.thesis.symbol") == symbol and page.evaluate("state.thesis.direction") == side
+        checked = page.eval_on_selector('.panel.thesis input[type="radio"]:checked', "i => i.value")
+        assert checked == side
+        page.wait_for_function(f"state.decision && state.decision.thesis.symbol === '{symbol}'", timeout=60000)
+        assert page.evaluate("state.decision.options.thesis.direction") == ("BULLISH" if side == "LONG" else "BEARISH")
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_every_scanner_tab_opens_decide(tmp_path):
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#scanner")
+        page.wait_for_selector(".scan-table.tech tr.click", timeout=60000)
+        page.locator(".scan-table.tech tr.click").first.click()
+        page.wait_for_selector("text=Your thesis", timeout=60000)
+        assert page.evaluate("location.hash") == "#analyze"
+        page.click('.rail button.nav[data-view="scanner"]')
+        page.click('section:not(.hidden) .seg label:has-text("Reversals")')
+        page.click('section:not(.hidden) button:has-text("Scan the watchlist")')
+        page.wait_for_selector(".reversal-scan tr.click", timeout=60000)
+        page.locator(".reversal-scan tr.click").first.click()
+        page.wait_for_function("location.hash === '#analyze'", timeout=30000)
+        page.click('.rail button.nav[data-view="scanner"]')
+        page.click('section:not(.hidden) .seg label:has-text("Options activity")')
+        page.wait_for_selector(".scan-table:not(.tech) tr.click", timeout=60000)
+        page.locator(".scan-table:not(.tech) tr.click").first.locator("button:has-text('Options lab')").click()
+        page.wait_for_function("location.hash === '#lab'", timeout=30000)
     assert errors == []

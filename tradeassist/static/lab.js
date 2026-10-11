@@ -243,10 +243,13 @@ const MACD_WORDS = { ABOVE_SIGNAL: "Above signal", BELOW_SIGNAL: "Below signal" 
 const AVERAGE_WORDS = { ABOVE_BOTH: "Above both", BELOW_BOTH: "Below both", MIXED: "Between" };
 const WHEN_WORDS = n => n === 0 ? "last bar" : n === 1 ? "1 bar ago" : `${n} bars ago`;
 
-function openStock(symbol) {
-  if (BUILDERS.analyze) { show("analyze"); state.views.analyze.analyze(symbol); }
+// Every scanner row goes to one place, Decide (2.5), with a direction when the row has a clear one.
+function openStock(symbol, direction) {
+  if (BUILDERS.analyze) state.openDecide(symbol, direction || null);
   else openInLab(symbol);
 }
+// A technical row leans the way its recent signals point, if they agree.
+const signalDirection = r => r.bullish > r.bearish ? "LONG" : r.bearish > r.bullish ? "SHORT" : null;
 
 function signalList(row) {
   if (!row.signals.length) return el("span", { class: "muted", text: "none" });
@@ -262,7 +265,7 @@ function renderTechnicalScan(d, reload) {
   const frag = el("div");
   for (const n of d.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
   if (!d.history_built) frag.append(buildHistoryButton(reload));
-  frag.append(el("p", { class: "small", text: `${d.matched} of ${d.scanned} stocks shown · signals from the last ${d.lookback} bar${d.lookback === 1 ? "" : "s"} · checked ${new Date(d.checked_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}. Select a row to analyze the stock.` }));
+  frag.append(el("p", { class: "small", text: `${d.matched} of ${d.scanned} stocks shown · signals from the last ${d.lookback} bar${d.lookback === 1 ? "" : "s"} · checked ${new Date(d.checked_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}. Select a row to build a thesis on the stock: long if its signals point up, short if they point down.` }));
   if (d.errors.length) frag.append(banner("warn", `Not scanned: ${d.errors.map(e => `${e.symbol} (${e.error})`).join("; ")}.`));
   if (!d.rows.length) { frag.append(el("p", { class: "muted", text: "No stock matches these filters." })); return frag; }
   // Each stock is a row of readings with its signals on a full-width line underneath.
@@ -277,7 +280,7 @@ function renderTechnicalScan(d, reload) {
     { label: "Volume vs 20-day", num: true, cell: r => isNum(r.volume_ratio) ? el("span", {}, `${r.volume_ratio.toFixed(1)}×`, r.volume_spike ? el("span", {}, " ", statusTag("info", "Spike")) : null) : "n/a" }];
   const tbody = el("tbody");
   for (const r of d.rows) {
-    const open = () => openStock(r.symbol);
+    const open = () => openStock(r.symbol, signalDirection(r));
     const main = el("tr", { class: "click", tabindex: "0" }, cols.map(c => el("td", { class: c.num ? "num" : null }, c.cell(r))));
     const sub = el("tr", { class: "click sub" }, el("td", { colspan: cols.length }, signalList(r)));
     for (const tr of [main, sub]) tr.addEventListener("click", open);
@@ -290,12 +293,21 @@ function renderTechnicalScan(d, reload) {
   return frag;
 }
 
+// A link inside a clickable row: opens the options lab without also opening Decide.
+function labLink(symbol) {
+  if (!BUILDERS.lab) return "";
+  const a = el("button", { class: "plain small-btn", text: "Options lab" });
+  a.addEventListener("click", e => { e.stopPropagation(); openInLab(symbol); });
+  a.addEventListener("keydown", e => e.stopPropagation());
+  return a;
+}
+
 function renderFlowScan(d) {
   const frag = el("div");
   for (const n of d.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
   if (d.errors.length) frag.append(banner("warn", `Not scanned: ${d.errors.map(e => `${e.symbol} (${e.error})`).join("; ")}.`));
   const st = d.settings;
-  frag.append(el("p", { class: "small", text: `${d.rows.length} stocks · the nearest ${st.expirations} expiration${st.expirations === 1 ? "" : "s"} within ${st.max_dte} days · unusual means at least ${num(st.min_volume, 0)} contracts traded and volume at least ${st.min_vol_oi}× open interest. Select a row to open the stock in the options lab.` }));
+  frag.append(el("p", { class: "small", text: `${d.rows.length} stocks · the nearest ${st.expirations} expiration${st.expirations === 1 ? "" : "s"} within ${st.max_dte} days · unusual means at least ${num(st.min_volume, 0)} contracts traded and volume at least ${st.min_vol_oi}× open interest. Select a row to build a thesis on the stock; the options lab link opens its volatility and chain.` }));
   frag.append(el("h4", { text: "Calls against puts" }), table([
     { label: "Stock", cell: r => el("strong", { text: r.symbol }) },
     { label: "Calls", num: true, cell: r => num(r.call_volume, 0) },
@@ -305,7 +317,8 @@ function renderFlowScan(d) {
     { label: "Call premium", num: true, cell: r => bigMoney(r.call_premium) },
     { label: "Put premium", num: true, cell: r => bigMoney(r.put_premium) },
     { label: "Activity", cell: r => r.lean ? tagOf(LEAN_TAG, r.lean) : "n/a" },
-    { label: "Unusual", num: true, cell: r => String(r.unusual_count) }], d.rows, { onRow: r => openInLab(r.symbol) }));
+    { label: "Unusual", num: true, cell: r => String(r.unusual_count) },
+    { label: "", cell: r => labLink(r.symbol) }], d.rows, { onRow: r => openStock(r.symbol) }));
   frag.lastChild.classList.add("scan-table");
   frag.append(el("h4", { text: `Unusually active contracts${d.unusual_total > d.unusual.length ? ` (largest ${d.unusual.length} of ${d.unusual_total})` : ""}` }));
   const unmeasured = d.rows.reduce((n, r) => n + (r.unusual_unmeasured || 0), 0);
@@ -321,14 +334,18 @@ function renderFlowScan(d) {
     { label: "Premium", num: true, cell: u => bigMoney(u.premium) },
     { label: "Strike vs price", num: true, cell: u => signedPct(u.moneyness_pct, 1) },
     { label: "Delta", num: true, cell: u => isNum(u.delta) ? u.delta.toFixed(2) : "n/a" },
-    { label: "IV", num: true, cell: u => ivPct(u.iv) }], d.unusual, { onRow: u => openInLab(u.symbol) }));
+    { label: "IV", num: true, cell: u => ivPct(u.iv) },
+    { label: "", cell: u => labLink(u.symbol) }], d.unusual, { onRow: u => openStock(u.symbol) }));
   if (d.unusual.length) frag.lastChild.classList.add("scan-table");
   frag.append(el("p", { class: "small muted", text: "Premium traded is volume times the bid/ask midpoint times 100, so it is approximate. P/C is puts divided by calls: above 1 means more puts than calls. Activity is call-heavy when calls take 65% or more of the premium traded, put-heavy at 35% or less." }));
   return frag;
 }
 
 function buildScanner() {
-  const tab = segmented("scantab", [["tech", "Technical signals"], ["flow", "Options activity"]], "tech");
+  const reversals = featureOn("reversal_analysis") && BUILDERS.analyze;
+  const tab = segmented("scantab", [["tech", "Technical signals"], ["flow", "Options activity"], ...(reversals ? [["rev", "Reversals"]] : [])], "tech");
+  // A bottom leads to a long thesis and a top to a short one; a stock with nothing in sight opens without a direction.
+  const revPanel = reversals ? el("div", { class: "hidden" }, reversalScanPanel(x => openStock(x.symbol, x.leading ? (x.side === "bottom" ? "LONG" : "SHORT") : null))) : null;
   const watchCount = () => ((state.status && state.status.watchlist) || []).length;
   // technical
   const uni = el("select", { "aria-label": "Stocks to scan" }, el("option", { value: "watchlist", text: "Watchlist" }),
@@ -398,13 +415,14 @@ function buildScanner() {
   runFlow.addEventListener("click", scanFlow);
   let flowRan = false;
   tab.addEventListener("change", () => {
-    const flow = tab.value() === "flow";
-    techPanel.classList.toggle("hidden", flow); flowPanel.classList.toggle("hidden", !flow);
+    const which = tab.value(), flow = which === "flow";
+    techPanel.classList.toggle("hidden", which !== "tech"); flowPanel.classList.toggle("hidden", !flow);
+    if (revPanel) revPanel.classList.toggle("hidden", which !== "rev");
     if (flow && !flowRan) { flowRan = true; scanFlow(); }
   });
   const view = el("section", {}, el("h2", { text: "Scanner" }),
-    el("p", { class: "lede", text: "Technical signals across many stocks, each with how the same signal turned out before, and options trading unusually heavily against its open interest. Past cases are historical frequencies, not forecasts; options volume does not show who bought and who sold." }),
-    el("div", { class: "row" }, tab), techPanel, flowPanel);
+    el("p", { class: "lede", text: "Technical signals, unusual options activity and reversals across many stocks. Select a stock to build a thesis on it. Past cases are historical frequencies, not forecasts; options volume does not show who bought and who sold." }),
+    el("div", { class: "row" }, tab), techPanel, flowPanel, revPanel);
   let ran = false;
   view.onShow = () => {
     uni.options[0].textContent = `Watchlist (${watchCount()})`; fUni.options[0].textContent = `Watchlist (${watchCount()})`;

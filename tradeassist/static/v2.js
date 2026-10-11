@@ -796,9 +796,13 @@ function gradeCard(ev) {
 // One thesis for the whole decision (2.5): Today and the scanner set the ticker and direction, this form
 // carries the levels, and the stock grade and the contract picker both read it. Kept in the page only.
 state.thesis = null;
+// Open Decide on a stock. With a direction (from Today, or a scanner row that has one) the thesis is set to
+// it and graded straight away; without one the form starts from the stock's trend and waits.
 state.openDecide = (symbol, direction, hint) => {
-  state.thesis = FLOW.thesis({ ...(state.thesis && state.thesis.symbol === symbol ? state.thesis : {}), symbol, direction: direction || "LONG" });
-  state.decideHint = hint || "run";
+  symbol = String(symbol || "").trim().toUpperCase();
+  const kept = state.thesis && state.thesis.symbol === symbol ? state.thesis : {};
+  if (direction) { state.thesis = FLOW.thesis({ ...kept, symbol, direction }); state.decideHint = hint || "run"; }
+  else { state.thesis = kept.symbol ? state.thesis : null; state.decideHint = null; }
   show("analyze");
   state.views.analyze.analyze(symbol);
 };
@@ -1723,9 +1727,10 @@ function pastCasesBox(pc) {
 }
 ANALYSIS_SECTIONS.splice(ANALYSIS_SECTIONS.indexOf(signalsSection) + 1, 0, reversalSection);
 
-function reversalScanPanel(view) {
-  const box = el("div", { class: "panel" }, el("h3", { text: "Reversal scan of the watchlist" }),
-    el("p", { class: "small muted", text: "Which stocks show a potential bottom or top, or a confirmed reversal, on the last finished bar. Select a row to analyze the stock." }));
+// The reversal scan, a tab of the Scanner (2.5; it sat on Analyze before). `open(row)` takes a row to Decide.
+function reversalScanPanel(open) {
+  const box = el("div", { class: "panel reversal-scan" }, el("h3", { text: "Reversal scan of the watchlist" }),
+    el("p", { class: "small muted", text: "Which stocks show a potential bottom or top, or a confirmed reversal, on the last finished bar. Select a row to build a thesis on it: long at a bottom, short at a top." }));
   const go = el("button", { class: "plain", text: "Scan the watchlist" });
   const err = el("div", { class: "error", role: "alert" });
   const out = el("div");
@@ -1743,21 +1748,14 @@ function reversalScanPanel(view) {
         { label: "Wrong beyond", num: true, cell: x => x.leading ? money(x.invalidation) : "" },
         { label: "Target 1", num: true, cell: x => x.leading ? money(x.target_1) : "" },
         { label: "Trend", cell: x => trendTag(x.trend_state) },
-        { label: "Today so far", cell: x => x.today ? revTag(x.side, x.today.stage) : "" }], rows, { onRow: x => view.analyze(x.symbol) }),
+        { label: "Today so far", cell: x => x.today ? revTag(x.side, x.today.stage) : "" }], rows, { onRow: open }),
       s.errors.length ? el("p", { class: "small muted", text: `Not scanned: ${s.errors.join("; ")}` }) : "",
       el("p", { class: "small muted", text: s.note }));
   }));
   box.append(el("div", { class: "row" }, go), err, out);
   return box;
 }
-{
-  const classicAnalyze = buildAnalyze;
-  BUILDERS.analyze = () => {
-    const view = classicAnalyze();
-    if (featureOn("reversal_analysis")) view.insertBefore(reversalScanPanel(view), view.children[3] || null);
-    return view;
-  };
-}
+BUILDERS.analyze = buildAnalyze;
 
 /* ---------- view: data health (2.3) ---------- */
 const SOURCE_TAG = { OK: ["pass", "Working"], DEGRADED: ["warn", "Failing"], PAUSED: ["fail", "Paused after repeated failures"], NOT_USED_YET: ["info", "Not used yet"] };

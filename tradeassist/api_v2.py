@@ -546,6 +546,20 @@ def build_router(svc: Any) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # --- Today (2.5): which stocks lean long or short, from the trend engine; read only ---------------
+    from .today import Today
+    today = Today(svc, analyst, svc.settings.features)
+
+    @router.get("/today/candidates")
+    def today_candidates(universe: str = "watchlist", symbols: str | None = None):
+        need("today")
+        need("trend_engine_v2")
+        names = [x for x in (symbols or "").replace(" ", ",").split(",") if x.strip()] or None
+        try:
+            return clean(today.candidates(universe, names))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # --- options lab (2.4) ------------------------------------------------------------------------
     from .options.lab import OptionsLab
     lab = svc.lab if getattr(svc, "lab", None) else OptionsLab(svc)
