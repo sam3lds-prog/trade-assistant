@@ -400,3 +400,50 @@ def ai_usage(cur: sqlite3.Cursor) -> None:
         error         TEXT
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS ai_usage_day ON ai_usage (day)")
+
+
+@migration(11, "your broker's trade history, imported read-only")
+def broker_history(cur: sqlite3.Cursor) -> None:
+    """2.6: the rows of Robinhood's account activity report (or the Robinhood connection's order history)
+    that are trades or change a holding: buys and sells of shares, options opened and closed, expirations,
+    assignments, exercises and splits. Deposits, transfers, dividends and fees are counted at import but
+    not kept. Each row keeps its original columns so every figure can be checked against the statement.
+    Kept on this computer only; nothing here is sent anywhere."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS broker_imports (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        source          TEXT NOT NULL,             -- robinhood_csv, robinhood_link or sample
+        filename        TEXT,
+        imported_at     TEXT NOT NULL,
+        rows_read       INTEGER NOT NULL DEFAULT 0,
+        rows_added      INTEGER NOT NULL DEFAULT 0,
+        rows_duplicate  INTEGER NOT NULL DEFAULT 0,
+        rows_ignored    INTEGER NOT NULL DEFAULT 0,
+        rows_unreadable INTEGER NOT NULL DEFAULT 0,
+        first_date      TEXT,
+        last_date       TEXT,
+        summary_json    TEXT
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS broker_activity (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        import_id     INTEGER NOT NULL REFERENCES broker_imports(id) ON DELETE CASCADE,
+        source        TEXT NOT NULL,
+        row_key       TEXT NOT NULL UNIQUE,        -- the row's own content, so the same row is kept once
+        file_order    INTEGER NOT NULL,            -- position in its file (the report lists newest first)
+        activity_date TEXT NOT NULL,
+        process_date  TEXT,
+        settle_date   TEXT,
+        code          TEXT NOT NULL,               -- Buy, Sell, BTO, STC, STO, BTC, OEXP, OASGN, OEXCS, SPL
+        symbol        TEXT,
+        description   TEXT,
+        kind          TEXT NOT NULL CHECK (kind IN ('STOCK', 'OPTION')),
+        option_type   TEXT CHECK (option_type IN ('CALL', 'PUT') OR option_type IS NULL),
+        strike        REAL,
+        expiration    TEXT,
+        quantity      REAL,
+        short_flag    INTEGER NOT NULL DEFAULT 0,
+        price         REAL,
+        amount        REAL,
+        raw_json      TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS broker_activity_date ON broker_activity (activity_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS broker_activity_symbol ON broker_activity (symbol)")

@@ -11,6 +11,8 @@ from tradeassist.providers.demo import DemoData
 from tradeassist.service import TradeAssistant, clean
 
 V2_WRITES = {
+    # 2.6: your broker history, imported read-only from a file you download, and removing an import again.
+    "/v2/history/import", "/v2/history/sample", "/v2/history/imports/{import_id}/remove",
     "/v2/positions", "/v2/positions/{position_id}/executions", "/v2/positions/{position_id}/plan",
     "/v2/positions/{position_id}/cancel", "/v2/positions/{position_id}/snapshot",
     "/v2/position/evaluate", "/v2/options/evaluate", "/v2/options/compare", "/v2/portfolio/stress",

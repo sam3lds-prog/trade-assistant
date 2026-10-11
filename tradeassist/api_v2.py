@@ -174,6 +174,11 @@ class OptionsEvaluate(Strict):
     entry_price: float | None = Field(None, gt=0)      # 2.5.1: the share entry, for the chance the shares are ahead
 
 
+class HistoryImport(Strict):
+    filename: str | None = Field(None, max_length=200)
+    text: str = Field(..., min_length=1, max_length=16_000_000)
+
+
 class ContractRef(Strict):
     option_type: Literal["CALL", "PUT", "call", "put"]
     strike: float = Field(..., gt=0)
@@ -559,6 +564,53 @@ def build_router(svc: Any) -> APIRouter:
             return clean(today.candidates(universe))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- your trade history (2.6): imported read-only, analysed locally ---------------------------------
+    from .tradehistory import HistoryImportError, TradeHistory
+    history = svc.history if getattr(svc, "history", None) else TradeHistory(svc)
+    svc.history = history
+
+    def history_call(fn):
+        need("trade_history")
+        try:
+            return clean(fn())
+        except (HistoryImportError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/history/import")
+    def history_import(req: HistoryImport):
+        return history_call(lambda: history.import_report(req.text, req.filename))
+
+    @router.post("/history/sample")
+    def history_sample():
+        return history_call(history.load_sample)
+
+    @router.get("/history/imports")
+    def history_imports():
+        from .tradehistory import imports
+        return history_call(lambda: {"imports": imports(svc.db)})
+
+    @router.post("/history/imports/{import_id}/remove")
+    def history_remove(import_id: int):
+        from .tradehistory import remove_import
+
+        def run():
+            out = remove_import(svc.db, import_id)
+            history._book = None
+            return out
+        return history_call(run)
+
+    @router.get("/history/analysis")
+    def history_analysis(start: str | None = None, end: str | None = None, by: str = "month", basis: str = "close"):
+        return history_call(lambda: history.analysis(start or None, end or None, by, basis))
+
+    @router.get("/history/trade/{trade_id}")
+    def history_trade(trade_id: int):
+        return history_call(lambda: history.trade(trade_id))
+
+    @router.get("/history/holdings")
+    def history_holdings():
+        return history_call(history.holdings)
 
     # --- options lab (2.4) ------------------------------------------------------------------------
     from .options.lab import OptionsLab
