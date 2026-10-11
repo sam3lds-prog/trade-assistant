@@ -396,3 +396,13 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .compare td { vertical-align: top; }
 .compare td .primary { white-space: nowrap; }
 .compare .band-cell { min-width: 11.5em; }
+
+/* 2.6: My trades */
+.date-range .inline-form { padding: 0; }
+.btn-pair { display: flex; gap: 6px; flex-wrap: nowrap; }
+.pattern-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.pattern-list li { margin: 0 0 10px; line-height: 1.45; }
+.chart rect.click { cursor: pointer; }
+.trade-table tr.detail-row > td { background: var(--sunk); padding: 12px; }
+.trade-detail table { margin-bottom: 8px; }
+.trade-detail h4 { margin-top: 10px; }
