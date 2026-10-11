@@ -26,6 +26,7 @@ from .evaluator import REGIME_FIT_LONG, REGIME_FIT_SHORT
 from .optionmath import NY
 from .providers.base import DataError
 from .scanner import universe
+from .signalbook import MAIN_HORIZON, MIN_CASES, bucket_for
 
 LIST_SIZE = 8
 HOSTILE_ROWS = 2          # the bottom of each regime-fit table: both bear regimes for longs, both bull ones for shorts
@@ -73,6 +74,24 @@ def lean(net: float | None, regime: str | None, bottom_stage: str | None, top_st
     return {"lean": direction, "measured": True, "pull": direction, "capped": None}
 
 
+BUCKET_FIELDS = ("low", "high", "cases", "frequency", "frequency_low", "frequency_high",
+                 "independent_periods", "mean_return", "mean_excess_vs_spy")
+
+
+def past_bucket(net: float | None, buckets: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """How often stocks in the signal history were higher MAIN_HORIZON (10) days after a day whose net score
+    sat in the same range as `net`: the stored calibration bucket, as it is. `frequency` is the share of cases
+    that were higher, for either direction (a short is not flipped). A historical frequency, not a forecast.
+    None when there is no history, no bucket for the score, or a bucket with no cases: never 0."""
+    rng = bucket_for(net)
+    if rng is None or not buckets:
+        return None
+    row = next((b for b in buckets if b.get("low") == rng[0]), None)
+    if not row or not row.get("cases") or row.get("frequency") is None:
+        return None
+    return {**{k: row.get(k) for k in BUCKET_FIELDS}, "horizon": MAIN_HORIZON, "enough": row["cases"] >= MIN_CASES}
+
+
 def rank(rows: list[dict[str, Any]], size: int = LIST_SIZE) -> dict[str, Any]:
     """Split stock rows (each with `lean` from lean() and `net_score`) into the two lists, largest net
     score first, and count the rest."""
@@ -111,6 +130,10 @@ class Today:
         check_reversal = bool(self.features.get("reversal_analysis"))
         if not check_reversal:
             notes.append("Reversal analysis is switched off, so a forming top or bottom does not withdraw a lean.")
+        # The signal history's 10-day score buckets, read once for every row (no per-stock study here).
+        meta = self.analyst.history_meta() if self.features.get("signal_calibration") else None
+        cal = ((meta or {}).get("calibration") or {}).get(str(MAIN_HORIZON)) or {}
+        buckets = cal.get("buckets") if meta else None
         rows, errors, unread = [], [], []
         for sym in names:
             try:
@@ -144,13 +167,13 @@ class Today:
                          "close": close, "change_pct": 100 * (close / prev - 1) if close and prev else None,
                          "reversal": {"bottom": bottom, "top": top} if read else None,
                          # A lean kept only because its reversal could not be read says so on its own row.
-                         "reversal_unread": bool(check_reversal and verdict["lean"] and not read), **verdict})
+                         "reversal_unread": bool(check_reversal and verdict["lean"] and not read),
+                         "past_10d": past_bucket(net, buckets), **verdict})
         if unread:
             notes.append("The reversal reading failed for " + ", ".join(unread) + ": their leans were not checked "
                          "for a forming top or bottom.")
         if self.svc.market.info.mode == "demo":
             notes.insert(0, "Demo prices are synthetic: these leans say nothing about real stocks.")
-        meta = self.analyst.history_meta() if self.features.get("signal_calibration") else None
         size = len(names)
         words = "your watchlist" if name == "watchlist" else "100 large US companies"
         return {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "universe": name, "scanned": len(rows),
@@ -165,4 +188,4 @@ class Today:
                         "Scores count evidence; they are not chances."}
 
 
-__all__ = ["Today", "lean", "rank", "hostile", "LIST_SIZE", "HOSTILE", "HOSTILE_ROWS"]
+__all__ = ["Today", "lean", "rank", "hostile", "past_bucket", "LIST_SIZE", "HOSTILE", "HOSTILE_ROWS"]

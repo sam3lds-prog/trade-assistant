@@ -670,3 +670,16 @@ The reviewers checked these and found them sound:
 - No missing value is shown as $0 or 0%.
 
 Tests: 767 passed, 2 skipped, including the Chromium tests; ruff is clean.
+
+### 2.5.1: six review fixes
+
+| # | Finding | Fix | Test |
+| --- | --- | --- | --- |
+| 1 | `reach_target_1_by_horizon` and `beyond_invalidation_at_horizon` used the stock price as the forward, while the range, expected price and share chance used the forward | `stock_outlook` computes the forward once and every stock figure uses it | `test_2_5_1.py`: a forward 10% under the stock with a target between them |
+| 2 | Share chance and average were measured from today's price while the share dollars used the entry | The typed entry goes to the picker as `entry_price`; only the share-ahead chance uses it; the "if bought" wording is gone | the chance moves with a typed entry, nothing else does; the contracts are unchanged |
+| 3 | The expectation column read "about $0" by construction | The 10th, 50th and 90th percentile P&L per contract and stock percentiles in `market`; the column shows the middle outcome and the nine-in-ten band; the average stays in the footnote | finite band with a volatility, none without; puts and calls ordered correctly |
+| 4 | The cone did not say which expiration's volatility it used | The legend and hover name `atm_expiration` | browser test |
+| 5 | Today rows had no past frequency | `past_10d` from the stored 10-day buckets, read once per response; a column only when the history is built | the bucket matches `bucket_for`, a short is not flipped, an empty bucket is null |
+| 6 | The unused call-or-put form and a repeated past-cases sentence | `optionsSection` deleted; the sentence is on the comparison only | static test |
+
+Tests: 777 passed, 2 skipped; ruff clean.

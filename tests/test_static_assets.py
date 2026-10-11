@@ -43,6 +43,16 @@ def test_index_loads_every_script_in_order_with_a_fresh_address():
     assert all(f'"{name}"' in Path(api.__file__).read_text() for name in SCRIPTS)
 
 
+def test_analyze_has_one_thesis_form_and_says_the_trend_turned_sentence_once():
+    """2.5.1: the old call-or-put form is gone, and the analog sentence lives on the comparison only."""
+    v2 = (STATIC / "v2.js").read_text()
+    assert "function optionsSection" not in v2 and "optionsSection(" not in v2
+    for keep in ("function renderOptionsEval", "function limitButton", "function thesisSection"):
+        assert keep in v2
+    joined = "".join((STATIC / name).read_text() for name in SCRIPTS)
+    assert joined.count("trend turned to") == 1
+
+
 def test_every_navigation_button_has_a_screen():
     html = (STATIC / "index.html").read_text()
     views = set(re.findall(r'data-view="(\w+)"', html))
@@ -154,8 +164,11 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
         page.wait_for_selector(".trend-chart h3:has-text('your plan')", timeout=30000)
         assert page.locator(".trend-chart svg path.band").count() == 1
         assert "Invalidation" in page.locator(".trend-chart .legend").inner_text()
+        assert "expiration" in page.locator(".trend-chart .legend").inner_text()
         assert "unknown" not in page.locator(".compare tbody").inner_text().replace("Unknown", "")
-        assert "$0 against" not in page.locator(".compare tbody").inner_text()
+        body = page.locator(".compare tbody").inner_text()
+        assert "$0 against" not in body and "if bought" not in body
+        assert body.count("middle outcome") == 2 and body.count("Nine in ten between") == 2
         card = page.locator(".panel.thesis .pick").first
         chosen = page.evaluate("""() => {
           const k = state.decision.options.picks[0].contract;
@@ -182,6 +195,8 @@ def test_today_lists_lead_to_a_graded_thesis_in_that_direction(tmp_path):
     with demo_page(tmp_path) as (page, errors):
         page.goto(page.base)
         page.wait_for_selector(".lean-table tr.click", timeout=60000)
+        # Before the signal history exists there is no frequency column, not a column of blanks.
+        assert "Higher 10 days later" not in page.locator(".lean-grid").inner_text()
         side = "LONG" if page.locator(".lean-grid > .panel:first-child .lean-table tr.click").count() else "SHORT"
         panel = 1 if side == "LONG" else 2
         row = page.locator(f".lean-grid > .panel:nth-child({panel}) .lean-table tr.click").first

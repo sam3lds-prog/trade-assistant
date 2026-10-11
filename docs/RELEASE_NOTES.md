@@ -18,6 +18,33 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.5.1
+
+Six fixes from a review of 2.5. There is no migration and no new setting. Responses only gain
+fields.
+
+- **One forward for the stock's chances.** The chance of passing target 1, the chance of
+  passing the invalidation, the shaded range and the expected price now all start from the
+  same forward price. Before, the two chances started from today's price. On a hard-to-borrow
+  stock, where the forward sits well under the stock price, Decide could show two different
+  chances for one trade.
+- **Shares use your entry.** When you type an entry, every share dollar and the chance the
+  shares are ahead start from it. The "if bought at today's price" wording is gone. The
+  contract row does not change with the stock entry.
+- **Outcomes, not an average of about $0.** The comparison's last column now shows the
+  middle outcome on your horizon date and the range nine outcomes in ten fall in, for the
+  shares and for the contract. These come from the 10th, 50th and 90th percentile prices
+  option prices imply. The average (about what you pay, by construction) moves to the
+  footnote.
+- **The shaded range names its expiration.** The legend says which expiration's volatility
+  it comes from.
+- **Today shows past frequency.** Once the signal history is built, each row shows how often
+  stocks with a score in the same range were higher 10 days later: the percentage, the
+  number of cases and the range. The figure is the same for longs and shorts, and it is a
+  past frequency, not a forecast. When there is no history there is no column.
+- **One form, one sentence.** The unused "choose a call or put" form is removed. The grade
+  card no longer repeats the past-cases sentence; it now appears only on the comparison.
+
 ## 2.5.0
 
 One path from "which way?" to "what limit do I type at my broker?". There is no migration, no

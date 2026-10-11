@@ -112,3 +112,13 @@ def test_every_contract_card_button_goes_through_the_pure_mapping():
     assert v2.count("limitButton(") >= 3  # the helper, the picker cards, the reversal option card
     app = (FLOW.parent / "app.js").read_text()
     assert "state.openPricing = spec =>" in app and "view.loadContract = async spec =>" in app
+
+
+def test_a_typed_share_entry_goes_with_the_option_request_and_a_blank_one_does_not():
+    typed, blank = run(["thesis", [{"symbol": "AAPL", "direction": "SHORT", "entry": "201.5"}]],
+                       ["thesis", [{"symbol": "AAPL", "direction": "SHORT"}]])
+    a, b = run(["optionsRequest", [typed["ok"], {}]], ["optionsRequest", [blank["ok"], {}]])
+    assert a["ok"]["entry_price"] == 201.5 and "entry_price" not in b["ok"]
+
+    from tradeassist.api_v2 import OptionsEvaluate
+    OptionsEvaluate(**a["ok"])

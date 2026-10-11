@@ -152,6 +152,12 @@ def value_contract(row: dict[str, Any], analysis: Any, thesis: dict[str, Any], n
     out["market_implied_profit_at_horizon"] = at_h["p_profit"]
     out["implied_expected_pnl_at_horizon"] = exp_pnl
     out["implied_value_at_horizon"] = premium + exp_pnl if exp_pnl is not None else None
+    # The spread of outcomes then (2.5.1): profit or loss at the 10th, 50th and 90th percentile stock price of
+    # the same distribution. Unknown without a usable volatility, never 0.
+    known_vol = leg.vol is not None and math.isfinite(leg.vol) and leg.vol > 0
+    for name, key in (("p10", "pnl_low"), ("p50", "pnl_mid"), ("p90", "pnl_high")):
+        v = at_h.get(key) if known_vol else None
+        out[f"implied_pnl_{name}_at_horizon"] = float(v) if v is not None and math.isfinite(v) else None
 
     if thesis["horizon_date"] > exp_day:
         avoid.append(f"Expires {exp_day:%b} {exp_day.day}, before the {thesis['horizon']}-day horizon.")
@@ -202,12 +208,40 @@ def rank(rows: list[dict[str, Any]], thesis: dict[str, Any]) -> list[dict[str, A
     return picks
 
 
+PERCENTILE_Z = (("p10", -1.2815516), ("p50", 0.0), ("p90", 1.2815516))     # as simulate.market_odds
+
+
+def stock_outlook(*, spot: float, direction: int, target_1: float, invalidation: float, vol: float, growth: float,
+                  t: float, entry: float | None = None, expiration: str | None = None) -> dict[str, Any]:
+    """The stock on the horizon date under one lognormal: centred on one forward (spot grown at the carry the
+    option chain implies) at at-the-money volatility `vol` over `t` years. Every figure here, the chances
+    included, uses that forward and those weights, so Decide never shows two chances for one trade.
+
+    The chance the shares are ahead is measured against `entry` when one is given (the typed entry), and
+    against today's price otherwise. The chances about the target and the invalidation do not depend on it."""
+    fwd = spot * math.exp(growth * t)
+    sd = vol * math.sqrt(t)
+    prices = fwd * np.exp(-0.5 * sd * sd + sd * Z)
+    basis = float(entry) if entry is not None else spot
+    ahead = (prices - basis) * direction > 0
+    at = lambda z: fwd * math.exp(-0.5 * sd * sd + sd * z)   # noqa: E731 - the stock price at a z-score
+    return {"reach_target_1_by_horizon": prob_finish_beyond(fwd, target_1, t, vol, above=direction > 0),
+            "beyond_invalidation_at_horizon": prob_finish_beyond(fwd, invalidation, t, vol, above=direction < 0),
+            "forward_at_horizon": fwd,
+            "expected_price_at_horizon": float((WEIGHTS * prices).sum()),
+            "stock_profit_at_horizon": float(WEIGHTS[ahead].sum()),
+            "stock_profit_basis": "entry" if entry is not None else "spot", "stock_profit_price": basis,
+            "range_1sd_at_horizon": {"low": at(-1.0), "high": at(1.0)},
+            "stock_percentiles_at_horizon": {**{name: at(z) for name, z in PERCENTILE_Z}, "expiration": expiration}}
+
+
 def evaluate(*, symbol: str, direction: int, spot: float, analyses: list[Any], target_1: float, target_2: float,
              invalidation: float, horizon: int, rate: float, contracts: int = 1, budget: float | None = None,
              earnings: dict[str, Any] | None = None, now: datetime | None = None,
-             only: list[tuple[str, float, str]] | None = None) -> dict[str, Any]:
+             only: list[tuple[str, float, str]] | None = None, entry: float | None = None) -> dict[str, Any]:
     """Evaluate the calls (direction +1) or puts (-1) in `analyses` (ChainAnalysis per expiration)
-    for the thesis. `only` restricts it to given (option_type, strike, expiration) contracts."""
+    for the thesis. `only` restricts it to given (option_type, strike, expiration) contracts. `entry`, the
+    stock price the share trade is planned at, only changes the chance the shares are ahead."""
     if direction not in (1, -1):
         raise OptionsEvaluationError("direction must be BULLISH or BEARISH")
     if direction * (target_1 - spot) <= 0:
@@ -248,22 +282,13 @@ def evaluate(*, symbol: str, direction: int, spot: float, analyses: list[Any], t
     t_h = max(years_between(now, eval_moment(h_day, now)), 1 / 365)
     market = None
     if atm:
-        p = prob_finish_beyond(spot, target_1, t_h, atm, above=direction > 0)
-        q = prob_finish_beyond(spot, invalidation, t_h, atm, above=direction < 0)
         near = min(analyses, key=lambda a: a.expiration)
         growth = math.log(near.forward / near.spot) / near.t if near.t > 0 and near.spot and near.forward else 0.0
-        # One time and one forward for every figure below (the same floored time as the chances above).
-        fwd = spot * math.exp(growth * t_h)
-        sd = atm * math.sqrt(t_h)
-        prices = fwd * np.exp(-0.5 * sd * sd + sd * Z)
-        up = (prices - spot) * direction > 0
-        market = {"atm_iv": atm, "reach_target_1_by_horizon": p, "beyond_invalidation_at_horizon": q,
-                  # 2.5: over the same distribution, the stock's expected price on the horizon date (what shares
-                  # bought now are worth in expectation), the chance shares bought now are ahead then, and the
-                  # one-standard-deviation range.
-                  "expected_price_at_horizon": float((WEIGHTS * prices).sum()),
-                  "stock_profit_at_horizon": float(WEIGHTS[up].sum()), "atm_expiration": near.expiration,
-                  "range_1sd_at_horizon": {"low": fwd * math.exp(-0.5 * sd * sd - sd), "high": fwd * math.exp(-0.5 * sd * sd + sd)},
+        # One time and one forward for every stock figure: the chances, the expected price, the chance the
+        # shares are ahead, the range and the percentiles (stock_outlook).
+        market = {"atm_iv": atm, "atm_expiration": near.expiration,
+                  **stock_outlook(spot=spot, direction=direction, target_1=target_1, invalidation=invalidation, vol=atm,
+                                  growth=growth, t=t_h, entry=entry, expiration=near.expiration),
                   "note": "Market-implied from option prices (lognormal, at-the-money volatility, no drift beyond the "
                           "forward). Not a forecast, and it is the chance of being past the level on that date, not of "
                           "touching it before."}

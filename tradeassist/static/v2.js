@@ -687,7 +687,7 @@ function trendHistoryChart(t, plan) {
       hover.setAttribute("x1", X(n - 1 + f)); hover.setAttribute("x2", X(n - 1 + f)); hover.setAttribute("visibility", "visible");
       tip.replaceChildren(el("div", { class: "tip-head", text: `${shortDate(plan.horizonDate)}, the horizon` }),
         ...levels.map(lv => el("div", { text: `${lv.label}: ${money(lv.price)}` })),
-        band ? el("div", { text: `Option prices imply a typical range of ${money(band.low)} to ${money(band.high)} (one standard deviation)` }) : null,
+        band ? el("div", { text: `Option prices imply a typical range of ${money(band.low)} to ${money(band.high)} (one standard deviation${plan.atmExpiration ? `, from the ${shortDate(plan.atmExpiration)} expiration` : ""})` }) : null,
         be ? el("div", { text: `${be.legend || be.label}: ${money(be.price)}` }) : null);
       tooltipAt(tip, box, X(n - 1 + f), W);
       return;
@@ -702,7 +702,7 @@ function trendHistoryChart(t, plan) {
   wrap.append(el("div", { class: "chart" }, root, tip),
     el("div", { class: "legend" }, present.map(s => el("span", {}, el("b", { class: "key-box", style: `background:${TREND_FILL[s]}` }), trendWord(s))),
       plan ? levels.map(lv => el("span", {}, el("i", { style: `background: var(${lv.color})` }), lv.label)) : null,
-      band ? el("span", {}, el("b", { class: "key-box band-key" }), "Range option prices imply (±1 sd)") : null,
+      band ? el("span", {}, el("b", { class: "key-box band-key" }), `Range option prices imply (±1 sd)${plan.atmExpiration ? `, from the ${shortDate(plan.atmExpiration)} expiration` : ""}`) : null,
       be ? el("span", {}, el("i", { style: "background: var(--series-2)" }), be.legend || be.label) : null));
   return wrap;
 }
@@ -840,12 +840,6 @@ function gradeCard(ev) {
     { label: "", num: true, cell: c => num(c.score, 0) }, { label: "Why", cell: c => c.why.join(" ") }], ev.components));
   if (ev.short_sale_risk) box.append(el("h4", { text: "Short-sale risks" }),
     el("ul", { class: "plain small" }, ev.short_sale_risk.map(r => el("li", {}, statusTag(r.level, r.level === "fail" ? "Danger" : r.level === "warn" ? "Caution" : "Note"), ` ${r.text}`))));
-  const analog = ev.analogs && ev.analogs.history
-    ? (ev.analogs.history.same_regime && ev.analogs.history.same_regime.cases ? ev.analogs.history.same_regime : ev.analogs.history.all) : null;
-  if (analog && analog.cases > 0 && isNum(analog.frequency)) {
-    const h = analog;
-    box.append(el("p", { class: "small", text: `Analogs: when a stock's trend turned to ${trendWord(ev.trend_state).toLowerCase()} before, it moved the expected way over 10 days in ${pct(100 * h.frequency, 0)} of ${num(h.cases, 0)} cases.` }));
-  }
   if (ev.what_would_change_it.length) box.append(el("h4", { text: "What would improve it" }), el("ul", { class: "plain small" }, ev.what_would_change_it.map(t => el("li", { text: t }))));
   box.append(el("p", { class: "small muted", text: ev.note }));
   return box;
@@ -938,29 +932,7 @@ function thesisSection(d) {
 }
 ANALYSIS_SECTIONS.push(thesisSection);
 
-/* ---------- choosing a call or put for the thesis ---------- */
-function optionsSection(d) {
-  const bearish = (d.trend.provisional || d.trend.confirmed).state.includes("DOWN");
-  const dir = segmented(`opdir${++uid}`, [["BULLISH", "Bullish (calls)"], ["BEARISH", "Bearish (puts)"]], bearish ? "BEARISH" : "BULLISH");
-  const target = numInput({ placeholder: "suggest" }), inv = numInput({ placeholder: "suggest" });
-  const horizon = el("input", { type: "number", min: 1, max: 260, step: 1, value: 20 });
-  const qty = el("input", { type: "number", min: 1, max: 500, step: 1, value: 1 });
-  const budget = numInput({ placeholder: "none", step: "1" });
-  const go = el("button", { class: "primary", text: "Find contracts" });
-  const err = el("div", { class: "error", role: "alert" });
-  const out = el("div");
-  go.addEventListener("click", () => withBusy(go, err, async () => {
-    const body = { symbol: d.symbol, direction: dir.value(), horizon_days: Math.round(Number(horizon.value) || 20), contracts: Math.max(1, Math.round(Number(qty.value) || 1)) };
-    for (const [k, input] of [["target_price", target], ["invalidation_price", inv], ["budget", budget]]) { const v = optNum(input); if (v !== null) body[k] = v; }
-    out.replaceChildren(el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Valuing contracts across expirations…" })));
-    try { out.replaceChildren(renderOptionsEval(await api("/v2/options/evaluate", body))); }
-    catch (e) { out.replaceChildren(); throw e; }
-  }));
-  return el("div", { class: "panel" }, el("h3", { text: "Choose a call or put for the thesis" }),
-    el("p", { class: "small muted", text: "The thesis is about the stock: where it should get to, by when, and the price that would prove it wrong. Leave prices blank to use the suggested levels." }),
-    el("div", { class: "inline-form" }, field("Thesis", dir), field("Stock target", target), field("Invalidation (stock)", inv), field("By (trading days)", horizon), field("Contracts", qty), field("Budget ($)", budget), go), err, out);
-}
-// 2.5: the thesis form above replaces this form on the page; renderOptionsEval is shared.
+/* ---------- choosing a call or put for the thesis (the cards; the form is the thesis above) ---------- */
 
 // Opens Price an option on this contract, already priced, on the limit ladder (2.5).
 function limitButton(symbol, k, contracts) {
