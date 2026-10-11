@@ -1613,6 +1613,10 @@ async function start() {
     btn.classList.toggle("hidden", !on);
     if (!on) delete BUILDERS[btn.dataset.view];
   }
-  show(BUILDERS[location.hash.slice(1)] ? location.hash.slice(1) : "price");
+  // A group whose screens are all switched off is not shown.
+  for (const g of document.querySelectorAll(".rail .nav-group")) g.classList.toggle("hidden", !g.querySelector("button.nav:not(.hidden)"));
+  // Today is the landing screen unless the address names another one (2.5).
+  const named = location.hash.slice(1);
+  show(BUILDERS[named] ? named : BUILDERS.today ? "today" : "price");
 }
 document.addEventListener("DOMContentLoaded", start);
