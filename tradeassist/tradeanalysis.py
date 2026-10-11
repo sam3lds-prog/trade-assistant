@@ -30,6 +30,7 @@ trades, with how many each figure rests on. They are not forecasts, and a small 
 
 from __future__ import annotations
 
+import bisect
 import math
 import statistics
 from collections import defaultdict
@@ -54,6 +55,11 @@ class Lot:
     group: int
     row_id: int
     estimated: bool = False
+    delivered: bool = False       # shares delivered by an assignment or exercise into the option's trade
+    initial: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.initial = self.qty
 
 
 @dataclass
@@ -66,6 +72,7 @@ class Group:
     pieces: list[dict[str, Any]] = field(default_factory=list)
     lots: list[Lot] = field(default_factory=list)
     row_ids: list[int] = field(default_factory=list)
+    delivered: list[dict[str, Any]] = field(default_factory=list)
     from_assignment: bool = False
 
     @property
@@ -95,23 +102,33 @@ def _key(r: dict[str, Any]) -> tuple:
 
 
 def _unit_cash(r: dict[str, Any], paying: bool) -> tuple[float, bool]:
-    """Cash per share or contract for a trade row, from Amount (fees included), else price x size."""
+    """Cash per share or contract for a trade row, from Amount (fees included), else price x size. `paying`
+    rows (buys, buying back) return what was paid; the others what was received, which can be below zero
+    when fees exceed the proceeds. A paying row with a positive amount (an odd sign) is read by its size."""
     qty = r["quantity"]
-    if r.get("amount") is not None and qty:
-        return abs(r["amount"]) / qty, False
+    amt = r.get("amount")
+    if amt is not None and qty:
+        if paying:
+            return (-amt if amt <= 0 else amt) / qty, False
+        return amt / qty, False
     mult = MULT if r["kind"] == "OPTION" else 1
     return abs(r["price"] or 0.0) * mult, True
 
 
 def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
-    """Replay the rows (oldest first, as tradehistory.activity returns them) into trades."""
+    """Replay the rows (oldest first, as tradehistory.activity returns them) into trades.
+
+    Within one day, a close that finds nothing open is tried again after that day's opens (the report
+    gives no times), and only then listed as opened before the history. Shares delivered by an assignment
+    or an exercise join the option's own trade, so its result includes them."""
     rows = list(rows)
     lots: dict[tuple, list[Lot]] = defaultdict(list)
     groups: list[Group] = []
     by_open: dict[tuple[str, str], Group] = {}
     unmatched: list[dict[str, Any]] = []
     notes: list[str] = []
-    events_today: dict[tuple[str, str], set[str]] = defaultdict(set)   # (date, symbol) -> OASGN / OEXCS seen
+    # (date, symbol) -> [group id, side of the shares delivered (+1 bought, -1 sold), shares still to come]
+    deliveries: dict[tuple[str, str], list[list]] = defaultdict(list)
 
     def group_for(r: dict[str, Any], seq: int) -> Group:
         k = (r["activity_date"], r["symbol"])
@@ -127,27 +144,46 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
 
     def open_lot(r: dict[str, Any], side: int, seq: int) -> None:
         key = _key(r)
-        g = group_for(r, seq)
         unit, est = _unit_cash(r, paying=side > 0)
-        lot = Lot(key, side, float(r["quantity"]), unit, r["activity_date"], g.id, r["id"], est)
+        qty = float(r["quantity"])
+        # Shares delivered by an assignment or exercise this day go into that option's trade.
+        if r["kind"] == "STOCK":
+            for d in deliveries.get((r["activity_date"], r["symbol"]), []):
+                if d[1] == side and d[2] > 1e-9:
+                    g = groups[d[0] - 1]
+                    take = min(qty, d[2])
+                    d[2] -= take
+                    lot = Lot(key, side, take, unit, r["activity_date"], g.id, r["id"], est)
+                    lot.delivered = True
+                    lots[key].append(lot)
+                    g.lots.append(lot)
+                    g.row_ids.append(r["id"])
+                    g.delivered.append({"kind": "STOCK", "side": side, "qty": take, "cash": -side * unit * take,
+                                        "option_type": None, "strike": None, "expiration": None, "row_id": r["id"],
+                                        "estimated": est})
+                    g.from_assignment = True
+                    qty -= take
+                    if qty <= 1e-9:
+                        return
+        g = group_for(r, seq)
+        lot = Lot(key, side, qty, unit, r["activity_date"], g.id, r["id"], est)
         lots[key].append(lot)
         g.lots.append(lot)
         g.row_ids.append(r["id"])
-        leg = {"kind": r["kind"], "side": side, "qty": float(r["quantity"]), "cash": -side * unit * r["quantity"],
+        leg = {"kind": r["kind"], "side": side, "qty": qty, "cash": -side * unit * qty,
                "option_type": r.get("option_type"), "strike": r.get("strike"), "expiration": r.get("expiration"),
                "row_id": r["id"], "estimated": est}
         if r["kind"] == "OPTION" and side < 0 and r["option_type"] == "CALL":
             # Shares held when the call was sold (this day's earlier buys included): covered or not.
             leg["covered_shares"] = shares_held(r["symbol"])
         g.legs.append(leg)
-        if r["kind"] == "STOCK" and side > 0 and events_today.get((r["activity_date"], r["symbol"])):
-            g.from_assignment = True
 
-    def close(r: dict[str, Any], side_to_close: int, how: str, seq: int, value: float | None = None) -> None:
-        """Close `quantity` of the lots of `side_to_close` FIFO. `value` is cash per unit at the close (None:
-        from the row's amount)."""
+    def close(r: dict[str, Any], side_to_close: int, how: str, seq: int, value: float | None = None,
+              want: float | None = None) -> float:
+        """Close `quantity` (or `want`) of the lots of `side_to_close` FIFO. `value` is cash per unit at the
+        close (None: from the row's amount). Returns what could not be closed."""
         key = _key(r)
-        want = float(r["quantity"] or 0)
+        want = float(r["quantity"] or 0) if want is None else want
         if value is None:
             unit, est = _unit_cash(r, paying=side_to_close < 0)
         else:
@@ -162,59 +198,91 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
             g.pieces.append({"key": key, "side": lot.side, "qty": take, "open_date": lot.open_date,
                              "close_date": r["activity_date"], "open_unit": lot.unit_cash, "close_unit": unit,
                              "pnl": pnl, "how": how, "open_row_id": lot.row_id, "close_row_id": r["id"], "seq": seq,
-                             "estimated": est or lot.estimated})
+                             "estimated": est or lot.estimated, "delivered": getattr(lot, "delivered", False)})
             if r["id"] not in g.row_ids:
                 g.row_ids.append(r["id"])
+            if how in ("assigned", "exercised") and key[0] == "OPTION":
+                # Short put assigned or long call exercised: shares bought; short call assigned or long put
+                # exercised: shares sold. They arrive as their own row the same day.
+                buys = (key[2] == "PUT") == (how == "assigned")
+                deliveries[(r["activity_date"], key[1])].append([g.id, +1 if buys else -1, take * MULT])
             lot.qty -= take
             want -= take
         lots[key] = [lot for lot in lots[key] if lot.qty > 1e-9]
-        if want > 1e-9:
-            unmatched.append({"row_id": r["id"], "date": r["activity_date"], "code": r["code"], "symbol": r["symbol"],
-                              "contract": _contract(key), "quantity": want, "amount": r.get("amount"),
-                              "reason": "nothing open to close in the imported history: opened before it starts"})
+        return want
 
-    for seq, r in enumerate(rows):
+    def act(r: dict[str, Any], seq: int, want: float | None = None) -> float:
+        """Apply one row; returns the quantity of a close that found nothing open (0 for opens)."""
         code = r["code"]
-        if code == "SPL":
-            held = [lot for lot in lots[("STOCK", r["symbol"])] if lot.side > 0]
-            before = sum(lot.qty for lot in held)
-            delta = float(r["quantity"]) * (-1 if (r.get("amount") or 0) < 0 else 1)
-            if before > 0 and before + delta > 0:
-                factor = (before + delta) / before
-                for lot in held:
-                    lot.qty *= factor
-                    lot.unit_cash /= factor
-                notes.append(f"{r['symbol']} split on {r['activity_date']}: open shares scaled by {factor:g}.")
-            else:
-                notes.append(f"{r['symbol']} split on {r['activity_date']} with no open shares in the history: not applied.")
-            continue
         if code == "Buy":
             if any(lot.side < 0 for lot in lots[_key(r)]):
-                close(r, -1, "bought back", seq)
-            else:
-                open_lot(r, +1, seq)
-        elif code == "Sell":
-            close(r, +1, "sold", seq)
-        elif code == "BTO":
+                return close(r, -1, "bought back", seq, want=want)
             open_lot(r, +1, seq)
-        elif code == "STO":
+            return 0.0
+        if code == "Sell":
+            # Shares sold by an assignment or exercise close what is held, as any sale.
+            return close(r, +1, "sold", seq, want=want)
+        if code == "BTO":
+            open_lot(r, +1, seq)
+            return 0.0
+        if code == "STO":
             open_lot(r, -1, seq)
-        elif code == "STC":
-            close(r, +1, "sold to close", seq)
-        elif code == "BTC":
-            close(r, -1, "bought to close", seq)
-        elif code == "OEXP":
+            return 0.0
+        if code == "STC":
+            return close(r, +1, "sold to close", seq, want=want)
+        if code == "BTC":
+            return close(r, -1, "bought to close", seq, want=want)
+        if code == "OEXP":
             key = _key(r)
             longs = any(lot.side > 0 for lot in lots[key])
             shorts = any(lot.side < 0 for lot in lots[key])
             side = (-1 if r.get("short_flag") else +1) if longs and shorts else (-1 if shorts else +1)
-            close(r, side, "expired", seq, value=0.0)
-        elif code == "OASGN":
-            events_today[(r["activity_date"], r["symbol"])].add(code)
-            close(r, -1, "assigned", seq, value=0.0)
-        elif code in ("OEXCS", "OEXER"):
-            events_today[(r["activity_date"], r["symbol"])].add(code)
-            close(r, +1, "exercised", seq, value=0.0)
+            return close(r, side, "expired", seq, value=0.0, want=want)
+        if code == "OASGN":
+            return close(r, -1, "assigned", seq, value=0.0, want=want)
+        if code in ("OEXCS", "OEXER"):
+            return close(r, +1, "exercised", seq, value=0.0, want=want)
+        return 0.0
+
+    def split(r: dict[str, Any]) -> None:
+        held = [lot for lot in lots[("STOCK", r["symbol"])] if lot.side > 0]
+        before = sum(lot.qty for lot in held)
+        delta = float(r["quantity"])           # shares added (a forward split) or, when below zero, taken away
+        if before > 0 and before + delta > 0:
+            factor = (before + delta) / before
+            for lot in held:
+                lot.qty *= factor
+                lot.unit_cash /= factor
+            notes.append(f"{r['symbol']} split on {r['activity_date']}: open shares scaled by {factor:g}.")
+        else:
+            notes.append(f"{r['symbol']} split on {r['activity_date']} could not be applied to the shares in the history "
+                         "(none open, or more taken away than held): trades in it may not add up.")
+
+    seq = 0
+    i = 0
+    while i < len(rows):
+        day = rows[i]["activity_date"]
+        j = i
+        while j < len(rows) and rows[j]["activity_date"] == day:
+            j += 1
+        waiting: list[tuple[dict[str, Any], float]] = []
+        for r in rows[i:j]:
+            if r["code"] == "SPL":
+                split(r)
+                seq += 1
+                continue
+            left = act(r, seq)
+            if left > 1e-9:
+                waiting.append((r, left))
+            seq += 1
+        for r, left in waiting:                # opened later the same day: try once more
+            left = act(r, seq, want=left)
+            seq += 1
+            if left > 1e-9:
+                unmatched.append({"row_id": r["id"], "date": r["activity_date"], "code": r["code"], "symbol": r["symbol"],
+                                  "contract": _contract(_key(r)), "quantity": left, "amount": r.get("amount"),
+                                  "reason": "nothing open to close in the imported history: opened before it starts"})
+        i = j
     dates = [r["activity_date"] for r in rows]
     open_lots = [lot for ls in lots.values() for lot in ls if lot.qty > 1e-9]
     return Book(groups=groups, unmatched=unmatched, notes=notes, rows={r["id"]: r for r in rows},
@@ -231,9 +299,24 @@ def _contract(key: tuple) -> str:
 
 # --- strategies and their risk ------------------------------------------------------------------------
 
+def merged_legs(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One leg per contract and side: the same contract bought in two fills on one day is one leg."""
+    out: dict[tuple, dict[str, Any]] = {}
+    for leg in legs:
+        k = (leg["kind"], leg["side"], leg.get("option_type"), leg.get("strike"), leg.get("expiration"))
+        if k in out:
+            m = out[k]
+            m["qty"] += leg["qty"]
+            m["cash"] += leg["cash"]
+            m["covered_shares"] = max(m.get("covered_shares", 0.0), leg.get("covered_shares", 0.0))
+        else:
+            out[k] = dict(leg)
+    return list(out.values())
+
+
 def classify(g: Group) -> tuple[str, float | None, str]:
     """(strategy, most it could lose as opened or None, how that was worked out)."""
-    legs = g.legs
+    legs = merged_legs(g.legs)
     net = sum(leg["cash"] for leg in legs)          # + received, - paid
     stock = [leg for leg in legs if leg["kind"] == "STOCK"]
     opts = [leg for leg in legs if leg["kind"] == "OPTION"]
@@ -306,15 +389,39 @@ def classify(g: Group) -> tuple[str, float | None, str]:
 
 # --- one row per trade ---------------------------------------------------------------------------------
 
+def _life(g: Group, today: date) -> tuple[list[tuple[str, float]], str | None]:
+    """How much of the trade's risk is still open, as steps [(first day, fraction), ...], and the day it
+    ended for exposure (its close; the expiration of an option left with no closing row; else None)."""
+    legs_total = sum(lot.initial for lot in g.lots if not lot.delivered) or 1.0
+    deliv_total = sum(lot.initial for lot in g.lots if lot.delivered)
+    closed_leg = defaultdict(float)
+    closed_deliv = defaultdict(float)
+    for p in g.pieces:
+        (closed_deliv if p.get("delivered") else closed_leg)[p["close_date"]] += p["qty"]
+    steps, a, b = [(g.open_date, 1.0)], 0.0, 0.0
+    for day in sorted(set(closed_leg) | set(closed_deliv)):
+        a += closed_leg.get(day, 0.0)
+        b += closed_deliv.get(day, 0.0)
+        frac = max(1 - a / legs_total, (1 - b / deliv_total) if deliv_total else 0.0)
+        nxt = (date.fromisoformat(day) + timedelta(days=1)).isoformat()      # still at risk on the closing day
+        steps.append((nxt, max(0.0, frac)))
+    return steps, None
+
+
 def summarize(book: Book, today: date, price_on: Callable[[str, str], float | None] | None = None) -> list[dict[str, Any]]:
     """Each trade with its strategy, risk, dates, result and the features the patterns use."""
     out = []
+    tday = today.isoformat()
     for g in book.groups:
         strategy, risk, basis = classify(g)
         realized = sum(p["pnl"] for p in g.pieces)
-        status = "CLOSED" if g.closed else ("PARTLY_CLOSED" if g.pieces else "OPEN")
+        open_lots = [lot for lot in g.lots if lot.qty > 1e-9]
+        # An option still open after its expiration with no row saying how it ended: unknown, never guessed.
+        unresolved = bool(open_lots) and all(lot.key[0] == "OPTION" and lot.key[4] < tday for lot in open_lots)
+        status = ("CLOSED" if g.closed else "UNRESOLVED" if unresolved else "PARTLY_CLOSED" if g.pieces else "OPEN")
         close_date = max(p["close_date"] for p in g.pieces) if g.closed else None
-        opts = [leg for leg in g.legs if leg["kind"] == "OPTION"]
+        legs = merged_legs(g.legs)
+        opts = [leg for leg in legs if leg["kind"] == "OPTION"]
         hows = {p["how"] for p in g.pieces if p["key"][0] == "OPTION"}
         if not opts:
             ended = "Sold" if g.closed else None
@@ -322,6 +429,8 @@ def summarize(book: Book, today: date, price_on: Callable[[str, str], float | No
             ended = "Assigned"
         elif "exercised" in hows:
             ended = "Exercised"
+        elif unresolved:
+            ended = "No record after expiration"
         elif g.closed and hows == {"expired"}:
             ended = "Expired"
         elif g.closed and "expired" in hows:
@@ -330,45 +439,71 @@ def summarize(book: Book, today: date, price_on: Callable[[str, str], float | No
             ended = "Closed before expiration"
         else:
             ended = None
-        end_day = date.fromisoformat(close_date) if close_date else today
+        life_end = close_date or (max(lot.key[4] for lot in open_lots) if unresolved else None)
+        end_day = date.fromisoformat(life_end) if life_end else today
         held = (end_day - date.fromisoformat(g.open_date)).days
+        steps, _ = _life(g, today)
+        # Dollar-days: the risk still open on each calendar day of the trade's life (at least one day).
+        risk_days = None
+        if risk:
+            total, d, k = 0.0, date.fromisoformat(g.open_date), 0
+            last = max(end_day, d)
+            while d <= last:
+                iso = d.isoformat()
+                while k + 1 < len(steps) and steps[k + 1][0] <= iso:
+                    k += 1
+                total += risk * steps[k][1]
+                d += timedelta(days=1)
+            risk_days = total
         dte = min((date.fromisoformat(leg["expiration"]) - date.fromisoformat(g.open_date)).days for leg in opts) if opts else None
         moneyness = None
-        if price_on and len(opts) == 1 and not [leg for leg in g.legs if leg["kind"] == "STOCK"]:
+        bought_single = len(opts) == 1 and opts[0]["side"] > 0 and not [leg for leg in legs if leg["kind"] == "STOCK"]
+        if price_on and bought_single:
             px = price_on(g.symbol, g.open_date)
             if px:
                 o = opts[0]
-                # Positive: out of the money by that share of the stock price.
+                # Positive: out of the money by that share of the stock price, for the option bought.
                 moneyness = (o["strike"] - px) / px if o["option_type"] == "CALL" else (px - o["strike"]) / px
+        done = status == "CLOSED"
         out.append({
             "id": g.id, "symbol": g.symbol, "strategy": strategy, "status": status, "open_date": g.open_date,
-            "close_date": close_date, "days_held": held, "risk": risk, "risk_basis": basis,
-            "unlimited": risk is None and basis.startswith("unlimited"),
-            "net_open_cash": sum(leg["cash"] for leg in g.legs), "realized_pnl": realized if g.pieces else None,
-            "result": None if not g.closed else ("WIN" if realized > EPS else "LOSS" if realized < -EPS else "FLAT"),
+            "close_date": close_date, "life_end": life_end, "days_held": held, "risk": risk, "risk_basis": basis,
+            "unlimited": risk is None and basis.startswith("unlimited"), "risk_days": risk_days, "risk_steps": steps,
+            "net_open_cash": sum(leg["cash"] for leg in legs), "realized_pnl": realized if g.pieces else None,
+            "result": None if not done else ("WIN" if realized > EPS else "LOSS" if realized < -EPS else "FLAT"),
             "ended": ended, "dte_at_open": dte, "moneyness_at_open": moneyness, "from_assignment": g.from_assignment,
             "estimated": any(leg["estimated"] for leg in g.legs) or any(p["estimated"] for p in g.pieces),
             "legs": [{"contract": _contract(("OPTION", g.symbol, leg["option_type"], leg["strike"], leg["expiration"]))
                       if leg["kind"] == "OPTION" else f"{g.symbol} shares", "side": "bought" if leg["side"] > 0 else "sold",
-                      "qty": leg["qty"], "cash": leg["cash"], "row_id": leg["row_id"]} for leg in g.legs],
+                      "qty": leg["qty"], "cash": leg["cash"], "row_id": leg["row_id"]} for leg in legs]
+                    + [{"contract": f"{g.symbol} shares", "side": ("bought" if leg["side"] > 0 else "sold") + " (assignment or exercise)",
+                        "qty": leg["qty"], "cash": leg["cash"], "row_id": leg["row_id"]} for leg in g.delivered],
             "closes": [{"contract": _contract(p["key"]), "qty": p["qty"], "date": p["close_date"], "how": p["how"],
                         "pnl": p["pnl"], "row_id": p["close_row_id"]} for p in g.pieces],
             "row_ids": sorted(g.row_ids), "open_seq": g.open_seq,
         })
-    # Features that need the whole list: size against your usual, a loss just before, how often the stock is traded.
-    risks = [t["risk"] for t in out if t["risk"]]
-    usual = statistics.median(risks) if risks else None
-    per_symbol = defaultdict(int)
+    # Features that need the whole list. Size is against your usual risk for the same strategy; familiarity
+    # counts only trades opened before this one; "after a loss" looks at losing trades that finished in the
+    # two days before (earlier the same day included).
+    by_strategy: dict[str, list[float]] = defaultdict(list)
     for t in out:
-        per_symbol[t["symbol"]] += 1
-    losing_closes = sorted((p["seq"], p["close_date"]) for g in book.groups for p in g.pieces
-                           if g.closed and max(q["seq"] for q in g.pieces) == p["seq"]
-                           and sum(q["pnl"] for q in g.pieces) < -EPS)
+        if t["risk"]:
+            by_strategy[t["strategy"]].append(t["risk"])
+    usual = {k: statistics.median(v) for k, v in by_strategy.items() if len(v) >= 3}
+    seen = defaultdict(int)
+    for t in sorted(out, key=lambda x: x["open_seq"]):
+        t["prior_trades_in_symbol"] = seen[t["symbol"]]
+        seen[t["symbol"]] += 1
+    losing = sorted((max(p["seq"] for p in g.pieces), max(p["close_date"] for p in g.pieces)) for g in book.groups
+                    if g.closed and sum(p["pnl"] for p in g.pieces) < -EPS)
+    loss_days = sorted((d, s) for s, d in losing)
     for t in out:
-        t["size_vs_usual"] = (t["risk"] / usual) if (t["risk"] and usual) else None
-        t["symbol_trades"] = per_symbol[t["symbol"]]
+        u = usual.get(t["strategy"])
+        t["size_vs_usual"] = (t["risk"] / u) if (t["risk"] and u) else None
         start = (date.fromisoformat(t["open_date"]) - timedelta(days=2)).isoformat()
-        t["after_loss"] = any(start <= d <= t["open_date"] and seq < t["open_seq"] for seq, d in losing_closes)
+        lo = bisect.bisect_left(loss_days, (start, -1))
+        hi = bisect.bisect_right(loss_days, (t["open_date"], float("inf")))
+        t["after_loss"] = any(s < t["open_seq"] for _, s in loss_days[lo:hi])
     return out
 
 
@@ -454,14 +589,15 @@ def risk_of(trades: list[dict[str, Any]], today: date) -> dict[str, Any]:
             "not_measured": sum(1 for t in trades if not t["risk"] and not t["unlimited"]),
             "total_at_open": sum(t["risk"] for t in measured) if measured else None,
             "largest": max((t["risk"] for t in measured), default=None),
-            "dollar_days": sum(t["risk"] * max(1, t["days_held"]) for t in measured) if measured else None,
+            # The risk still open on each day of each trade's life: it falls as pieces close.
+            "dollar_days": sum(t["risk_days"] or 0.0 for t in measured) if measured else None,
             "worst_loss": worst["realized_pnl"] if worst else None, "worst_loss_trade": worst["id"] if worst else None,
             "worst_loss_share_of_risk": (abs(worst["realized_pnl"]) / worst["risk"]) if worst and worst["risk"] else None}
 
 
 def exposure_series(trades: list[dict[str, Any]], start: str, end: str) -> list[dict[str, Any]]:
-    """For each day in [start, end]: the measured risk of everything open that day, and how many open trades
-    had unlimited or unmeasured risk (counted, not added)."""
+    """For each weekday in [start, end]: the measured risk still open that day (falling as pieces close), and
+    how many open trades had unlimited or unmeasured risk (counted, never added in as zero)."""
     d0, d1 = date.fromisoformat(start), date.fromisoformat(end)
     if d1 < d0 or (d1 - d0).days > 3660:
         return []
@@ -472,13 +608,19 @@ def exposure_series(trades: list[dict[str, Any]], start: str, end: str) -> list[
     count = [0] * n
     for t in trades:
         a = max(date.fromisoformat(t["open_date"]), d0)
-        b = min(date.fromisoformat(t["close_date"]) if t["close_date"] else d1, d1)
+        b = min(date.fromisoformat(t["life_end"]) if t.get("life_end") else d1, d1)
         if b < a:
             continue
+        steps, k = t.get("risk_steps") or [(t["open_date"], 1.0)], 0
         for i in range((a - d0).days, (b - d0).days + 1):
+            iso = (d0 + timedelta(days=i)).isoformat()
+            while k + 1 < len(steps) and steps[k + 1][0] <= iso:
+                k += 1
+            if steps[k][1] <= 1e-9:
+                continue
             count[i] += 1
             if t["risk"]:
-                risk[i] += t["risk"]
+                risk[i] += t["risk"] * steps[k][1]
             elif t["unlimited"]:
                 unl[i] += 1
             else:
@@ -505,15 +647,15 @@ FEATURES: list[tuple[str, str, Callable[[dict[str, Any]], str | None]]] = [
     ("dte", "Days to expiration when opened", lambda t: _bucket(
         t["dte_at_open"], [(2, "0 to 2 days"), (7, "3 to 7 days"), (30, "8 to 30 days"), (60, "31 to 60 days")], "Over 60 days")),
     ("ended", "How the option trade ended", lambda t: t["ended"] if t["ended"] and t["ended"] != "Sold" else None),
-    ("moneyness", "Where the strike was when opened (one-leg options)", lambda t: None if t["moneyness_at_open"] is None else
+    ("moneyness", "Where the strike was when bought (one bought option)", lambda t: None if t["moneyness_at_open"] is None else
         ("Out of the money by over 5%" if t["moneyness_at_open"] > 0.05 else
          "In the money by over 5%" if t["moneyness_at_open"] < -0.05 else "Within 5% of the stock price")),
-    ("size", "Size against your usual risk", lambda t: None if t["size_vs_usual"] is None else
+    ("size", "Size against your usual for that strategy", lambda t: None if t["size_vs_usual"] is None else
         ("Under half your usual" if t["size_vs_usual"] < 0.5 else "Over twice your usual" if t["size_vs_usual"] > 2 else "About your usual")),
     ("weekday", "Day it was opened", lambda t: WEEKDAYS[date.fromisoformat(t["open_date"]).weekday()]),
     ("after_loss", "Opened soon after a losing trade", lambda t: "Within 2 days of a loss" if t["after_loss"] else "Not just after a loss"),
-    ("familiarity", "How often you trade the stock", lambda t: "Stocks you traded 5 or more times" if t["symbol_trades"] >= 5
-        else "Stocks you traded fewer than 5 times"),
+    ("familiarity", "How often you had traded the stock before", lambda t: "5 or more times before"
+        if t["prior_trades_in_symbol"] >= 5 else "Fewer than 5 times before"),
 ]
 
 
@@ -537,8 +679,20 @@ def patterns(trades: list[dict[str, Any]], min_trades: int = MIN_PATTERN_TRADES)
                           "per_trade_vs_average": (sc["average"] - avg) if avg is not None and sc["average"] is not None else None,
                           "trade_ids": [t["id"] for t in ts]})
     ranked = [r for r in table if r["trades"] >= min_trades and r["edge"] is not None and len(closed) > r["trades"]]
-    success = sorted((r for r in ranked if r["edge"] > EPS), key=lambda r: -r["edge"])[:6]
-    failure = sorted((r for r in ranked if r["edge"] < -EPS), key=lambda r: r["edge"])[:6]
+    # A feature with two kinds is one fact seen from both sides (better after a loss is worse otherwise by the
+    # same amount): it is listed once, on the side of its larger effect.
+    kinds = defaultdict(set)
+    for r in table:
+        kinds[r["feature"]].add(r["value"])
+    keep = []
+    for r in ranked:
+        if len(kinds[r["feature"]]) == 2:
+            twin = next((x for x in ranked if x["feature"] == r["feature"] and x is not r), None)
+            if twin is not None and (abs(twin["edge"]), twin["value"]) > (abs(r["edge"]), r["value"]):
+                continue
+        keep.append(r)
+    success = sorted((r for r in keep if r["edge"] > EPS), key=lambda r: -r["edge"])[:6]
+    failure = sorted((r for r in keep if r["edge"] < -EPS), key=lambda r: r["edge"])[:6]
     return {"overall": overall, "success": success, "failure": failure, "table": table, "min_trades": min_trades}
 
 
@@ -546,6 +700,9 @@ def patterns(trades: list[dict[str, Any]], min_trades: int = MIN_PATTERN_TRADES)
 
 def analyse(book: Book, trades: list[dict[str, Any]], today: date, start: str | None = None, end: str | None = None,
             by: str = "month", basis: str = "close") -> dict[str, Any]:
+    """The analysis for a date range. `basis` "close": results of trades that finished in the range, by when
+    they finished; "open": results of trades opened in the range, by when they were opened. Risk always
+    covers every trade that was open at some point in the range, finished or not."""
     if by not in ("week", "month", "quarter", "year"):
         raise ValueError("Group by week, month, quarter or year")
     if basis not in ("close", "open"):
@@ -555,16 +712,21 @@ def analyse(book: Book, trades: list[dict[str, Any]], today: date, start: str | 
     end = end or (today.isoformat() if last else None)
     if start and end and start > end:
         raise ValueError("The start date is after the end date")
+    tday = today.isoformat()
 
-    def inside(t: dict[str, Any]) -> bool:
-        return in_range(t["close_date"] if basis == "close" else t["open_date"], start, end)
-
-    chosen = [t for t in trades if inside(t)]
+    if basis == "close":
+        chosen = [t for t in trades if t["status"] == "CLOSED" and in_range(t["close_date"], start, end)]
+        pieces = [p for g in book.groups for p in g.pieces if in_range(p["close_date"], start, end)]
+    else:
+        chosen = [t for t in trades if in_range(t["open_date"], start, end)]
+        ids = {t["id"] for t in chosen}
+        pieces = [p for g in book.groups if g.id in ids for p in g.pieces]
     closed = [t for t in chosen if t["status"] == "CLOSED"]
-    pieces = [(p, g) for g in book.groups for p in g.pieces if in_range(p["close_date"], start, end)]
-    realized = sum(p["pnl"] for p, _ in pieces) if pieces else None
+    chosen_ids = {t["id"] for t in chosen}
+    alive = [t for t in trades if (end is None or t["open_date"] <= end) and (start is None or (t["life_end"] or tday) >= start)]
+    realized = sum(p["pnl"] for p in pieces) if pieces else None
+    group_of = {g.id: g for g in book.groups}
 
-    # Periods: realized results by close date of each closed piece; trades counted when they finish.
     per: dict[str, dict[str, Any]] = {}
 
     def slot(key: str) -> dict[str, Any]:
@@ -574,10 +736,14 @@ def analyse(book: Book, trades: list[dict[str, Any]], today: date, start: str | 
                         "trades": [], "opened": [], "by_strategy": defaultdict(lambda: {"trades": 0, "net": 0.0})}
         return per[key]
 
-    for p, _ in pieces:
-        slot(period_key(p["close_date"], by))["realized"] += p["pnl"]
+    if basis == "close":
+        for p in pieces:
+            slot(period_key(p["close_date"], by))["realized"] += p["pnl"]
+    else:
+        for t in chosen:
+            slot(period_key(t["open_date"], by))["realized"] += sum(p["pnl"] for p in group_of[t["id"]].pieces)
     for t in closed:
-        s = slot(period_key(t["close_date"], by))
+        s = slot(period_key(t["close_date"] if basis == "close" else t["open_date"], by))
         s["trades"].append(t)
         s["by_strategy"][t["strategy"]]["trades"] += 1
         s["by_strategy"][t["strategy"]]["net"] += t["realized_pnl"]
@@ -597,27 +763,30 @@ def analyse(book: Book, trades: list[dict[str, Any]], today: date, start: str | 
                         "by_strategy": {k: v for k, v in sorted(s["by_strategy"].items(), key=lambda kv: kv[1]["net"])},
                         "trade_ids": [t["id"] for t in s["trades"]]})
 
-    # Strategies: results and the risk each carried.
-    by_strat: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    # Strategies: results from the trades in the range, risk from every trade open at some point in it.
+    perf: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    risky: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for t in chosen:
-        by_strat[t["strategy"]].append(t)
+        perf[t["strategy"]].append(t)
+    for t in alive:
+        risky[t["strategy"]].append(t)
     strategies = []
-    for name, ts in by_strat.items():
-        sc, rk = scorecard(ts), risk_of(ts, today)
-        total = rk["total_at_open"]
+    for name in set(perf) | set(risky):
+        ts, rs = perf.get(name, []), risky.get(name, [])
+        sc, rk = scorecard(ts), risk_of(rs, today)
+        closed_risk = sum(t["risk"] for t in ts if t["risk"] and t["status"] == "CLOSED")
         strategies.append({"strategy": name, **sc, "risk": rk,
-                           "return_on_risk": (sc["net"] / sum(t["risk"] for t in ts if t["risk"] and t["status"] == "CLOSED"))
-                           if sc["net"] is not None and any(t["risk"] and t["status"] == "CLOSED" for t in ts) else None,
-                           "open": sum(1 for t in ts if t["status"] != "CLOSED"),
-                           "first": min(t["open_date"] for t in ts), "last": max(t["open_date"] for t in ts),
-                           "trade_ids": [t["id"] for t in ts], "_total": total or 0.0})
+                           "return_on_risk": sc["net"] / closed_risk if sc["net"] is not None and closed_risk > EPS else None,
+                           "open": sum(1 for t in rs if t["status"] != "CLOSED" or (t["close_date"] or "") > (end or tday)),
+                           "first": min(t["open_date"] for t in ts + rs), "last": max(t["open_date"] for t in ts + rs),
+                           "trade_ids": sorted({t["id"] for t in ts + rs}), "_total": rk["total_at_open"] or 0.0})
     # Most exposure first: unlimited risk is its own, highest class; then dollar-days at risk, then total.
-    strategies.sort(key=lambda s: (-(s["risk"]["unlimited"] > 0), -(s["risk"]["dollar_days"] or 0), -s["_total"]))
+    strategies.sort(key=lambda s: (-(s["risk"]["unlimited"] > 0), -(s["risk"]["dollar_days"] or 0), -s["_total"], s["strategy"]))
     for s in strategies:
         s.pop("_total")
 
     daily: dict[str, float] = defaultdict(float)
-    for p, _ in pieces:
+    for p in pieces:
         daily[p["close_date"]] += p["pnl"]
     curve, total = [], 0.0
     for day in sorted(daily):
@@ -633,9 +802,10 @@ def analyse(book: Book, trades: list[dict[str, Any]], today: date, start: str | 
         drop = peak - pt["cumulative"]
         if drop > dd:
             dd, dd_from, dd_to = drop, run_peak_date, pt["date"]
-    exposure = exposure_series([t for t in trades if t["open_date"] <= (end or today.isoformat())
-                                and (t["close_date"] or "9999") >= (start or "0000")], start, end) if start and end else []
-    peak_exp = max(exposure, key=lambda x: x["risk"], default=None)
+    exposure = exposure_series(alive, start, end) if start and end else []
+    busy = [x for x in exposure if x["open"]]
+    # The busiest day by measured risk; a day with only unlimited or unmeasured risk open is never a "$0" peak.
+    peak_exp = max(busy, key=lambda x: (x["risk"], x["unlimited"], x["not_measured"]), default=None)
 
     pats = patterns(closed)
     unmatched = [u for u in book.unmatched if in_range(u["date"], start, end)]
@@ -645,17 +815,27 @@ def analyse(book: Book, trades: list[dict[str, Any]], today: date, start: str | 
                      f"the trade{'s were' if len(book.unmatched) != 1 else ' was'} opened before the imported history "
                      f"starts ({first}). Their results are left out, not counted as zero. Import an earlier report to "
                      "include them.")
+    unresolved = [t for t in trades if t["status"] == "UNRESOLVED"]
+    if unresolved:
+        notes.append(f"{len(unresolved)} option trade{'s' if len(unresolved) != 1 else ''} passed expiration with no row "
+                     "saying how it ended (expired, assigned or exercised). The result is unknown and left out; its risk "
+                     "is counted up to the expiration.")
     if any(t["estimated"] for t in chosen):
         notes.append("Some rows had no amount, so their cash was worked out from price times size (fees left out).")
+    risk_all = risk_of(alive, today)
     return {"range": {"start": start, "end": end, "by": by, "basis": basis, "first_date": first, "last_date": last},
             "summary": {**scorecard(chosen), "realized": realized, "pieces": len(pieces),
-                        "open_in_range": sum(1 for t in chosen if t["status"] != "CLOSED"),
-                        "open_now": sum(1 for t in trades if t["status"] != "CLOSED"),
-                        "risk": risk_of(chosen, today),
+                        "open_in_range": sum(1 for t in alive if t["status"] != "CLOSED" or (t["close_date"] or "") > (end or tday)),
+                        "open_now": sum(1 for t in trades if t["status"] in ("OPEN", "PARTLY_CLOSED")),
+                        "unresolved": len(unresolved), "risk": risk_all,
                         "max_drawdown": dd if curve else None, "drawdown_from": dd_from, "drawdown_to": dd_to,
-                        "peak_exposure": peak_exp},
+                        "peak_exposure": peak_exp,
+                        "unlimited_days": sum(1 for x in exposure if x["unlimited"])},
             "periods": periods, "strategies": strategies, "patterns": pats, "curve": curve, "exposure": exposure,
-            "trades": [{k: v for k, v in t.items() if k not in ("legs", "closes", "row_ids", "open_seq")} for t in chosen],
+            # The trades the results count (in_results), and the others open during the range, which its risk counts.
+            "trades": [{**{k: v for k, v in t.items() if k not in ("legs", "closes", "row_ids", "open_seq", "risk_steps")},
+                        "in_results": t["id"] in chosen_ids}
+                       for t in sorted({t["id"]: t for t in chosen + alive}.values(), key=lambda x: x["id"])],
             "unmatched": unmatched, "unmatched_total": len(book.unmatched), "notes": notes}
 
 

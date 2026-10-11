@@ -100,12 +100,18 @@ def bridge_for(srv, account=True):
 # --- the guard ---------------------------------------------------------------------------------
 
 def test_the_account_list_takes_plain_reads_only():
-    for ok in ("get_equity_positions", "get_portfolio", "get_option_positions", "get_equity_orders", "get_option_orders"):
+    for ok in ("get_equity_positions", "get_stock_positions", "get_option_positions", "get_equity_orders",
+               "get_stock_orders", "get_option_orders"):
         assert acceptable_account_tool_name(ok), ok
+    # Only those exact shapes: nothing that reads balances, account numbers, bank links or documents, and
+    # nothing that acts, however it is named.
     for bad in ("place_equity_order", "review_equity_order", "cancel_equity_order", "get_order_status", "get_orders_and_cancel",
                 "get_equity_orders_place", "get_and_place_order", "get_Equity_Orders", "get_option_order", "get_transfer_history",
-                "get_buy_orders_and_sell", "update_watchlist", "get_close_positions"):
+                "get_buy_orders_and_sell", "update_watchlist", "get_close_positions", "get_portfolio", "get_accounts",
+                "get_account_balances", "get_buying_power", "get_bank_accounts", "get_documents", "get_equity_positions ",
+                "get_equity_positions\n", "get_crypto_orders", "get_equity_orders_v2", "xget_equity_orders"):
         assert not acceptable_account_tool_name(bad), bad
+    assert "get_portfolio" not in ACCOUNT_ALLOWED
     with pytest.raises(ValueError):
         ReadOnlyBridge(lambda: None, ALLOWED_TOOLS, account_reads=frozenset({"place_equity_order"}))
 
@@ -206,10 +212,14 @@ def test_the_report_wins_on_the_days_it_covers_so_nothing_is_counted_twice(tmp_p
 
 
 def test_the_check_records_reply_shapes_never_values():
-    payload = {"data": {"results": [{"account_number": "5QR12345", "symbol": "AAPL", "quantity": "10"}], "next": None}}
+    payload = {"data": {"results": [{"account_number": "5QR12345", "symbol": "AAPL", "quantity": "10"}] * 7, "next": None,
+                        # replies sometimes key by a value: an account number, a ticker, an id
+                        "by_account": {"5QR12345": {"AAPL": {"quantity": "10"}, "MSFT": {"quantity": "2"}}}}}
     s = shape(payload)
     text = str(s)
-    assert "5QR12345" not in text and "AAPL" not in text and "account_number" in text and "str" in text
+    assert "5QR12345" not in text and "AAPL" not in text and "MSFT" not in text
+    assert "account_number" in text and "str" in text and "(a key that is a value)" in text
+    assert "7" not in text                                    # how many orders there were is not recorded either
 
 
 def test_pull_says_plainly_when_it_is_switched_off(tmp_path):
@@ -239,8 +249,116 @@ def test_an_order_without_a_time_or_side_is_reported_not_guessed():
     with pytest.raises(ValueError, match="buy/sell"):
         _share_row({"id": "x", "symbol": "AAPL", "side": "", "quantity": "1", "average_price": "1"})
     with pytest.raises(ValueError, match="no time"):
-        _share_row({"id": "x", "symbol": "AAPL", "side": "buy", "quantity": "1", "average_price": "1"})
+        _share_row({"id": "x", "symbol": "AAPL", "side": "buy", "cumulative_quantity": "1", "average_price": "1"})
     with pytest.raises(ValueError, match="multi-leg"):
         _option_rows({"id": "y", "chain_symbol": "AAPL", "updated_at": "2026-01-02T15:00:00Z", "price": "1", "quantity": "1",
+                      "state": "filled",
                       "legs": [{"side": "buy", "position_effect": "open", "option_type": "call", "strike_price": "1", "expiration_date": "2026-02-20"},
                                {"side": "sell", "position_effect": "open", "option_type": "call", "strike_price": "2", "expiration_date": "2026-02-20"}]})
+
+
+class Orders:
+    """A stand-in bridge whose share orders are whatever the test says, for the fill rules."""
+
+    def __init__(self, recs):
+        self.recs, self.account_reads = recs, ACCOUNT_ALLOWED
+
+    def tools(self):
+        return {"get_equity_orders": types.Tool(name="get_equity_orders", inputSchema={"type": "object", "properties": {}},
+                                                annotations=READ_ONLY)}
+
+    def may_call(self, name):
+        return name == "get_equity_orders"
+
+    def call(self, name, args):
+        return {"results": self.recs}
+
+
+def test_only_what_filled_counts_whatever_the_order_state():
+    at = "2026-03-02T15:00:00Z"
+    recs = [
+        # cancelled after 3 of 10 filled: the 3 count
+        {"id": "a", "symbol": "AAPL", "side": "buy", "state": "cancelled", "quantity": "10", "price": "190",
+         "executions": [{"price": "189.50", "quantity": "3", "timestamp": at}]},
+        # still working, 4 filled so far, given as a running total
+        {"id": "b", "symbol": "MSFT", "side": "buy", "state": "partially_filled", "quantity": "10", "price": "400",
+         "cumulative_quantity": "4", "average_price": "399.00", "last_transaction_at": at},
+        # filled, with only the order's own fields
+        {"id": "c", "symbol": "KO", "side": "buy", "state": "filled", "quantity": "5", "price": "60.00", "updated_at": at},
+        # cancelled with nothing filled: not a trade, not a problem
+        {"id": "d", "symbol": "AAPL", "side": "sell", "state": "cancelled", "quantity": "10", "price": "200"},
+        # no state and no fills: the ordered 10 at the limit 50 are never taken as a fill
+        {"id": "e", "symbol": "PEP", "side": "buy", "quantity": "10", "price": "50", "updated_at": at},
+        # working, nothing filled yet: nothing
+        {"id": "f", "symbol": "PEP", "side": "buy", "state": "queued", "quantity": "10", "price": "50", "updated_at": at},
+    ]
+    rows, unreadable, _ = RobinhoodAccount(Orders(recs)).order_rows()
+    got = {r["symbol"]: (r["quantity"], r["price"]) for r in rows}
+    assert got == {"AAPL": (3.0, 189.5), "MSFT": (4.0, 399.0), "KO": (5.0, 60.0)}
+    assert [(u["what"], u["reason"]) for u in unreadable] == [("a share order", "no state and no fills")]
+    assert "price" in unreadable[0]["fields"] and "50" not in str(unreadable)
+
+
+def test_an_order_that_filled_further_is_updated_not_kept_twice(tmp_path):
+    db = Database(tmp_path / "t.db")
+    at = "2026-03-02T15:00:00Z"
+    part = {"id": "b", "symbol": "MSFT", "side": "buy", "state": "partially_filled", "cumulative_quantity": "4",
+            "average_price": "399.00", "last_transaction_at": at}
+    try:
+        rows, unreadable, offered = RobinhoodAccount(Orders([part])).order_rows()
+        assert store_pulled(db, rows, unreadable, offered)["rows_added"] == 1
+        done = dict(part, state="filled", cumulative_quantity="10", average_price="399.40")
+        rows, unreadable, offered = RobinhoodAccount(Orders([done])).order_rows()
+        out = store_pulled(db, rows, unreadable, offered)
+        assert (out["rows_added"], out["rows_updated"], out["rows_duplicate"]) == (0, 1, 0)
+        kept = activity(db)
+        assert len(kept) == 1 and kept[0]["quantity"] == 10 and kept[0]["amount"] == pytest.approx(-3994.0)
+        again = store_pulled(db, rows, unreadable, offered)
+        assert (again["rows_added"], again["rows_updated"], again["rows_duplicate"]) == (0, 0, 1)
+    finally:
+        db.close()
+
+
+def test_the_report_wins_only_on_the_days_it_covers_before_and_after_count(tmp_path):
+    db = Database(tmp_path / "t.db")
+    try:
+        text = ('"Activity Date","Process Date","Settle Date","Instrument","Description","Trans Code","Quantity","Price","Amount"\n'
+                '"2/20/2026","2/20/2026","2/23/2026","KO","Coca-Cola","Sell","5","$62.00","$310.00"\n'
+                '"2/2/2026","2/2/2026","2/3/2026","KO","Coca-Cola","Buy","5","$60.00","($300.00)"\n')
+        store(db, parse_report(text), "robinhood_csv", "feb.csv")
+        recs = [{"id": i, "symbol": "AAPL", "side": side, "state": "filled", "cumulative_quantity": "1", "average_price": "100",
+                 "last_transaction_at": f"{day}T15:00:00Z"}
+                for i, side, day in (("x1", "buy", "2026-01-15"), ("x2", "sell", "2026-02-10"), ("x3", "sell", "2026-03-05"))]
+        rows, unreadable, offered = RobinhoodAccount(Orders(recs)).order_rows()
+        store_pulled(db, rows, unreadable, offered)
+        skipped: list[int] = []
+        kept = [(r["source"], r["activity_date"]) for r in activity(db, skipped)]
+        assert ("robinhood_link", "2026-01-15") in kept and ("robinhood_link", "2026-03-05") in kept
+        assert ("robinhood_link", "2026-02-10") not in kept and len(skipped) == 1
+    finally:
+        db.close()
+
+
+def test_the_check_lists_the_account_reads_as_called_and_records_only_their_shapes(tmp_path):
+    import json
+
+    from tradeassist.providers.robinhood import RobinhoodData
+    from tradeassist.robinhood_check import run_check
+    srv, called = standin()
+    provider = RobinhoodData(bridge_for(srv))
+    out = tmp_path / "capture.json"
+    try:
+        result = run_check(provider, "AAPL", out)
+    finally:
+        provider.bridge.close()
+    step = next(s for s in result["steps"] if s["step"].startswith("Your holdings and past orders"))
+    assert step["ok"] and "share orders (get_equity_orders)" in step["detail"]
+    capture = json.loads(out.read_text())
+    by_name = {t["name"]: t for t in capture["tools"]}
+    assert by_name["get_equity_orders"]["may_be_called"] is True and by_name["get_option_orders"]["may_be_called"] is True
+    assert by_name["get_accounts"]["may_be_called"] is False and by_name["place_equity_order"]["may_be_called"] is False
+    shapes = by_name["(account reply shapes)"]["shapes"]
+    assert "executions" in json.dumps(shapes["get_equity_orders"])
+    text = out.read_text()
+    assert "5QR12345" not in text and "180.00" not in text and "o-1" not in text
+    assert "place_equity_order" not in called and "review_equity_order" not in called and "get_accounts" not in called

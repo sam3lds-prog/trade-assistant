@@ -158,7 +158,8 @@ def run_check(provider: RobinhoodData, symbol: str, out_path: Path, rate: float 
         tools = provider.bridge.tools()
         for name, tool in sorted(tools.items()):
             annotations = getattr(tool, "annotations", None)
-            callable_here = is_market_data_tool(name, annotations)
+            callable_here = is_market_data_tool(name, annotations) or (
+                name in getattr(provider.bridge, "account_reads", ()) and provider.bridge.may_call(name))
             tools_out.append({
                 "name": scrub_text(name, 120),
                 # The full text for the tools this app calls: it is Robinhood's own account of how to use them.
@@ -298,7 +299,7 @@ def run_check(provider: RobinhoodData, symbol: str, out_path: Path, rate: float 
         account_shapes: dict[str, Any] = {}
         step("Your holdings and past orders (account reads)", account, optional=True)
         tools_out.append({"name": "(account reply shapes)", "description": "field names and types only",
-                          "input_schema": None, "annotations": None, "may_be_called": True, "shapes": account_shapes})
+                          "input_schema": None, "annotations": None, "may_be_called": False, "shapes": account_shapes})
 
     return _finish(provider, steps, tools_out, symbol, out_path)
 

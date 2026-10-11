@@ -447,3 +447,15 @@ def broker_history(cur: sqlite3.Cursor) -> None:
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS broker_activity_date ON broker_activity (activity_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS broker_activity_symbol ON broker_activity (symbol)")
+
+
+@migration(12, "which imports each history row came in")
+def broker_import_rows(cur: sqlite3.Cursor) -> None:
+    """2.6: a row can arrive in more than one report (they overlap). Each import's rows are listed here, so
+    removing one import keeps the rows another import also brought."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS broker_import_rows (
+        import_id   INTEGER NOT NULL REFERENCES broker_imports(id) ON DELETE CASCADE,
+        activity_id INTEGER NOT NULL REFERENCES broker_activity(id) ON DELETE CASCADE,
+        PRIMARY KEY (import_id, activity_id)
+    )""")
+    cur.execute("INSERT OR IGNORE INTO broker_import_rows (import_id, activity_id) SELECT import_id, id FROM broker_activity")

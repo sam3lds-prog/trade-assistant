@@ -124,8 +124,9 @@ def test_options_expire_assign_and_close_with_their_own_results(db):
     put = by[("KO", "Short put")]
     assert put["ended"] == "Assigned" and put["realized_pnl"] == pytest.approx(89.96)
     assert put["risk"] == pytest.approx(60 * 100 - 89.96)                   # to zero, less the premium
-    shares = by[("KO", "Shares (long)")]
-    assert shares["status"] == "OPEN" and shares["from_assignment"] is True
+    # The shares the assignment delivered belong to the same trade, which stays open until they are sold.
+    assert put["status"] == "PARTLY_CLOSED" and put["from_assignment"] is True and put["result"] is None
+    assert ("KO", "Shares (long)") not in by
     assert by[("SPY", "Long put")]["dte_at_open"] == 4
 
 
@@ -222,9 +223,15 @@ def test_a_date_range_picks_trades_by_when_they_closed_or_opened(db):
         ("2/10/2026", "MSFT", "MSFT 3/20/2026 Put $400.00", "BTO", "1", "$4.00", "($400.00)"),
         ("3/3/2026", "MSFT", "MSFT 3/20/2026 Put $400.00", "STC", "1", "$1.00", "$100.00")))
     feb_close = analyse(b, trades, date(2026, 10, 11), "2026-02-01", "2026-02-28", "month", "close")
-    assert [t["symbol"] for t in feb_close["trades"]] == ["AAPL"] and feb_close["summary"]["net"] == pytest.approx(200)
+    assert [t["symbol"] for t in feb_close["trades"] if t["in_results"]] == ["AAPL"] and feb_close["summary"]["net"] == pytest.approx(200)
+    # MSFT was open in February: not in its results, but in its risk.
+    assert [t["symbol"] for t in feb_close["trades"] if not t["in_results"]] == ["MSFT"]
+    assert feb_close["summary"]["risk"]["of"] == 2
     feb_open = analyse(b, trades, date(2026, 10, 11), "2026-02-01", "2026-02-28", "month", "open")
-    assert [t["symbol"] for t in feb_open["trades"]] == ["MSFT"] and feb_open["summary"]["net"] == pytest.approx(-300)
+    assert [t["symbol"] for t in feb_open["trades"] if t["in_results"]] == ["MSFT"] and feb_open["summary"]["net"] == pytest.approx(-300)
+    # By open date, the result belongs to the month it was opened, and nothing falls outside the range.
+    assert [(p["key"], round(p["realized"]), p["trades"]) for p in feb_open["periods"]] == [("2026-02", -300, 1)]
+    assert feb_open["summary"]["realized"] == pytest.approx(-300)
     whole = analyse(b, trades, date(2026, 10, 11), None, None, "month", "close")
     assert [(p["key"], round(p["realized"])) for p in whole["periods"] if p["trades"]] == [("2026-02", 200), ("2026-03", -300)]
     assert whole["summary"]["max_drawdown"] == pytest.approx(300)
@@ -244,10 +251,11 @@ def test_patterns_compare_each_kind_of_trade_with_your_average_and_need_enough_t
     assert len(trades) == 12
     pats = analyse(b, trades, date(2026, 10, 11))["patterns"]
     assert pats["overall"]["average"] == pytest.approx(10)
-    worst = next(r for r in pats["failure"] if r["feature"] == "dte")
-    best = next(r for r in pats["success"] if r["feature"] == "dte")
-    assert (worst["value"], worst["trades"], worst["edge"]) == ("0 to 2 days", 6, pytest.approx(-480 - 60))
-    assert (best["value"], best["edge"]) == ("31 to 60 days", pytest.approx(600 - 60))
+    # Two kinds of one feature are one fact seen from both sides: it is listed once, not as a mirrored pair.
+    listed = [r for r in pats["failure"] + pats["success"] if r["feature"] == "dte"]
+    assert len(listed) == 1 and abs(listed[0]["edge"]) == pytest.approx(540)
+    table = {r["value"]: r for r in pats["table"] if r["feature"] == "dte"}
+    assert table["0 to 2 days"]["edge"] == pytest.approx(-480 - 60) and table["31 to 60 days"]["edge"] == pytest.approx(600 - 60)
     # A value every trade shares (all long calls) says nothing by contrast, so it is not ranked.
     assert all(r["feature"] != "strategy" for r in pats["success"] + pats["failure"])
     few = analyse(b, trades[:4], date(2026, 10, 11))["patterns"]
@@ -306,3 +314,136 @@ def test_the_sample_is_for_demo_mode_and_the_flag_switches_it_all_off(tmp_path, 
     with TestClient(create_app(settings, svc)) as c:
         assert c.get("/v2/history/analysis").status_code == 404
     svc.db.close()
+
+
+# --- review fixes: each pinned -----------------------------------------------------------------------
+
+def test_a_leg_filled_in_several_rows_is_one_leg_and_the_strategy_is_named_from_it(db):
+    b, trades = book_of(db, report(
+        ("4/14/2026", "AAPL", "AAPL 5/15/2026 Call $190.00", "BTO", "1", "$5.00", "($500.00)"),
+        ("4/14/2026", "AAPL", "AAPL 5/15/2026 Call $190.00", "BTO", "1", "$5.10", "($510.00)"),
+        ("4/14/2026", "AAPL", "AAPL 5/15/2026 Call $200.00", "STO", "2", "$2.00", "$400.00")))
+    (t,) = trades
+    assert t["strategy"] == "Call debit spread" and t["risk"] == pytest.approx(1010 - 400)
+
+
+def test_a_close_listed_before_its_open_on_the_same_day_still_finds_it(db):
+    """The report has no times: when one day's lines put a close before its open, the close is tried again
+    after that day's opens instead of being dropped."""
+    b, trades = book_of(db, report(
+        ("4/1/2026", "AMD", "AMD 4/17/2026 Call $150.00", "STC", "2", "$1.50", "$299.92"),
+        ("4/1/2026", "AMD", "AMD 4/17/2026 Call $150.00", "BTO", "2", "$1.00", "($200.08)")))
+    assert not b.unmatched
+    (t,) = trades
+    assert t["status"] == "CLOSED" and t["realized_pnl"] == pytest.approx(99.84)
+
+
+def test_proceeds_smaller_than_the_fees_are_a_negative_amount_not_an_estimate(db):
+    b, trades = book_of(db, report(
+        ("5/1/2026", "F", "F 5/15/2026 Call $14.00", "BTO", "1", "$0.50", "($50.04)"),
+        ("5/14/2026", "F", "F 5/15/2026 Call $14.00", "STC", "1", "$0.01", "($0.02)")))
+    (t,) = trades
+    assert t["realized_pnl"] == pytest.approx(-50.06) and t["estimated"] is False
+
+
+def test_a_reverse_split_takes_shares_away_and_keeps_the_cost(db):
+    b, trades = book_of(db, report(
+        ("1/2/2026", "XYZ", "XYZ Corp", "Buy", "100", "$1.00", "($100.00)"),
+        ("2/2/2026", "XYZ", "XYZ 1 for 10 reverse split", "SPL", "-90", "", ""),
+        ("3/2/2026", "XYZ", "XYZ Corp", "Sell", "10", "$12.00", "$120.00")))
+    assert not b.unmatched
+    (t,) = trades
+    assert t["status"] == "CLOSED" and t["realized_pnl"] == pytest.approx(20.0)
+
+
+def test_an_option_past_expiration_with_no_closing_row_is_unresolved_not_open_and_not_zero(db):
+    b, trades = book_of(db, report(
+        ("3/2/2026", "TSLA", "TSLA 3/20/2026 Call $250.00", "BTO", "1", "$4.00", "($400.04)"),
+        ("3/2/2026", "KO", "Coca-Cola", "Buy", "1", "$60.00", "($60.00)")))
+    t = next(x for x in trades if x["symbol"] == "TSLA")
+    assert t["status"] == "UNRESOLVED" and t["result"] is None and t["realized_pnl"] is None
+    assert t["ended"] == "No record after expiration"
+    out = analyse(b, trades, date(2026, 10, 11), "2026-03-01", "2026-04-30")
+    assert out["summary"]["unresolved"] == 1 and out["summary"]["open_now"] == 1          # the KO shares only
+    assert "passed expiration" in " ".join(out["notes"])
+    after = next(x for x in out["exposure"] if x["date"] == "2026-03-23")
+    assert after["risk"] == pytest.approx(60)                                          # its risk ends at expiration
+
+
+def test_open_risk_shrinks_as_a_trade_is_partly_closed(db):
+    b, trades = book_of(db, report(
+        ("1/5/2026", "AAPL", "Apple", "Buy", "10", "$100.00", "($1,000.00)"),
+        ("1/12/2026", "AAPL", "Apple", "Sell", "5", "$110.00", "$550.00"),
+        ("1/20/2026", "AAPL", "Apple", "Sell", "5", "$90.00", "$450.00")))
+    out = analyse(b, trades, date(2026, 10, 11), "2026-01-01", "2026-01-31")
+    on = {x["date"]: x for x in out["exposure"]}
+    assert on["2026-01-07"]["risk"] == pytest.approx(1000) and on["2026-01-14"]["risk"] == pytest.approx(500)
+    assert on["2026-01-26"]["open"] == 0
+    assert out["summary"]["peak_exposure"]["risk"] == pytest.approx(1000)
+    # Dollar-days: 1000 a day for Jan 5 to 12 (8 days), then 500 a day for Jan 13 to 20 (8 days).
+    assert out["summary"]["risk"]["dollar_days"] == pytest.approx(8 * 1000 + 8 * 500)
+
+
+def test_a_day_with_only_unlimited_risk_open_is_the_peak_not_a_zero(db):
+    b, trades = book_of(db, report(
+        ("1/5/2026", "PEP", "PEP 2/20/2026 Call $180.00", "STO", "1", "$1.00", "$100.00"),
+        ("1/9/2026", "PEP", "PEP 2/20/2026 Call $180.00", "BTC", "1", "$0.50", "($50.00)")))
+    peak = analyse(b, trades, date(2026, 10, 11), "2026-01-01", "2026-01-31")["summary"]["peak_exposure"]
+    assert peak["risk"] == 0 and peak["unlimited"] == 1 and peak["open"] == 1
+    empty = analyse(b, trades, date(2026, 10, 11), "2026-03-01", "2026-03-31")["summary"]
+    assert empty["peak_exposure"] is None                                            # nothing open: no peak at all
+
+
+def test_removing_an_import_keeps_the_rows_another_import_also_has(db):
+    from tradeassist.tradehistory import imports, remove_import
+    jan = ("1/5/2026", "AAPL", "Apple", "Buy", "10", "$100.00", "($1,000.00)")
+    feb = ("2/5/2026", "AAPL", "Apple", "Sell", "10", "$110.00", "$1,100.00")
+    mar = ("3/5/2026", "MSFT", "Microsoft", "Buy", "1", "$400.00", "($400.00)")
+    a = store(db, parse_report(report(jan, feb)), "robinhood_csv", "a.csv")
+    b = store(db, parse_report(report(feb, mar)), "robinhood_csv", "b.csv")
+    assert b["rows_added"] == 1 and b["rows_duplicate"] == 1
+    out = remove_import(db, a["import_id"])
+    assert out == {"import_id": a["import_id"], "rows_removed": 1, "rows_kept_by_other_imports": 1}
+    assert [(r["activity_date"], r["code"]) for r in activity(db)] == [("2026-02-05", "Sell"), ("2026-03-05", "Buy")]
+    assert [i["filename"] for i in imports(db)] == ["b.csv"]
+    assert remove_import(db, b["import_id"])["rows_removed"] == 2 and activity(db) == []
+
+
+def test_numbers_that_cannot_be_real_are_refused_and_signed_quantities_kept():
+    with pytest.raises(ValueError):
+        money("$1" + "0" * 20)
+    assert quantity("-90") == (-90.0, False)
+
+
+def test_a_malformed_file_and_a_long_file_name_are_answered_not_crashed(client):
+    huge = report(("1/5/2026", "AAPL", "x" * 200_000, "Buy", "1", "$1.00", "($1.00)"))
+    r = client.post("/v2/history/import", json={"filename": "a.csv", "text": huge})
+    assert r.status_code == 400 and "could not be read" in r.text.lower()
+    ok = report(("1/5/2026", "AAPL", "Apple", "Buy", "1", "$1.00", "($1.00)"))
+    r = client.post("/v2/history/import", json={"filename": "n" * 1500 + ".csv", "text": ok})
+    assert r.status_code == 200
+    assert len(client.get("/v2/history/analysis").json()["imports"][0]["filename"]) == 200
+
+
+def test_the_analysis_is_never_read_half_built_while_an_import_lands(client):
+    import threading
+    rows = [(f"1/{d}/2026", "AAPL", "Apple", code, "1", "$100.00", amt) for d in range(5, 25)
+            for code, amt in (("Buy", "($100.00)"), ("Sell", "$101.00"))]
+    seen, errors = [], []
+    history = client.app.state.assistant.history
+
+    def read():
+        try:
+            for _ in range(15):
+                a = history.analysis(None, None, "month", "close")
+                seen.append(0 if a.get("empty") else len(a["trades"]))
+        except Exception as exc:             # noqa: BLE001
+            errors.append(exc)
+
+    readers = [threading.Thread(target=read) for _ in range(4)]
+    for t in readers:
+        t.start()
+    history.import_report(report(*rows), "a.csv")
+    for t in readers:
+        t.join()
+    assert errors == [] and set(seen) <= {0, 20}

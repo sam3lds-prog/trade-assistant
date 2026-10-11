@@ -68,7 +68,7 @@ const compactMoney = v => !isNum(v) ? "n/a" : Math.abs(v) >= 1e6 ? `$${(v / 1e6)
 /* ---------- the screen ---------- */
 function buildTrades() {
   const filters = { start: null, end: null, by: "month", basis: "close" };
-  let current = null, listFilter = null, shown = 50;
+  let current = null, listFilter = null, shown = 50, alsoOpen = false;
 
   // --- import ---
   const file = el("input", { type: "file", accept: ".csv,text/csv", "aria-label": "Account activity report (CSV)" });
@@ -112,7 +112,7 @@ function buildTrades() {
       el("li", { text: "Select Generate new report, pick the account and the dates (from when you started trading is best), and generate it." }),
       el("li", { text: "Robinhood says it usually takes about 2 hours, and up to 24. Download the CSV when it is ready and import it here." }),
       el("li", { text: "Importing a later report adds only the rows that are new; the same row is never counted twice." })),
-    el("p", { class: "small muted", text: "Read-only: the file is read on this computer, kept in the app's own database, and never sent anywhere. Nothing here can place, change or cancel an order." }));
+    el("p", { class: "small muted", text: "Read-only. The file stays on this computer, in the app's own database, and nothing about your account is sent to the AI. Only ticker symbols leave it, to look up prices through your market data connection (the stock's close on the day you opened, and the price now of what is still open). Nothing here can place, change or cancel an order." }));
   const importPanel = el("div", { class: "panel" }, el("h3", { text: "Your history" }),
     el("div", { class: "row" }, field("Account activity report (CSV)", file), importBtn, state.status && state.status.data && state.status.data.mode === "demo" ? sampleBtn : null),
     importErr, linkBox, importOut, how, importsBox);
@@ -133,7 +133,9 @@ function buildTrades() {
   });
   for (const input of [from, to]) input.addEventListener("change", () => { preset.value = "custom"; });
   apply.addEventListener("click", () => {
-    Object.assign(filters, { start: from.value || null, end: to.value || null, by: by.value, basis: basis.value });
+    // "All history" stays all of it: no dates are sent, so a later import that reaches further back is included.
+    const all = preset.value === "all";
+    Object.assign(filters, { start: all ? null : from.value || null, end: all ? null : to.value || null, by: by.value, basis: basis.value });
     listFilter = null;
     load();
   });
@@ -147,15 +149,14 @@ function buildTrades() {
       const q = new URLSearchParams({ by: filters.by, basis: filters.basis });
       if (filters.start) q.set("start", filters.start);
       if (filters.end) q.set("end", filters.end);
-      const [a, h] = await Promise.all([api(`/v2/history/analysis?${q}`), api("/v2/history/holdings").catch(() => null)]);
-      if (mine !== ticket) return;
+      const [a, h, link] = await Promise.all([api(`/v2/history/analysis?${q}`), api("/v2/history/holdings").catch(() => null),
+        api("/v2/history/link").catch(() => null)]);
+      if (mine !== ticket) return;                     // a newer request is on its way: leave the screen to it
       current = a;
       importsBox.replaceChildren(importsList(a.imports || []));
-      renderLink(a.link || await api("/v2/history/link").catch(() => null));
+      renderLink(a.link || link);
       rangeBar.classList.toggle("hidden", !!a.empty);
       if (a.empty) { out.replaceChildren(el("div", { class: "panel" }, el("p", { class: "muted", text: "Nothing imported yet. Download your account activity report from Robinhood and import it above." }))); return; }
-      if (!from.value && a.range.start) from.value = a.range.start;
-      if (!to.value && a.range.end) to.value = a.range.end;
       out.replaceChildren(render(a, h));
       rangeErr.textContent = "";
     } catch (e) { if (mine === ticket) rangeErr.textContent = e.message; }
@@ -168,7 +169,7 @@ function buildTrades() {
       { label: "File", cell: i => el("span", {}, i.filename || i.source, i.source === "sample" ? el("span", {}, " ", statusTag("warn", "Made up")) : null) },
       { label: "Covers", cell: i => i.first_date ? `${shortDate(i.first_date)} to ${shortDate(i.last_date)}` : "no trades" },
       { label: "Rows kept", num: true, cell: i => num(i.rows_kept, 0) },
-      { label: "Already had", num: true, cell: i => num(i.rows_duplicate, 0) },
+      { label: "Already had", num: true, cell: i => num(i.rows_duplicate, 0) + (i.rows_updated ? `, ${num(i.rows_updated, 0)} updated` : "") },
       { label: "Not trades", num: true, cell: i => num(i.rows_ignored, 0) },
       { label: "Unreadable", num: true, cell: i => i.rows_unreadable ? el("strong", { text: num(i.rows_unreadable, 0) }) : "0" },
       { label: "Imported", cell: i => shortDate(i.imported_at.slice(0, 10)) },
@@ -203,8 +204,8 @@ function buildTrades() {
       metric(isNum(s.average_win) ? `${signedMoney(s.average_win, 0)} / ${signedMoney(s.average_loss, 0)}` : "n/a", "Average win / average loss"),
       metric(isNum(s.largest_loss) ? signedMoney(s.largest_loss, 0) : "none", "Largest loss"),
       metric(isNum(s.max_drawdown) ? money(-s.max_drawdown, 0) : "n/a", s.drawdown_from ? `Deepest fall from a high, ${shortDate(s.drawdown_from)} to ${shortDate(s.drawdown_to)}` : "Deepest fall from a high"),
-      metric(s.peak_exposure ? compactMoney(s.peak_exposure.risk) : "n/a", s.peak_exposure ? `Most at risk at once, ${shortDate(s.peak_exposure.date)} (${s.peak_exposure.open} trades open${s.peak_exposure.unlimited ? `, ${s.peak_exposure.unlimited} unlimited` : ""})` : "Most at risk at once"),
-      metric(String(s.open_now), "Trades still open"))));
+      peakMetric(s.peak_exposure, a.exposure),
+      metric(String(s.open_now), s.unresolved ? `Trades still open; ${s.unresolved} more ended with no record of how` : "Trades still open"))));
 
     // By period
     const per = el("div", { class: "panel" }, el("h3", { text: `By ${BY_WORDS[r.by].toLowerCase()}` }),
@@ -279,16 +280,24 @@ function buildTrades() {
   }
 
   function tradesView(a) {
-    const all = a.trades, ids = listFilter ? new Set(listFilter.ids) : null;
-    const list = (ids ? all.filter(t => ids.has(t.id)) : all).slice().sort((x, y) => (y.close_date || y.open_date).localeCompare(x.close_date || x.open_date));
-    const head = el("div", { class: "row" }, el("h3", { text: listFilter ? `Trades: ${listFilter.label}` : "Every trade in this range" }),
-      listFilter ? (() => { const b = el("button", { class: "plain small-btn", text: "Show every trade" }); b.addEventListener("click", () => { listFilter = null; shown = 50; tradesPanel.replaceChildren(...tradesView(current)); }); return b; })() : null);
+    const ids = listFilter ? new Set(listFilter.ids) : null;
+    // By default the trades the results above count; the others were only open during the range (their risk counts).
+    const counted = a.trades.filter(t => t.in_results), others = a.trades.filter(t => !t.in_results);
+    const all = ids ? a.trades.filter(t => ids.has(t.id)) : alsoOpen ? a.trades : counted;
+    const list = all.slice().sort((x, y) => (y.close_date || y.open_date).localeCompare(x.close_date || x.open_date));
+    const redraw = () => tradesPanel.replaceChildren(...tradesView(current));
+    const btn = (text, fn) => { const b = el("button", { class: "plain small-btn", text }); b.addEventListener("click", () => { fn(); shown = 50; redraw(); }); return b; };
+    const head = el("div", { class: "row" }, el("h3", { text: listFilter ? `Trades: ${listFilter.label}` : alsoOpen ? "Trades in this range, and others open during it" : "Trades in this range" }),
+      listFilter ? btn("Show every trade", () => { listFilter = null; })
+        : others.length ? btn(alsoOpen ? "Only the trades counted above" : `Also the ${others.length} open during the range`, () => { alsoOpen = !alsoOpen; }) : null);
     const tbody = el("tbody");
     for (const t of list.slice(0, shown)) {
       const tr = el("tr", { class: "click", tabindex: "0" },
         el("td", { text: shortDate(t.open_date) }), el("td", { text: t.close_date ? shortDate(t.close_date) : "open" }),
         el("td", {}, el("strong", { text: t.symbol })), el("td", { text: t.strategy }),
-        el("td", { class: "num" }, isNum(t.realized_pnl) ? signedMoney(t.realized_pnl, 2) : el("span", { class: "muted", text: "open" })),
+        el("td", { class: "num" }, isNum(t.realized_pnl) ? signedMoney(t.realized_pnl, 2) : t.status === "UNRESOLVED"
+          ? el("span", { title: "Past expiration with no row saying how it ended: the result is unknown, not zero." }, statusTag("warn", "Unknown"))
+          : el("span", { class: "muted", text: "open" })),
         el("td", { class: "num" }, isNum(t.risk) ? money(t.risk, 0) : el("span", { class: t.unlimited ? "small error" : "muted", text: t.unlimited ? "unlimited" : "not measured" })),
         el("td", { class: "num", text: String(t.days_held) }), el("td", { text: t.ended || "" }));
       const detail = el("tr", { class: "hidden detail-row" }, el("td", { colspan: 8 }));
@@ -306,7 +315,7 @@ function buildTrades() {
       tbody.append(tr, detail);
     }
     const more = list.length > shown ? (() => { const b = el("button", { class: "plain", text: `Show ${Math.min(50, list.length - shown)} more of ${list.length - shown}` }); b.addEventListener("click", () => { shown += 50; tradesPanel.replaceChildren(...tradesView(current)); }); return b; })() : null;
-    return [head, el("p", { class: "small muted", text: `${list.length} trade${list.length === 1 ? "" : "s"}. Select one to see its legs and the statement rows it was built from, exactly as in your report, to check against Robinhood.` }),
+    return [head, el("p", { class: "small muted", text: `${list.length} trade${list.length === 1 ? "" : "s"}${!ids && !alsoOpen && others.length ? ` (and ${others.length} more open during the range, whose risk is counted above)` : ""}. Select one to see its legs and the statement rows it was built from, exactly as in your report, to check against Robinhood.` }),
       el("div", { class: "scroll" }, el("table", { class: "trade-table" }, el("thead", {}, el("tr", {}, ["Opened", "Closed", "Stock", "Strategy", "Result", "Risk at open", "Days", "Ended"].map((h, i) => el("th", { class: i === 4 || i === 5 || i === 6 ? "num" : null, text: h })))), tbody)), more];
   }
 
@@ -342,13 +351,26 @@ function buildTrades() {
   return view;
 }
 
+// Most at risk at once: a day with only unlimited or unmeasured risk open is never shown as $0.
+function peakMetric(p, exposure) {
+  const label = "Most at risk at once";
+  if (!p) return metric(exposure && exposure.length ? "nothing open" : "n/a", label);
+  const extra = [p.unlimited ? `${p.unlimited} unlimited` : "", p.not_measured ? `${p.not_measured} not measured` : ""].filter(Boolean).join(", ");
+  const when = `${label}, ${shortDate(p.date)} (${p.open} trade${p.open === 1 ? "" : "s"} open${extra ? `; ${extra}` : ""})`;
+  if (p.risk > 0) return metric(p.unlimited ? `${compactMoney(p.risk)} + unlimited` : compactMoney(p.risk), when);
+  return metric(p.unlimited ? "unlimited" : "not measured", when);
+}
+
 function importSummary(r) {
   const parts = [banner(r.rows_unreadable ? "warn" : "pass",
-    `${r.filename || "Import"}: ${r.rows_added} trade row${r.rows_added === 1 ? "" : "s"} added${r.rows_duplicate ? `, ${r.rows_duplicate} already imported` : ""}${r.first_date ? `, covering ${shortDate(r.first_date)} to ${shortDate(r.last_date)}` : ""}.`)];
+    `${r.filename || "Import"}: ${r.rows_added} trade row${r.rows_added === 1 ? "" : "s"} added${r.rows_updated ? `, ${r.rows_updated} updated (filled further since the last read)` : ""}${r.rows_duplicate ? `, ${r.rows_duplicate} already imported` : ""}${r.first_date ? `, covering ${shortDate(r.first_date)} to ${shortDate(r.last_date)}` : ""}.`)];
   if (r.ignored && r.ignored.length) parts.push(el("p", { class: "small muted", text: `Not trades, counted and not kept: ${r.ignored.map(i => `${i.rows} ${i.what} (${i.code})`).join(", ")}.` }));
   if (r.unmodelled_total) parts.push(banner("warn", `${r.unmodelled_total} row${r.unmodelled_total === 1 ? " is a corporate action" : "s are corporate actions"} (mergers, spin-offs, symbol changes) this app does not model; trades in those stocks may not add up. ${r.unmodelled.slice(0, 5).map(u => `${u.date} ${u.code} ${u.symbol || ""}`).join("; ")}`));
   if (r.rows_unreadable) parts.push(el("details", {}, el("summary", { class: "small", text: `${r.rows_unreadable} row${r.rows_unreadable === 1 ? "" : "s"} could not be read and were left out` }),
-    el("ul", { class: "plain small" }, r.unreadable.map(u => el("li", {}, el("strong", { text: `Line ${u.line}: ` }), `${u.reason}. `, el("span", { class: "muted", text: u.text }))))));
+    el("ul", { class: "plain small" }, (r.unreadable || []).map(u => isNum(u.line)
+      ? el("li", {}, el("strong", { text: `Line ${u.line}: ` }), `${u.reason}. `, el("span", { class: "muted", text: u.text || "" }))
+      // from the Robinhood connection: what it was, why, and the field names it had (never their values)
+      : el("li", {}, el("strong", { text: `${u.what || "A row"}: ` }), `${u.reason}. `, u.fields ? el("span", { class: "muted", text: `Fields: ${u.fields.join(", ")}` }) : null)))));
   return el("div", {}, ...parts);
 }
 
