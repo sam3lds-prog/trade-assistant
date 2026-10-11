@@ -275,6 +275,31 @@ def run_check(provider: RobinhoodData, symbol: str, out_path: Path, rate: float 
         return f"reply recorded for a later update (the app does not use it yet); it holds: {shape}", payload
     step("Earnings dates (not used yet)", earnings, optional=True)
 
+    if getattr(provider.bridge, "account_reads", None):
+        # 2.6, only with ROBINHOOD_ACCOUNT_READ=1: which account reads the server offers, and the SHAPE of each
+        # reply (field names and types, never values), so the reader can be matched to it without your data.
+        def account():
+            from .robinhood_account import RobinhoodAccount, shape
+            acct = RobinhoodAccount(provider.bridge)
+            offered = acct.offered()
+            shapes = {}
+            for name in offered.values():
+                if name:
+                    try:
+                        shapes[name] = shape(provider.bridge.call(name, {}))
+                    except (DataError, PermissionError) as exc:
+                        shapes[name] = f"error: {scrub_text(str(exc), 200)}"
+            account_shapes.update(shapes)
+            have = [f"{job} ({name})" for job, name in offered.items() if name]
+            missing = [job for job, name in offered.items() if not name]
+            return (f"offers {', '.join(have) or 'none of the account reads'}"
+                    + (f"; not offered: {', '.join(missing)}" if missing else "")
+                    + ". Reply shapes recorded, without values."), offered
+        account_shapes: dict[str, Any] = {}
+        step("Your holdings and past orders (account reads)", account, optional=True)
+        tools_out.append({"name": "(account reply shapes)", "description": "field names and types only",
+                          "input_schema": None, "annotations": None, "may_be_called": True, "shapes": account_shapes})
+
     return _finish(provider, steps, tools_out, symbol, out_path)
 
 
@@ -285,7 +310,8 @@ def _finish(provider: RobinhoodData, steps: list[dict[str, Any]], tools_out: lis
     provider.recorder = None
     capture = {"captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "app_version": __version__,
                "symbol": symbol, "steps": steps, "tools": tools_out, "calls": calls,
-               "note": "Only the market-data tools marked may_be_called were called. Replies are shortened, and "
+               "note": "Only the tools marked may_be_called were called. Account replies (when switched on) are "
+                       "recorded as field names and types only, never values. Market replies are shortened, and "
                        "email addresses, account references, token-like text and values under keys that could "
                        "identify a person are removed. Read this file before sending it to anyone."}
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -90,6 +90,8 @@ class Settings:
     robinhood_callback_port: int = 8421
     robinhood_poll_seconds: float = 3.0
     robinhood_url: str = "https://agent.robinhood.com/mcp/trading"
+    # 2.6: read your holdings and past orders through the same connection (off unless ROBINHOOD_ACCOUNT_READ=1)
+    robinhood_account_read: bool = False
 
     # V2 areas that can be switched off (see features.py)
     features: dict[str, bool] = field(default_factory=lambda: dict(FEATURE_DEFAULTS))
@@ -163,6 +165,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         robinhood_callback_port=_int("ROBINHOOD_CALLBACK_PORT", 8421),
         robinhood_poll_seconds=max(_float("ROBINHOOD_POLL_SECONDS", 3.0), 1.0),
         robinhood_url=(os.getenv("ROBINHOOD_MCP_URL") or "").strip() or "https://agent.robinhood.com/mcp/trading",
+        robinhood_account_read=(os.getenv("ROBINHOOD_ACCOUNT_READ") or "0").strip().lower() in ("1", "true", "yes", "on"),
         features=load_features(),
         freshness=freshness_thresholds(),
     )

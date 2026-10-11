@@ -26,7 +26,8 @@ def make_provider(settings: Settings, interactive: bool = False) -> MarketData:
         elif settings.sandbox_token:
             fallback = TradierData(settings.sandbox_token, sandbox=True)
         return make_robinhood(settings.robinhood_signin_path, settings.robinhood_callback_port, interactive,
-                              fallback, settings.robinhood_poll_seconds, url=settings.robinhood_url)
+                              fallback, settings.robinhood_poll_seconds, url=settings.robinhood_url,
+                              account_read=settings.robinhood_account_read)
     return DemoData(live=True)
 
 

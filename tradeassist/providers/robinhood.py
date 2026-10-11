@@ -10,7 +10,8 @@ this module makes and writes a capture file that shows exactly where a mismatch 
 
 Only the market-data tools named in TOOLS below are ever called: quotes, option
 chains, option contracts and price history. Nothing here reads positions, balances
-or orders, and nothing can place, change or cancel an order; the bridge refuses any
+or orders (2.6: robinhood_account.py reads holdings and past orders, only when switched on), and
+nothing can place, change or cancel an order; the bridge refuses any
 tool whose exact name is not on that list. If Robinhood names a tool differently,
 the call fails with a message listing the server's similar names, and the name has
 to be added to TOOLS by hand after reading what the tool does.
@@ -766,10 +767,12 @@ def find_bars(data: Any, depth: int = 0) -> list[dict[str, Any]]:
 
 
 def make_robinhood(token_path, callback_port: int, interactive: bool, history_fallback: MarketData | None,
-                   poll_seconds: float = 3.0, url: str = SERVER_URL) -> RobinhoodData:
+                   poll_seconds: float = 3.0, url: str = SERVER_URL, account_read: bool = False) -> RobinhoodData:
+    from ..robinhood_account import ACCOUNT_ALLOWED
     from .mcp_bridge import SIGN_IN_TIMEOUT, oauth_connector
     bridge = ReadOnlyBridge(oauth_connector(url, token_path, callback_port, interactive), ALLOWED_TOOLS,
-                            label="Robinhood", first_call_timeout=SIGN_IN_TIMEOUT + 30 if interactive else 30.0)
+                            label="Robinhood", first_call_timeout=SIGN_IN_TIMEOUT + 30 if interactive else 30.0,
+                            account_reads=ACCOUNT_ALLOWED if account_read else frozenset())
     provider = RobinhoodData(bridge, history_fallback=history_fallback, poll_seconds=poll_seconds)
     provider.signin = FileTokenStorage(token_path)
     return provider

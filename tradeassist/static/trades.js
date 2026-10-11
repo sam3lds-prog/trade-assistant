@@ -77,6 +77,23 @@ function buildTrades() {
   const importErr = el("div", { class: "error", role: "alert" });
   const importOut = el("div");
   const importsBox = el("div");
+  const linkBox = el("div");
+  // The Robinhood connection: reads past orders only when switched on in .env (ROBINHOOD_ACCOUNT_READ=1).
+  function renderLink(link) {
+    if (!link) return linkBox.replaceChildren();
+    if (!link.enabled || !link.using_robinhood) {
+      linkBox.replaceChildren(el("p", { class: "small muted", text: link.enabled
+        ? "Reading your account through the Robinhood connection is switched on, but the app is not using that connection now (DATA_MODE=robinhood)."
+        : "The app can also read your past orders and holdings through the Robinhood connection: add ROBINHOOD_ACCOUNT_READ=1 to .env (with DATA_MODE=robinhood) and restart. It is off now. The report above has your option trades too." }));
+      return;
+    }
+    const off = link.offered || {};
+    const pull = el("button", { class: "plain", text: "Read my orders from the Robinhood connection" });
+    const words = Object.entries(off).map(([job, name]) => `${job} ${name ? "offered" : "not offered"}`).join(", ");
+    pull.addEventListener("click", () => withBusy(pull, importErr, async () => { importOut.replaceChildren(importSummary(await api("/v2/history/pull", {}))); await load(); }));
+    linkBox.replaceChildren(el("div", { class: "row", style: "margin-top:8px" }, pull,
+      el("span", { class: "small muted", text: link.error ? `Connection: ${link.error}` : `Robinhood's connection: ${words}. Reads only. Days your report already covers use the report.` })));
+  }
   importBtn.addEventListener("click", () => withBusy(importBtn, importErr, async () => {
     const f = file.files && file.files[0];
     if (!f) throw new Error("Choose the CSV file you downloaded from Robinhood first.");
@@ -98,7 +115,7 @@ function buildTrades() {
     el("p", { class: "small muted", text: "Read-only: the file is read on this computer, kept in the app's own database, and never sent anywhere. Nothing here can place, change or cancel an order." }));
   const importPanel = el("div", { class: "panel" }, el("h3", { text: "Your history" }),
     el("div", { class: "row" }, field("Account activity report (CSV)", file), importBtn, state.status && state.status.data && state.status.data.mode === "demo" ? sampleBtn : null),
-    importErr, importOut, how, importsBox);
+    importErr, linkBox, importOut, how, importsBox);
 
   // --- the range: one row above the results ---
   const preset = el("select", { "aria-label": "Dates" }, [["all", "All history"], ["d30", "Last 30 days"], ["d90", "Last 90 days"], ["ytd", "This year"],
@@ -134,6 +151,7 @@ function buildTrades() {
       if (mine !== ticket) return;
       current = a;
       importsBox.replaceChildren(importsList(a.imports || []));
+      renderLink(a.link || await api("/v2/history/link").catch(() => null));
       rangeBar.classList.toggle("hidden", !!a.empty);
       if (a.empty) { out.replaceChildren(el("div", { class: "panel" }, el("p", { class: "muted", text: "Nothing imported yet. Download your account activity report from Robinhood and import it above." }))); return; }
       if (!from.value && a.range.start) from.value = a.range.start;
@@ -256,7 +274,7 @@ function buildTrades() {
       el("p", { class: "small muted", text: "These were opened before your imported history starts, so what they cost is unknown. They are left out of every figure, not counted as zero. Import an earlier report to include them." }),
       table([{ label: "Date", cell: u => shortDate(u.date) }, { label: "Row", cell: u => u.code }, { label: "What", cell: u => u.contract },
         { label: "Quantity", num: true, cell: u => qtyText(u.quantity) }, { label: "Amount", num: true, cell: u => isNum(u.amount) ? signedMoney(u.amount, 2) : "" }], a.unmatched)));
-    if (h && h.holdings.length) frag.append(holdingsPanel(h));
+    if (h && (h.holdings.length || (h.connection && (h.connection.error || (h.connection.compare || []).length)))) frag.append(holdingsPanel(h));
     return frag;
   }
 
@@ -293,7 +311,15 @@ function buildTrades() {
   }
 
   function holdingsPanel(h) {
-    return el("div", { class: "panel" }, el("h3", { text: "Still open, by your history" }),
+    const c = h.connection;
+    const compare = c && c.compare ? el("div", {}, el("h4", { text: "Against what Robinhood's connection says you hold now" }),
+      table([{ label: "Holding", cell: x => x.what }, { label: "Side", cell: x => x.side },
+        { label: "By your history", num: true, cell: x => isNum(x.history) ? qtyText(x.history) : el("span", { class: "muted", text: "none" }) },
+        { label: "At Robinhood", num: true, cell: x => isNum(x.robinhood) ? qtyText(x.robinhood) : el("span", { class: "muted", text: "none" }) },
+        { label: "", cell: x => x.agrees ? statusTag("pass", "Agrees") : statusTag("warn", "Differs") }], c.compare),
+      el("p", { class: "small muted", text: "A difference usually means the imported history does not reach back to when the holding was opened, or a trade since the last import." }))
+      : c && c.error ? el("p", { class: "small error", text: `Robinhood's connection: ${c.error}` }) : null;
+    return el("div", { class: "panel" }, el("h3", { text: "Still open, by your history" }), compare,
       el("p", { class: "small muted", text: h.note }),
       table([
         { label: "Holding", cell: x => el("strong", { text: x.contract }) },
