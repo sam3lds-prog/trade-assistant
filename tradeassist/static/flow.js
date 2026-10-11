@@ -59,6 +59,8 @@ const FLOW = (() => {
     if (positive(t1)) body.target_price = t1;
     if (positive(t2)) body.target_2 = t2;
     if (th.budget !== null) body.budget = th.budget;
+    // The share entry, when typed: the chance the shares are ahead is measured from it (2.5.1).
+    if (th.entry !== null) body.entry_price = th.entry;
     return body;
   }
 

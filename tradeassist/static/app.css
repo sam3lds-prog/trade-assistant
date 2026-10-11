@@ -386,6 +386,8 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .lean-score strong { min-width: 2.5em; text-align: right; }
 .lean-table td { vertical-align: middle; }
 .lean-table .status-tag { font-size: 0.8rem; }
+/* With the past-frequency column the two lists sit one above the other, so every column fits. */
+.lean-grid.with-past { grid-template-columns: minmax(0, 1fr); }
 @media (max-width: 520px) { .lean-grid { grid-template-columns: minmax(0, 1fr); } .lean-score .score-track.mini { width: 56px; } }
 
 /* 2.5: Decide, shares or a contract */
@@ -393,3 +395,4 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .compare table th { white-space: normal; vertical-align: bottom; }
 .compare td { vertical-align: top; }
 .compare td .primary { white-space: nowrap; }
+.compare .band-cell { min-width: 11.5em; }

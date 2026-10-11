@@ -171,6 +171,7 @@ class OptionsEvaluate(Strict):
     budget: float | None = Field(None, gt=0)
     expirations: list[str] | None = Field(None, max_length=6)
     earnings_date: str | None = None
+    entry_price: float | None = Field(None, gt=0)      # 2.5.1: the share entry, for the chance the shares are ahead
 
 
 class ContractRef(Strict):

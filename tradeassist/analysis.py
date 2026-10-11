@@ -488,7 +488,7 @@ class Analyst:
         out = evaluate_contracts(symbol=symbol, direction=direction, spot=spot, analyses=analyses, target_1=float(t1),
                                  target_2=float(t2), invalidation=float(inv), horizon=horizon,
                                  rate=self.svc.settings.risk_free_rate, contracts=int(req.get("contracts") or 1),
-                                 budget=req.get("budget"), earnings=earnings,
+                                 budget=req.get("budget"), earnings=earnings, entry=req.get("entry_price"),
                                  only=[(str(c["option_type"]).lower(), float(c["strike"]), str(c["expiration"]))
                                        for c in only] if only else None)
         out["levels_source"] = {"target_1": "yours" if req.get("target_price") else "suggested",

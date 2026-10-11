@@ -6,7 +6,7 @@
 const SIDE_LEAN_WORDS = { LONG: "Leaning long", SHORT: "Leaning short" };
 
 // One stock in a lean list: its trend, and its net score as a bar (length is the score's size, out of 100).
-function leanTable(rows, side) {
+function leanTable(rows, side, historyBuilt) {
   const bar = r => el("span", { class: "lean-score", title: `Bullish ${num(r.bullish_score, 0)}, bearish ${num(r.bearish_score, 0)} evidence points` },
     el("span", { class: "score-track mini" }, el("i", { class: side === "LONG" ? "pos" : "neg", style: `width:${Math.min(100, Math.abs(r.net_score))}%` })),
     el("strong", { text: `${r.net_score > 0 ? "+" : ""}${num(r.net_score, 0)}` }));
@@ -14,9 +14,13 @@ function leanTable(rows, side) {
     { label: "Stock and trend", cell: r => el("div", {}, el("strong", { text: r.symbol }), el("div", { class: "small" }, trendTag(r.state)),
       r.reversal_unread ? el("div", { class: "small muted", text: "Reversal not checked" }) : null) },
     { label: "Net score", cell: bar },
-    { label: "Day", num: true, cell: r => isNum(r.change_pct) ? signedPct(r.change_pct, 1) : null }],
+    { label: "Day", num: true, cell: r => isNum(r.change_pct) ? signedPct(r.change_pct, 1) : null },
+    // Once the signal history exists: how often stocks with a net score in this range were higher 10 days
+    // later (either side; a past frequency, not a forecast). No column at all before that.
+    ...(historyBuilt ? [{ label: "Higher 10 days later", num: true, cell: r => freqText(r.past_10d) }] : [])],
   rows, { onRow: r => state.openDecide(r.symbol, side) });
   wrap.classList.add("lean-table");
+  if (historyBuilt) wrap.classList.add("with-past");
   return wrap;
 }
 
@@ -24,14 +28,14 @@ function leanPanel(d, side) {
   const rows = side === "LONG" ? d.long : d.short, total = side === "LONG" ? d.long_total : d.short_total;
   const box = el("div", { class: "panel" }, el("h3", { text: `${SIDE_LEAN_WORDS[side]}${total > rows.length ? ` (top ${rows.length} of ${total})` : ""}` }));
   if (!rows.length) box.append(el("p", { class: "muted small", text: side === "LONG" ? "No stock leans long right now." : "No stock leans short right now." }));
-  else box.append(leanTable(rows, side), el("p", { class: "small muted", text: `Select a stock to grade a ${side === "LONG" ? "long" : "short"} thesis and find ${side === "LONG" ? "calls" : "puts"} for it.` }));
+  else box.append(leanTable(rows, side, d.history_built), el("p", { class: "small muted", text: `Select a stock to grade a ${side === "LONG" ? "long" : "short"} thesis and find ${side === "LONG" ? "calls" : "puts"} for it.` }));
   return box;
 }
 
 function renderCandidates(d, reload) {
   const frag = el("div");
   for (const n of d.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
-  frag.append(el("div", { class: "lean-grid" }, leanPanel(d, "LONG"), leanPanel(d, "SHORT")));
+  frag.append(el("div", { class: d.history_built ? "lean-grid with-past" : "lean-grid" }, leanPanel(d, "LONG"), leanPanel(d, "SHORT")));
   const nl = d.no_lean, rest = el("div", { class: "panel" });
   const parts = [];
   if (nl.balanced) parts.push(`${nl.balanced} with evidence balanced`);
@@ -44,7 +48,7 @@ function renderCandidates(d, reload) {
   if (d.errors.length) rest.append(el("p", { class: "small muted", text: `Not read: ${d.errors.map(e => `${e.symbol} (${e.error})`).join("; ")}.` }));
   if (!d.history_built && featureOn("signal_calibration")) {
     rest.append(el("p", { class: "small", text: "Past cases: the signal history has not been built, so there are no past frequencies to show yet." }), buildHistoryButton(reload));
-  } else if (d.history_built) rest.append(el("p", { class: "small muted", text: `Past cases come from the signal history built ${shortDate(d.history_run_at)}; Decide shows them for each stock.` }));
+  } else if (d.history_built) rest.append(el("p", { class: "small muted", text: `"Higher 10 days later" is how often stocks in the signal history (built ${shortDate(d.history_run_at)}) were higher 10 days after a day with a net score in the same range: a past frequency for longs and shorts alike, not a forecast.` }));
   rest.append(el("p", { class: "small muted", text: `${d.universe_text} ${d.rule}` }));
   frag.append(rest);
   return frag;
@@ -117,15 +121,14 @@ function buildToday() {
 // Run by the thesis form on Analyze once the grade and the contracts are in (v2.js thesisSection).
 const DECIDE_AFTER = [];
 
-// What option prices imply a position is worth in expectation, next to what it costs. `pnl` is that worth
-// less the cost, from the whole distribution (server side); null is unknown, never $0.
-function expectationText(pnl, paid, received, note = "") {
-  if (!isNum(pnl) || !isNum(paid)) return el("span", { class: "muted", text: "unknown" });
-  const worth = received ? paid - pnl : paid + pnl;
-  const near = Math.abs(pnl) < Math.max(1, 0.01 * Math.abs(paid));
-  const gap = near ? "about $0" : signedMoney(pnl, 0);
-  return el("span", {}, received ? `${money(worth, 0)} to buy back against ${money(paid, 0)} received${note}` : `${money(worth, 0)} against ${money(paid, 0)} paid${note}`,
-    el("span", { class: "muted", text: ` (${gap})` }));
+// The spread of outcomes on the horizon date that option prices imply (2.5.1): the profit or loss at the
+// 10th, 50th and 90th percentile stock price of one distribution. The middle one, and the range nine in ten
+// fall in. Any missing piece makes the whole band unknown, never $0.
+function bandText(pnls) {
+  if (!pnls || pnls.length !== 3 || !pnls.every(isNum)) return el("span", { class: "muted", text: "unknown" });
+  const [a, mid, b] = pnls, lo = Math.min(a, b), hi = Math.max(a, b);
+  return el("div", { class: "band-cell" }, el("strong", { text: signedMoney(mid, 0) }), el("span", { class: "muted", text: " middle outcome" }),
+    el("div", { class: "small", text: `Nine in ten between ${signedMoney(lo, 0)} and ${signedMoney(hi, 0)}` }));
 }
 
 // A chance that rounds to 0% or 100% is still a measured one: say how small or large, not "0%".
@@ -135,19 +138,17 @@ function compareRows(dec) {
   const g = dec.grade, o = dec.options, m = o.market, lv = g.levels, entry = g.entry;
   const dir = g.direction === "LONG" ? 1 : -1, n = g.sizing.shares, date = shortDate(o.thesis.horizon_date);
   const rows = [];
-  // Both rows read the chance of being ahead on the horizon date from the same distribution; for the shares
-  // that is bought (or sold short) at today's price, and the expected figure is from today's price too, so a
-  // typed entry below the market never shows up as an expected gain.
-  const spot = o.thesis.spot, atSpot = Math.abs(entry - spot) < 0.005 * spot;
+  // The share trade has one price, the grade's entry (yours, or today's when the box was blank): every share
+  // dollar and the chance of being ahead are measured from it (the option request carries a typed entry).
   const ahead = m && isNum(m.stock_profit_at_horizon) ? `${chanceText(m.stock_profit_at_horizon)} chance of a profit on ${date}` : null;
   const past = m && isNum(m.reach_target_1_by_horizon) ? `${chanceText(m.reach_target_1_by_horizon)} past target 1` : null;
+  const pc = m && m.stock_percentiles_at_horizon;
   rows.push(n > 0 ? {
     kind: "shares", name: `${num(n, 0)} share${n === 1 ? "" : "s"} ${dir > 0 ? "long" : "short"} at ${money(entry)}`,
     sub: `Sized for ${money(g.sizing.risk_budget, 0)} at risk to the invalidation`,
     pay: n * entry, received: dir < 0, atTarget: dir * n * (lv.target_1 - entry), ifInvalid: dir * n * (lv.invalidation - entry),
-    chance: ahead ? `${ahead}${atSpot ? "" : ` if bought at today's ${money(spot)}`}${past ? `; ${past}` : ""}` : null,
-    ev: m && isNum(m.expected_price_at_horizon) ? dir * n * (m.expected_price_at_horizon - spot) : null,
-    evPaid: n * spot, evNote: atSpot ? "" : ` at today's ${money(spot)}`,
+    chance: ahead ? `${ahead}${past ? `; ${past}` : ""}` : null,
+    band: pc && ["p10", "p50", "p90"].every(k => isNum(pc[k])) ? ["p10", "p50", "p90"].map(k => dir * n * (pc[k] - entry)) : null,
     line: p => dir * n * (p - entry),
   } : { kind: "shares", name: "Shares", sub: `No whole share fits the ${money(g.sizing.risk_budget, 0)} risk budget: ${money(g.sizing.risk_per_share)} at risk per share.`, empty: true });
   const pick = o.picks.find(x => x.category === "BEST RISK-ADJUSTED") || o.picks[0];
@@ -156,7 +157,7 @@ function compareRows(dec) {
     rows.push({ kind: "contract", k, name: contractName(k), sub: `${qty} contract${qty === 1 ? "" : "s"} at the ${money(k.mid)} mid · the ${pick.category.toLowerCase()} pick below`,
       pay: k.premium, received: false, atTarget: k.at_target, ifInvalid: k.if_invalidated,
       chance: isNum(k.market_implied_profit_at_horizon) ? `${chanceText(k.market_implied_profit_at_horizon)} chance of a profit on ${date}` : null,
-      ev: k.implied_expected_pnl_at_horizon });
+      band: [k.implied_pnl_p10_at_horizon, k.implied_pnl_p50_at_horizon, k.implied_pnl_p90_at_horizon] });
   }
   return rows;
 }
@@ -230,7 +231,7 @@ function pastCasesLine(g, reload) {
 function comparePanel(dec, rerun) {
   const rows = compareRows(dec), o = dec.options, date = shortDate(o.thesis.horizon_date);
   const box = el("div", { class: "compare" }, el("h3", { text: "Shares or a contract" }),
-    el("p", { class: "small muted", text: `Both on your levels, valued on ${date}. Chances and the expected figure are what option prices imply; past cases are counted apart. None of them is a forecast.` }));
+    el("p", { class: "small muted", text: `Both on your levels, valued on ${date}. The chances and the outcomes are what option prices imply; past cases are counted apart. None of them is a forecast.` }));
   const actions = r => {
     if (r.kind !== "contract") return "";
     return limitButton(o.symbol, r.k, o.thesis.contracts);
@@ -241,7 +242,7 @@ function comparePanel(dec, rerun) {
     { label: "At target 1", num: true, cell: r => r.empty ? "" : signedMoney(r.atTarget, 0) },
     { label: "If invalidated", num: true, cell: r => r.empty ? "" : signedMoney(r.ifInvalid, 0) },
     { label: "Option prices imply", cell: r => r.empty ? "" : r.chance || el("span", { class: "muted", text: "unknown" }) },
-    { label: "What option prices imply it is worth in expectation", cell: r => r.empty ? "" : expectationText(r.ev, r.evPaid ?? r.pay, r.received, r.evNote || "") },
+    { label: `Outcome on ${date}, option prices imply`, cell: r => r.empty ? "" : bandText(r.band) },
     { label: "", cell: actions }], rows));
   const chart = el("div", {}, el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Drawing both on one chart…" })));
   box.append(chart);
@@ -270,7 +271,10 @@ function comparePanel(dec, rerun) {
     }));
     box.append(el("div", { class: "row", style: "margin-top:8px" }, mcBtn), mcErr, mcOut);
   }
-  box.append(el("p", { class: "small muted", text: "Close to what you pay by construction: each contract is read on the volatility its own price implies, and the stock on the at-the-money one, so what remains is carry to the horizon and rounding. It is not an edge." }));
+  // On average a contract is worth about what it costs, by construction; said once here, not as a column.
+  const k = c && c.k;
+  const avg = k && isNum(k.implied_value_at_horizon) ? ` Averaged over every outcome, option prices imply the ${contractName(k)} is worth ${money(k.implied_value_at_horizon, 0)} on ${date} against ${money(k.premium, 0)} paid:` : " Averaged over every outcome, a contract is worth";
+  box.append(el("p", { class: "small muted", text: `The middle outcome is the 50th percentile, and nine in ten outcomes fall between the 10th and the 90th.${avg} about what you pay, by construction, since each contract is read on the volatility its own price implies. It is not an edge.` }));
   return box;
 }
 
@@ -291,7 +295,7 @@ DECIDE_AFTER.push((out, dec) => {
   const plan = { horizonDate: o.thesis.horizon_date, horizonDays: dec.thesis.horizonDays,
     levels: [{ label: "Target 1", price: g.levels.target_1, color: "--div-pos" }, { label: "Target 2", price: g.levels.target_2, color: "--div-pos", dash: "5 4" },
       { label: "Invalidation", price: g.levels.invalidation, color: "--div-neg" }],
-    band: m && m.range_1sd_at_horizon, breakeven: k && isNum(k.breakeven_at_horizon) ? { label: "Breakeven", legend: `Where the ${contractName(k)} breaks even then`, price: k.breakeven_at_horizon } : null };
+    band: m && m.range_1sd_at_horizon, atmExpiration: m && m.atm_expiration, breakeven: k && isNum(k.breakeven_at_horizon) ? { label: "Breakeven", legend: `Where the ${contractName(k)} breaks even then`, price: k.breakeven_at_horizon } : null };
   old.replaceWith(trendHistoryChart(old.trend, plan));
 });
 

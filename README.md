@@ -69,7 +69,7 @@ up to eight stocks leaning long and eight leaning short. Pick one and **Analyze 
 (Decide) opens with that direction, grades the stock trade and finds calls or puts on the same
 levels from one thesis form. It sets the sized shares beside the best risk-adjusted contract:
 what each costs, makes at the target and loses if wrong, the chance option prices imply, and
-what option prices imply each is worth in expectation next to what you pay. The trend chart
+the middle outcome with the range nine in ten outcomes fall in on your horizon date. The trend chart
 then runs on to your horizon date with the levels, the range option prices imply and where
 the contract breaks even. **Set the limit** on any contract opens Price an option on it,
 already priced on the limit ladder. Scanner rows open Decide too. The menu is grouped Today,
@@ -382,7 +382,9 @@ bull market) or when the opposite reversal is under way (a top at "potential" or
 holds back a long; a bottom holds back a short). Held-back stocks are counted, with the
 reason for each. Scores count evidence; they are not chances. Choosing a stock opens
 Decide with that direction. When the signal history is not built yet, the screen says so and
-offers to build it. Switch it off with `FEATURE_TODAY=0`.
+offers to build it; once it is built, each row adds how often stocks with a score in the same
+range were higher 10 days later (a past frequency for longs and shorts alike, not a forecast).
+Switch it off with `FEATURE_TODAY=0`.
 
 Six screens are new or extended. Each part can be switched off in `.env` (see the end of
 `.env.example`); the classic screens work as before.
@@ -405,12 +407,14 @@ and find a contract**:
 2. Finds calls (long) or puts (short) on the same levels: the best match, cheapest, best
    risk-adjusted and most conservative contracts, and the ones to avoid.
 3. Sets **shares or a contract** side by side: what you pay, the result at target 1 and if
-   invalidated, the chance option prices imply of a profit on the horizon date, and what
-   option prices imply each is worth in expectation next to what you pay.
+   invalidated, the chance option prices imply of a profit on the horizon date, and the
+   outcome then: the middle one, and the range nine in ten fall in.
 
-That last figure is worked out over every stock price option prices allow, not just the target
-and the stop, so it comes out close to what you pay: options are priced fairly against
-themselves. It is not an edge. Past cases (once the signal history is built) and the Monte
+The share figures all start from your entry (or today's price when you leave it blank). The
+outcomes come from the 10th, 50th and 90th percentile stock prices of one distribution, never
+from the target and the stop alone. Averaged over every outcome, a contract is worth about
+what you pay, since options are priced fairly against themselves; the panel says so once, and
+that it is not an edge. Past cases (once the signal history is built) and the Monte
 Carlo path range (the same model) are shown apart, never blended into one number. The
 trend chart then runs on to the horizon date with the targets, the invalidation, the range
 option prices imply by then and where the contract breaks even. **Set the limit** on any
