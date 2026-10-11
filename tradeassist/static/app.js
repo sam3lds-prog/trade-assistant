@@ -409,7 +409,33 @@ function buildPrice() {
         field("Order", side), field("Contracts", contracts), field("Next earnings date (if you know it)", earnings), go),
       note, error),
     out);
-  loadExpirations();
+  // Arrive on a contract chosen elsewhere (2.5): fill the form and price it, so the limit ladder is the
+  // first thing shown. Changing the type or expiration afterwards reloads the strikes as usual.
+  view.loadContract = async spec => {
+    error.textContent = "";
+    const pick = (seg, v) => { const input = seg.querySelector(`input[value="${v}"]`); if (input) input.checked = true; };
+    sym.value = spec.symbol;
+    pick(type, spec.option_type); pick(side, spec.side || "buy");
+    contracts.value = String(spec.contracts || 1);
+    if (spec.symbol !== loadedFor) await loadExpirations();
+    if (!loadedFor) return;                             // loading failed; the error is already shown
+    if (expiry.value !== spec.expiration) {
+      if (![...expiry.options].some(o => o.value === spec.expiration)) {
+        error.textContent = `${spec.expiration} is no longer a listed ${spec.symbol} expiration. Choose one above.`;
+        return;
+      }
+      expiry.value = spec.expiration;
+      await loadStrikes();
+    } else fillStrikes();
+    const wanted = [...strike.options].find(o => Number(o.value) === Number(spec.strike));
+    if (!wanted) { error.textContent = `The ${spec.strike} ${spec.option_type} is not listed for ${shortDate(spec.expiration)}. Choose a strike above.`; return; }
+    strike.value = wanted.value;
+    go.click();
+  };
+  const pending = state.pendingPrice;
+  state.pendingPrice = null;
+  if (pending) view.loadContract(pending);
+  else loadExpirations();
   return view;
 }
 
@@ -1569,6 +1595,11 @@ const BUILDERS = { price: buildPrice, simulate: buildSimulate, research: buildRe
 state.openSimulation = (symbol, legs) => {
   if (state.views.simulate) { show("simulate"); state.views.simulate.loadPosition(symbol, legs); }
   else { state.pendingSim = { symbol, legs }; show("simulate"); }
+};
+// Open Price an option on a contract and price it straight away (2.5). `spec` comes from FLOW.pricingRequest.
+state.openPricing = spec => {
+  if (state.views.price) { show("price"); state.views.price.loadContract(spec); }
+  else { state.pendingPrice = spec; show("price"); }
 };
 state.refreshJournal = async () => {};
 // Started once every script on the page has run, so later scripts (v2.js) can add screens to BUILDERS.

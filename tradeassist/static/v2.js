@@ -532,7 +532,7 @@ function buildAnalyze() {
   go.addEventListener("click", run);
   sym.addEventListener("keydown", e => { if (e.key === "Enter") run(); });
   const view = el("section", {}, el("h2", { text: "Analyze a stock" }),
-    el("p", { class: "lede", text: "The trend state and every piece of evidence behind it, how settled it is, and how the stock is doing against the market and its sector. Scores count evidence; they are not chances of anything." }),
+    el("p", { class: "lede", text: "Which way the stock is trending and why, then your thesis: the stock trade graded, and calls or puts that fit it. Scores count evidence; they are not chances." }),
     el("div", { class: "panel" }, el("div", { class: "row" }, field("Ticker", sym), go), error), out);
   view.analyze = symbol => { sym.value = symbol; run(); };
   return view;
@@ -793,23 +793,78 @@ function gradeCard(ev) {
   return box;
 }
 
-function evaluateSection(d) {
-  const dir = segmented(`evdir${++uid}`, [["LONG", "Long"], ["SHORT", "Short"]], (d.trend.provisional || d.trend.confirmed).state.includes("DOWN") ? "SHORT" : "LONG");
-  const entry = numInput({ placeholder: "now" }), inv = numInput({ placeholder: "suggest" }), t1 = numInput({ placeholder: "suggest" }), t2 = numInput({ placeholder: "suggest" });
-  const horizon = el("input", { type: "number", min: 1, max: 260, step: 1, value: 20 });
-  const go = el("button", { class: "primary", text: "Grade it" });
+// One thesis for the whole decision (2.5): Today and the scanner set the ticker and direction, this form
+// carries the levels, and the stock grade and the contract picker both read it. Kept in the page only.
+state.thesis = null;
+state.openDecide = (symbol, direction, hint) => {
+  state.thesis = FLOW.thesis({ ...(state.thesis && state.thesis.symbol === symbol ? state.thesis : {}), symbol, direction: direction || "LONG" });
+  state.decideHint = hint || "run";
+  show("analyze");
+  state.views.analyze.analyze(symbol);
+};
+
+function thesisSection(d) {
+  const now = d.trend.provisional || d.trend.confirmed;
+  const kept = state.thesis && state.thesis.symbol === d.symbol ? state.thesis : null;
+  const th = kept || FLOW.thesis({ symbol: d.symbol, direction: now.state.includes("DOWN") ? "SHORT" : "LONG" });
+  const dir = segmented(`thdir${++uid}`, [["LONG", "Long (shares or calls)"], ["SHORT", "Short (shares or puts)"]], th.direction);
+  const box = (v, placeholder) => numInput({ placeholder, value: v === null ? "" : String(v) });
+  const entry = box(th.entry, "now"), inv = box(th.invalidation, "suggest"), t1 = box(th.target1, "suggest"), t2 = box(th.target2, "suggest");
+  const horizon = el("input", { type: "number", min: 1, max: 260, step: 1, value: th.horizonDays });
+  const qty = el("input", { type: "number", min: 1, max: 500, step: 1, value: th.contracts });
+  const budget = box(th.budget, "none");
+  budget.step = "1";
+  const go = el("button", { class: "primary", text: "Grade and find a contract" });
   const err = el("div", { class: "error", role: "alert" });
   const out = el("div");
+  const read = () => FLOW.thesis({ symbol: d.symbol, direction: dir.value(), entry: optNum(entry), invalidation: optNum(inv),
+    target1: optNum(t1), target2: optNum(t2), horizonDays: horizon.value, contracts: qty.value, budget: optNum(budget) });
+  const remember = () => { state.thesis = read(); };
+  for (const input of [entry, inv, t1, t2, horizon, qty, budget]) input.addEventListener("change", remember);
+  dir.addEventListener("change", () => {
+    // Suggested levels belong to one direction; typed ones are kept.
+    for (const input of [inv, t1, t2]) input.placeholder = "suggest";
+    remember();
+  });
+  const showSuggested = lv => {
+    for (const [input, v] of [[inv, lv.invalidation], [t1, lv.target_1], [t2, lv.target_2]]) {
+      input.placeholder = input.value === "" && isNum(v) ? `${num(v, 2)} suggested` : "suggest";
+    }
+  };
   go.addEventListener("click", () => withBusy(go, err, async () => {
-    const body = { symbol: d.symbol, direction: dir.value(), horizon_days: Math.round(Number(horizon.value) || 20) };
-    for (const [k, input] of [["entry_price", entry], ["invalidation_price", inv], ["target_1", t1], ["target_2", t2]]) { const v = optNum(input); if (v !== null) body[k] = v; }
-    out.replaceChildren(gradeCard(await api("/v2/position/evaluate", body)));
+    const t = read();
+    state.thesis = t;
+    out.classList.add("refetching");
+    try {
+      // The grade settles the levels (yours, or suggested from the chart); the picker then uses the same ones.
+      const grade = await api("/v2/position/evaluate", FLOW.gradeRequest(t));
+      showSuggested(grade.levels);
+      const card = el("div", {}, gradeCard(grade));
+      const picks = el("div", {}, el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Valuing contracts across expirations…" })));
+      out.replaceChildren(card, el("h4", { text: `${t.direction === "LONG" ? "Calls" : "Puts"} for this thesis` }), picks);
+      try {
+        const opts = await api("/v2/options/evaluate", FLOW.optionsRequest(t, grade.levels));
+        // The picker was handed the grade's levels; say where they came from, as the grade does.
+        if (opts.levels_source) Object.assign(opts.levels_source, { target_1: grade.levels.targets_source, invalidation: grade.levels.invalidation_source });
+        picks.replaceChildren(renderOptionsEval(opts));
+        state.decision = { thesis: t, grade, options: opts };
+        if (typeof DECIDE_AFTER !== "undefined") for (const hook of DECIDE_AFTER) { try { hook(out, state.decision); } catch (e) { console.error(e); } }
+      } catch (e) { picks.replaceChildren(el("p", { class: "small error", text: `Contracts: ${e.message}` })); }
+    } finally { out.classList.remove("refetching"); }
   }));
-  return el("div", { class: "panel" }, el("h3", { text: "Grade a stock trade" }),
-    el("p", { class: "small muted", text: "Leave a price blank and it is suggested from the chart: the invalidation beyond the last swing, targets at the support or resistance in the way." }),
-    el("div", { class: "inline-form" }, field("Direction", dir), field("Entry", entry), field("Invalidation", inv), field("Target 1", t1), field("Target 2", t2), field("Holding days", horizon), go), err, out);
+  const panel = el("div", { class: "panel thesis" }, el("h3", { text: "Your thesis" }),
+    el("p", { class: "small muted", text: "Which way, where it is wrong, where it should get to, and by when. Leave a price blank and it is suggested from the chart. One button grades the stock trade and finds calls or puts for the same levels." }),
+    el("div", { class: "inline-form" }, field("Direction", dir), field("Entry", entry), field("Invalidation", inv), field("Target 1", t1), field("Target 2", t2),
+      field("Holding days", horizon), field("Contracts", qty), field("Option budget ($)", budget), go), err, out);
+  // Arriving from Today or the scanner with a direction set: run it straight away and bring it into view.
+  const hint = state.decideHint;
+  state.decideHint = null;
+  if (kept && hint) {
+    setTimeout(() => { go.click(); panel.scrollIntoView({ behavior: "smooth", block: "start" }); }, 0);
+  }
+  return panel;
 }
-ANALYSIS_SECTIONS.push(evaluateSection);
+ANALYSIS_SECTIONS.push(thesisSection);
 
 /* ---------- choosing a call or put for the thesis ---------- */
 function optionsSection(d) {
@@ -833,7 +888,14 @@ function optionsSection(d) {
     el("p", { class: "small muted", text: "The thesis is about the stock: where it should get to, by when, and the price that would prove it wrong. Leave prices blank to use the suggested levels." }),
     el("div", { class: "inline-form" }, field("Thesis", dir), field("Stock target", target), field("Invalidation (stock)", inv), field("By (trading days)", horizon), field("Contracts", qty), field("Budget ($)", budget), go), err, out);
 }
-ANALYSIS_SECTIONS.push(optionsSection);
+// 2.5: the thesis form above replaces this form on the page; renderOptionsEval is shared.
+
+// Opens Price an option on this contract, already priced, on the limit ladder (2.5).
+function limitButton(symbol, k, contracts) {
+  const b = el("button", { class: "primary small-btn", text: "Set the limit" });
+  b.addEventListener("click", () => state.openPricing(FLOW.pricingRequest(symbol, k, contracts, "buy")));
+  return b;
+}
 
 function contractName(k) { return `${shortDate(k.expiration)} ${num(k.strike, k.strike % 1 ? 2 : 0)} ${k.option_type.toLowerCase()}`; }
 
@@ -859,11 +921,12 @@ function renderOptionsEval(r) {
         thesis: `${th.direction === "BULLISH" ? "Bullish" : "Bearish"}: ${r.symbol} to ${money(th.target_1)} by ${shortDate(th.horizon_date)}. ${r.exit_rule}` });
       note.textContent = `Saved as planned position ${p.id}.`;
     }));
+    const limit = limitButton(r.symbol, k, th.contracts);
     cards.append(el("div", { class: "pick" }, el("div", { class: "pick-cat", text: pk.category }), el("div", { class: "pick-name", text: contractName(k) }),
       el("div", { class: "small", text: `${money(k.mid)} mid · ${money(k.premium, 0)} for ${th.contracts} · delta ${num(k.delta, 2)}` }),
       el("div", { class: "small", text: `At target: ${signedMoney(k.at_target)} · if invalidated: ${signedMoney(k.if_invalidated)}` }),
       el("p", { class: "small muted", text: pk.why }), k.flags.length ? el("ul", { class: "plain small" }, k.flags.map(f => el("li", {}, statusTag("warn", "Caution"), ` ${f}`))) : null,
-      el("div", { class: "row" }, sim, track), note));
+      el("div", { class: "row" }, limit, sim, track), note));
   }
   frag.append(cards);
   const usable = r.contracts.filter(k => k.usable);
@@ -1631,7 +1694,7 @@ function scoredContractCard(k, o, full) {
       thesis: `${revWord(o.side, o.setup.stage)} on ${o.symbol}: to ${money(th.target_1)} (${th.target_1_is}) by ${shortDate(th.horizon_date)}. Scored ${num(sc.score, 0)} (${sc.verdict}). ${o.exit_rule}` });
     note.textContent = `Saved as planned position ${p.id}.`;
   }));
-  buttons.append(simBtn, track);
+  buttons.append(limitButton(o.symbol, k, th.contracts), simBtn, track);
   box.append(buttons, note);
   if (full && k.simulation && !k.simulation.error) {
     box.append(el("h4", { text: `Simulation to ${shortDate(k.simulation.eval_date)} and at expiration` }), renderSimulation(k.simulation));

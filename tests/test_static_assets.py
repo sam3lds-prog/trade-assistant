@@ -15,12 +15,13 @@ import socket
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
-SCRIPTS = ("app.js", "v2.js", "lab.js")                 # in the order index.html loads them
+SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js")                 # in the order index.html loads them
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -73,8 +74,9 @@ def _browser():
     return str(path) if path.exists() else ""
 
 
-@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
-def test_every_screen_opens_without_a_script_error(tmp_path):
+@contextmanager
+def demo_page(tmp_path):
+    """The app on demo data in a real Chromium page; yields (page, script errors)."""
     import uvicorn
     from playwright.sync_api import sync_playwright
 
@@ -106,18 +108,55 @@ def test_every_screen_opens_without_a_script_error(tmp_path):
                 pytest.skip(f"Chromium could not start: {exc}")
             page = browser.new_page(viewport={"width": 1280, "height": 900})
             page.on("pageerror", lambda e: errors.append(str(e)))
-            page.goto(f"http://127.0.0.1:{port}/")
-            page.wait_for_function("document.querySelectorAll('#main > section').length > 0", timeout=20000)
-            views = page.eval_on_selector_all(".rail button.nav:not(.hidden)", "bs => bs.map(b => b.dataset.view)")
-            assert {"positions", "portfolio", "health", "lab", "scanner", "market"} <= set(views)
-            for v in views:
-                page.click(f'.rail button.nav[data-view="{v}"]')
-                page.wait_for_timeout(400)
-            page.click('.rail button.nav[data-view="health"]')
-            page.wait_for_selector("text=Data source", timeout=20000)
+            page.base = f"http://127.0.0.1:{port}/"
+            yield page, errors
             browser.close()
     finally:
         server.should_exit = True
         thread.join(timeout=10)
         svc.db.close()
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_every_screen_opens_without_a_script_error(tmp_path):
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base)
+        page.wait_for_function("document.querySelectorAll('#main > section').length > 0", timeout=20000)
+        views = page.eval_on_selector_all(".rail button.nav:not(.hidden)", "bs => bs.map(b => b.dataset.view)")
+        assert {"positions", "portfolio", "health", "lab", "scanner", "market"} <= set(views)
+        for v in views:
+            page.click(f'.rail button.nav[data-view="{v}"]')
+            page.wait_for_timeout(400)
+        page.click('.rail button.nav[data-view="health"]')
+        page.wait_for_selector("text=Data source", timeout=20000)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
+    """2.5: Decide's one form grades the stock and picks contracts; Set the limit opens that contract priced."""
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#analyze")
+        page.click("section:not([hidden]) button.primary:text-is('Analyze')")
+        page.wait_for_selector("text=Your thesis", timeout=30000)
+        page.click("text=Grade and find a contract")
+        page.wait_for_selector(".panel.thesis .pick", timeout=60000)
+        assert page.locator(".panel.thesis .grade-title, .panel.thesis .grade").count() >= 1
+        card = page.locator(".panel.thesis .pick").first
+        chosen = page.evaluate("""() => {
+          const k = state.decision.options.picks[0].contract;
+          return { strike: k.strike, expiration: k.expiration, type: k.option_type.toLowerCase(), symbol: state.decision.options.symbol };
+        }""")
+        card.locator("text=Set the limit").click()
+        page.wait_for_selector("text=Simulate this trade", timeout=30000)
+        assert page.evaluate("location.hash") == "#price"
+        form = page.evaluate("""() => {
+          const v = state.views.price, pick = label => [...v.querySelectorAll("label.field, div.field")]
+            .find(f => f.firstChild.textContent === label);
+          return { symbol: v.querySelector("input.sym").value, expiration: pick("Expiration").querySelector("select").value,
+                   strike: Number(pick("Strike").querySelector("select").value),
+                   type: v.querySelector('input[name="ptype"]:checked').value, side: v.querySelector('input[name="pside"]:checked').value };
+        }""")
+        assert form == {"symbol": chosen["symbol"], "expiration": chosen["expiration"], "strike": chosen["strike"],
+                        "type": chosen["type"], "side": "buy"}
     assert errors == []
