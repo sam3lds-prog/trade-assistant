@@ -75,6 +75,18 @@ the contract breaks even. **Set the limit** on any contract opens Price an optio
 already priced on the limit ladder. Scanner rows open Decide too. The menu is grouped Today,
 Find, Decide, Price & simulate, Hold, Learn and Trust.
 
+Version 2.6 adds **My trades** (under Learn): your Robinhood history, imported from the
+account activity report and analysed on this computer. For any dates you pick it shows:
+
+- the results by week, month, quarter or year;
+- the strategies you used and the risk each carried, with the riskiest first;
+- open risk over time;
+- the kinds of trade that went better or worse than your average.
+
+Every trade opens to the statement rows it was built from, so each figure can be checked
+against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
+orders and holdings through the Robinhood connection, read-only.
+
 ## Start it
 
 Needs Python 3.11 or newer (built and tested on 3.13 with pandas 3 and numpy 2).
@@ -221,7 +233,24 @@ Other things to know:
 - Every listed strike of an expiration is loaded and offered, as on Robinhood's own
   screen. Only an unusually long ladder (over 600 contracts) is cut to strikes
   within 50% of the stock price.
-- Earnings dates, news and your positions are not read from Robinhood.
+- Earnings dates and news are not read from Robinhood. Your past orders and holdings are
+  read only if you set `ROBINHOOD_ACCOUNT_READ=1` (for My trades; see below).
+
+**Reading your orders and holdings (2.6, optional, off by default).**
+
+- **Switching it on.** With `ROBINHOOD_ACCOUNT_READ=1` in `.env` (and `DATA_MODE=robinhood`),
+  My trades can read your filled orders and current holdings through the connection.
+- **What it may call.** Only tools named exactly `get_equity_positions`,
+  `get_stock_positions`, `get_option_positions`, `get_equity_orders`, `get_stock_orders` and
+  `get_option_orders`. Balances, account numbers, bank links, documents and every tool that
+  acts are still refused by name.
+- **What counts.** Only filled quantity counts. Days your imported report covers use the
+  report, which has the fees.
+- **Option orders may be missing.** Robinhood's connection may offer share orders only. The
+  account activity report has your option trades.
+- **The check.** Run `python run.py --robinhood-check` with it on, and the check records the
+  shape of each account reply (field names and types, never values) so the reader can be
+  matched to it.
 
 ## How to use it with Robinhood
 
@@ -367,6 +396,60 @@ far across the spread you bid; results by pattern present at entry; results with
 and without rule overrides.
 
 ## Version 2
+
+**My trades (2.6).** Your Robinhood trading history, analysed. Switch it off with
+`FEATURE_TRADE_HISTORY=0`.
+
+1. In Robinhood, open Reports and statements > Account activity report > Generate new report.
+   Pick the account and the dates; from when you started trading is best. Robinhood says it
+   takes about 2 hours, and up to 24.
+2. Download the CSV and import it on My trades. A later report adds only the rows not already
+   there.
+3. Pick the dates: a preset (the last 30 or 90 days, this year, the last 12 months, last year,
+   all history) or your own. Then choose how to group, and whether the dates mean when trades
+   closed or when they opened.
+
+The screen then shows:
+
+- **The range:** the result after fees, trades won (with a range), profit factor, the deepest
+  fall from a high, and the most at risk at once.
+- **By period:** a bar for each period. Click one to look closer.
+- **Strategies and the risk each carried:** most exposure first. Unlimited risk (an uncovered
+  call, short shares) is counted on its own, never as zero. Dollar-days at risk weigh risk by
+  how long it was held.
+- **Open risk over time.**
+- **What went better and worse than usual:** each kind of trade against your average, by:
+  - strategy;
+  - days held;
+  - days to expiration;
+  - how options ended;
+  - where the strike was;
+  - size against your usual;
+  - weekday;
+  - right after a loss;
+  - how familiar the stock was.
+
+  These are counts of your own trades with how many each rests on, not forecasts.
+- **Every trade:** select one to see its legs and the statement rows exactly as in the report.
+- **What the history says you still hold:** compared with Robinhood's own list when the
+  connection is on. An option on it has **Price it to close**.
+
+Rebuilding the trades from the report:
+
+- Lots close first in, first out.
+- Each result comes from the cash in the report, fees included.
+- An assignment's shares stay with the option's trade.
+- Splits and reverse splits are applied.
+
+What is unknown stays unknown:
+
+- A close of something opened before the history starts is listed and left out.
+- An option past expiration with no row saying how it ended is marked unresolved.
+- Rows the app cannot read are listed with the reason, never guessed.
+
+The file stays on this computer, in the app's database. Nothing about the account goes to
+the AI. Only ticker symbols are used, to look up prices. In demo mode a made-up sample report
+can be loaded to try the screen.
 
 **Today (2.5).** The landing screen, unless the address names another one. It shows:
 
@@ -534,6 +617,18 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
 - 2.3.1: two independent reviewers checked 2.1.0 to 2.3.0 for accounting, data loss,
   look-ahead and security; the 27 findings were reproduced, fixed and given regression tests
   (`tests/test_review_fixes.py`; listed in `docs/IMPROVEMENTS.md`).
+- 2.6 (My trades), on hand-made reports in Robinhood's layout:
+  - FIFO results from the cash columns;
+  - expirations, assignments, exercises, splits and reverse splits;
+  - each strategy's risk;
+  - date ranges by close and by open;
+  - overlapping imports kept once and removed safely;
+  - the connection reads refused unless switched on, and never an order tool.
+
+  Two independent reviews found 25 problems, all fixed with tests (`docs/IMPROVEMENTS.md`).
+  The real Robinhood report and the connection's real order replies have not been seen by
+  the tests: if an import lists unreadable rows, or the check shows unexpected reply shapes,
+  send the message or the capture file.
 
 Not checked, because this build environment could not reach any of these services:
 
@@ -623,6 +718,9 @@ tradeassist/
                            volatility.py lab.py (options lab), strategies.py (strategy builder)
   scanner.py               technical signals and options activity across many stocks
   today.py                 which stocks lean long or short today, and why some are held back (2.5)
+  tradehistory.py          your Robinhood history: the report's parser, imports, the sample (2.6)
+  tradeanalysis.py         trades rebuilt from it; strategies, risk, periods and patterns (2.6)
+  robinhood_account.py     optional read of your orders and holdings through the connection (2.6)
   makeup.py news.py        the market's make-up; headlines and their tone
   ai.py briefs.py          the AI plug-in (Anthropic API) and what it is asked
   portfolio.py analytics.py alerts.py   portfolio risk, journal analytics, alerts
@@ -630,9 +728,10 @@ tradeassist/
   analysis.py api_v2.py    the version 2 operations and the /v2 HTTP API
   versions.py              version labels recorded with every result
   static/                  the web page: flow.js (2.5 pure helpers, tested under Node), app.js classic screens,
-                           v2.js version 2 screens, lab.js 2.4 screens, decide.js Today and Decide (2.5)
+                           v2.js version 2 screens, lab.js 2.4 screens, decide.js Today and Decide (2.5),
+                           trades.js My trades (2.6)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
-docs/IMPROVEMENTS.md       the 2.1.1 to 2.5 engineering record: defects found, tests, reports
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.6 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```
