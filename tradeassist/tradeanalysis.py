@@ -3,13 +3,16 @@
 **Rebuilding trades.** The kept rows (tradehistory.py) are replayed oldest first. Opening rows (Buy, BTO,
 STO) open lots; closing rows close them first in, first out: Sell and STC close bought lots, BTC closes
 sold ones; an expiration closes the contract's lots at no value; an assignment closes the sold option at
-no value (the shares it delivers come as their own Buy or Sell row); an exercise does the same for a
-bought option. A split scales the open lots of that stock. Every closed piece has a result from the cash
-actually paid and received (the Amount column, fees included), never from a price guess, unless the row
-had no amount (then price x quantity, marked as estimated).
+no value, and the shares it delivers (that day's Buy or Sell row in the stock) join the same trade; an
+exercise does the same for a bought option. A split scales the open lots of that stock (a reverse split's
+negative quantity takes shares away). Every closed piece has a result from the cash actually paid and
+received (the Amount column, fees included; it can be below zero when fees exceed the proceeds), never
+from a price guess, unless the row had no amount (then price x quantity, marked as estimated). The report
+has no times, so a close that finds nothing open is tried again after that day's opens.
 
 A closing row with nothing open to close was opened before the imported history starts. Its result is
-unknown and is left out and listed, never counted as zero.
+unknown and is left out and listed, never counted as zero. An option past its expiration with no row
+saying how it ended is "unresolved": its result is unknown, and its risk ends at the expiration.
 
 **Strategies.** Legs opened on the same day in the same stock are read as one trade (the report has no
 times, so two separate ideas opened the same day in one stock are read as one). The legs name it: shares,

@@ -18,6 +18,85 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.6.0
+
+**My trades** (new, under Learn) reads your Robinhood history and shows how your trading has
+gone.
+
+- **Requirements.**
+  - Two migrations: 11 and 12. The database is copied before they run.
+  - One new flag, `FEATURE_TRADE_HISTORY`, on by default.
+  - One new setting, `ROBINHOOD_ACCOUNT_READ`, off by default.
+  - No new dependency.
+- **Safety.** Nothing can place, change or cancel an order. Nothing about your account is
+  sent to the AI.
+
+**Where the history comes from.**
+
+- **Robinhood's account activity report.** This CSV is the complete source: shares and
+  options, with fees.
+  - To get it in Robinhood: Reports and statements > Account activity report > Generate new
+    report. It takes about 2 hours, and up to 24.
+  - Import it on My trades. A later report adds only rows not already imported.
+  - Rows the app cannot read are listed with the reason, never guessed.
+  - Removing an import keeps the rows another import also has.
+- **The Robinhood connection** (optional, off unless `ROBINHOOD_ACCOUNT_READ=1` with
+  `DATA_MODE=robinhood`).
+  - **What it reads:** your filled orders and current holdings. Only filled quantity counts:
+    partly filled orders and cancelled ones that filled in part are counted for what filled.
+  - **What it can call:** only tools named exactly `get_equity_positions`,
+    `get_stock_positions`, `get_option_positions`, `get_equity_orders`, `get_stock_orders`
+    and `get_option_orders`. No balance, account number or bank tool fits.
+  - **Option orders may be missing.** Robinhood's connection may not offer them; the report
+    has them.
+  - **Overlap with the report.** On days a report covers, the report's rows are used.
+
+**What it shows, for any dates you pick** (presets from the last 30 days to all history, or
+your own):
+
+- **Results by week, month, quarter or year.** Each period shows:
+  - the result after fees;
+  - how many trades won, with a range;
+  - what was opened and the risk it carried.
+
+  Click a bar to look closer.
+- **Overall:**
+  - the running total and the deepest fall from a high;
+  - profit factor;
+  - average win and loss;
+  - the largest loss.
+- **Strategies and the risk each carried.** Strategies (spreads, condors, covered calls,
+  short puts and others) are named from the legs and ranked by exposure. Each shows the most
+  it could lose as opened, the largest single risk, and dollar-days at risk. Unlimited risk
+  (uncovered calls, short shares) is counted on its own, never added in as zero. Also shown:
+  open risk over time, and its peak.
+- **What went better or worse than usual.** Each kind of trade against your average closed
+  trade:
+  - days held;
+  - days to expiration;
+  - how options ended;
+  - where the strike was;
+  - size against your usual;
+  - weekday;
+  - right after a loss;
+  - how familiar the stock was.
+
+  These are counts of your own past trades with how many each rests on, not forecasts.
+- **Verification.** Every trade opens to its legs and the statement rows it was built from,
+  exactly as written in your report, to check against Robinhood. Holdings still open are
+  compared with what Robinhood's connection says you hold, when that is on.
+
+**Unknown stays unknown.**
+
+- A close of something opened before your history starts is listed and left out.
+- An option past expiration with no row saying how it ended is marked unresolved.
+- Risk the app cannot bound is "not measured".
+
+**Before release**, two independent reviews (the arithmetic, and security with the screen)
+found faults, and all were fixed. A trade split in two by an assignment, risk not shrinking as
+a trade was partly closed, a race that could show an empty analysis, and an account guard
+broader than needed are among them. The full list is in [IMPROVEMENTS.md](IMPROVEMENTS.md).
+
 ## 2.5.1
 
 Six fixes from a review of 2.5. There is no migration and no new setting. Responses only gain

@@ -1,4 +1,4 @@
-# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.5)
+# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.6)
 
 This is the engineering record for the improvement programme that follows 2.1.0: the
 baseline it started from, what was found in the code, what each sprint changed, the tests
@@ -683,3 +683,82 @@ Tests: 767 passed, 2 skipped, including the Chromium tests; ruff is clean.
 | 6 | The unused call-or-put form and a repeated past-cases sentence | `optionsSection` deleted; the sentence is on the comparison only | static test |
 
 Tests: 777 passed, 2 skipped; ruff clean.
+
+## 2.6: your trade history
+
+Requested: pull the Robinhood portfolio; analyse past trades; find what went well and what
+went badly; a time-based analysis by strategy, with the risk each carried; dates you can pick
+and verify.
+
+Checked first: what Robinhood offers.
+
+- **Account activity report.** It has every trade, options included, with fees, as a CSV, and
+  takes 2 to 24 hours to generate. This became the primary source.
+- **The Robinhood connection.** Public tool lists name order and position reads, which may be
+  equity only, and also order placement. This became an opt-in second source, off by default,
+  with its own exact-name guard.
+
+The rules were kept throughout:
+
+- nothing places an order;
+- account reads only when switched on;
+- nothing about the account goes to the AI;
+- unknown is never zero;
+- patterns are counts, not forecasts;
+- every figure opens to its statement rows.
+
+Built in three parts, each merged separately, then the review fixes:
+
+- **Part 1 (#25):** `tradehistory.py` and `tradeanalysis.py`, with the parser, storage,
+  rebuild, strategies, risk and analysis. It added migration 11, the `/v2/history` routes and
+  the `trade_history` flag.
+- **Part 2 (#26):** the My trades screen (`static/trades.js`): the range bar, period bars,
+  the running total, strategies and risk, open risk over time, patterns, trades with their
+  statement rows, and holdings.
+- **Part 3 (#27):** `robinhood_account.py`, the connection reads behind
+  `ROBINHOOD_ACCOUNT_READ`, and reply shapes in the check command.
+- **Review fixes (#28),** listed below.
+
+### Independent review of 2.6 and fixes
+
+Two reviewers checked 2.6 before release without having seen it written. One covered the
+arithmetic and the trade rebuilding. The other covered security, robustness and the screen.
+
+| # | Finding | Fix | Test |
+| --- | --- | --- | --- |
+| A1 | A leg filled in two rows was read as two legs, so a debit spread could be named "Multi-leg (other)" with no risk | `merged_legs` merges by contract and side before naming | `test_a_leg_filled_in_several_rows_is_one_leg...` |
+| A2 | Connection rows were dropped on every day up to the report's last day, losing trades before the report started | Dropped only on days some report covers | `test_the_report_wins_only_on_the_days_it_covers...` |
+| A3 | Removing one of two overlapping imports deleted the rows both had | Migration 12 links each row to every import that had it; removal keeps shared rows | `test_removing_an_import_keeps_the_rows...` |
+| A4 | An assignment closed the option as one trade and opened the delivered shares as another, so the short put's outcome was split | The same day's delivered shares join the option's trade | `test_options_expire_assign_and_close...` |
+| A5 | Peak exposure ranked days by measured risk only, so a day with only unlimited risk open showed $0. Exposure did not shrink with partial closes | Exposure follows the open fraction. The peak ranks by risk, then unlimited, then unmeasured, and is `null` when nothing was open | `test_open_risk_shrinks...`, `test_a_day_with_only_unlimited_risk...` |
+| A6 | An option past expiration with no closing row stayed "open" forever and counted in open risk | `UNRESOLVED`: result unknown, risk ends at expiration, a note says so | `test_an_option_past_expiration...` |
+| A7 | With dates meaning "opened", results still fell in the period they closed | Periods keyed by open date | `test_a_date_range_picks_trades...` |
+| A8 | A reverse split (negative quantity) was refused | Applied as a signed change in shares | `test_a_reverse_split...` |
+| A9 | A same-day close listed before its open was dropped as unmatched | Retried after that day's opens | `test_a_close_listed_before_its_open...` |
+| A10 | Two-kind features were listed twice, as mirror images ("after a loss" better, "not after a loss" worse) | Listed once, on the side of the larger effect | `test_patterns_compare_each_kind...` |
+| A11 | Proceeds below the fees (a negative amount on a sale) fell back to an estimate | The signed amount is used | `test_proceeds_smaller_than_the_fees...` |
+| S1 | Two requests could rebuild at once and one could read a half-built history (an empty analysis) | One rebuild at a time, set in one assignment | `test_the_analysis_is_never_read_half_built...` |
+| S2 | "After a loss" was found by scanning every earlier trade, which is quadratic | Binary search | the existing pattern tests |
+| S3 | A malformed CSV raised a 500 | `csv.Error` becomes a 400 with what to do | `test_a_malformed_file...` |
+| S4 | A file name over 200 characters was refused, and an amount of 400 digits became infinity | The name is cut to 200 characters; an amount over 15 digits makes its row unreadable | `test_a_malformed_file...`, `test_numbers_that_cannot_be_real...` |
+| S5 | Each load of the screen read the connection's holdings and tools live | Cached for 5 minutes; a pull refreshes them | (behaviour) |
+| S6 | The account-name guard allowed any `get_` name without action words, so `get_portfolio` (balances) was on the list | Only `get_(equity\|stock\|option)_(positions\|orders)`; `get_portfolio` dropped | `test_the_account_list_takes_plain_reads_only` |
+| S7 | An order with no state was taken as filled at its ordered quantity and limit price. A cancelled order with fills was dropped, and a partly filled one was kept at its first read | Only filled quantity counts, whatever the state. No state and no fills is reported. A fill that grew updates its row | `test_only_what_filled_counts...`, `test_an_order_that_filled_further...` |
+| S8 | Reply shapes kept keys that are values (an account number used as a key) and list counts | Such keys replaced, counts dropped | `test_the_check_records_reply_shapes_never_values` |
+| S9 | The check command listed account reads it had called as `may_be_called: false` | Marked true when they are on the account list and permitted | `test_the_check_lists_the_account_reads...` |
+| S10 | "All history" filled the date boxes with the first and last dates, so a later, earlier-reaching import was cut off | All history sends no dates and leaves the boxes empty | browser test |
+| S11 | The screen showed "$0" as the peak when only unlimited risk was open | "unlimited", "not measured" or "nothing open" | (screen; A5 covers the data) |
+| S12 | Unreadable connection rows showed "Line undefined" | Shown with what they were, why, and their field names | (screen) |
+| S13 | The link status was written after an await without checking it was still the newest request | Fetched with the rest and checked once | (screen) |
+| S14 | The screen said the file was "never sent anywhere", but tickers go to the market-data source for prices | It says only tickers leave the computer, and why | (screen) |
+
+Also pinned by tests:
+
+- with account reads off, no account tool is called;
+- with them on, order tools are still never placed or reviewed;
+- a listed read marked destructive is refused;
+- FIFO results come from the Amount column, fees included;
+- each strategy has its risk basis;
+- a trade's statement rows come back exactly as written in the report.
+
+Tests: 827 passed, 2 skipped, including the Chromium tests; ruff is clean.
