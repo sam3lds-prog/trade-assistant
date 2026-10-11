@@ -18,6 +18,82 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.5.0
+
+One path from "which way?" to "what limit do I type at my broker?". There is no migration, no
+new key and no new dependency. There is one new flag, `FEATURE_TODAY`, which is on by default.
+Everything stays advisory: nothing places, changes or cancels an order, or reads your broker's
+balances or positions.
+
+**Today** (new, and the screen the app opens on). It shows:
+
+- **Market:** the market regime in one line.
+- **Your limits:** your daily stop and open risk, worded as on Portfolio risk. If some
+  positions could not be measured it says so, never $0.
+- **Leaning long and leaning short:** up to eight stocks each from your watchlist (or the 100
+  large companies), largest score first. A stock leans the way its trend evidence points on
+  the last finished bar. The lean is held back when the market regime works against that
+  side, or when a top is forming under a long lean (a bottom under a short one). Each
+  held-back stock is listed with its reason.
+
+Choose a stock and Decide opens with that direction, graded. Scores count evidence; they are
+not chances. Switch it off with `FEATURE_TODAY=0`.
+
+**One thesis on Analyze (Decide).** One form holds the direction, the levels, the holding days,
+contracts and an option budget. One button, **Grade and find a contract**, grades the stock
+trade, then finds calls or puts on the same levels. Arriving from Today or the Scanner fills
+the direction and runs it.
+
+**Shares or a contract.** The sized shares and the best risk-adjusted contract, side by side.
+For each it shows:
+
+- what you pay;
+- what it makes at target 1 and loses if the idea is wrong;
+- the chance option prices imply of a profit on your horizon date;
+- what option prices imply it is worth in expectation, next to what you pay.
+
+Both are drawn on one chart. The expected figure is worked out over every stock price, so it
+comes out close to what you pay: options are priced fairly against themselves. It is not an
+edge, and the screen says so. Past cases appear only once the signal history is built (until
+then the screen says so and offers to build it), and **Show the path range** runs the Monte
+Carlo as the same model. The three are never blended into one number.
+
+**The plan on the chart.** After a grade, the trend chart runs on to your horizon date. It adds
+the targets, the invalidation, the range option prices imply by then and where the contract
+breaks even.
+
+**Set the limit.** Every contract card has it. It opens Price an option on that contract
+(ticker, call or put, expiration, strike, buy, contracts), already priced, with the limit
+ladder ready. If the contract is no longer listed it says so rather than pricing another.
+
+**Grouped menu.** The menu is grouped into Today, Find, Decide, Price & simulate, Hold, Learn
+and Trust. The Scanner's rows all open Decide: technical rows with the direction their signals
+agree on, options-activity rows with none (volume does not show who bought) plus an *Options
+lab* link. The reversal scan moved from Analyze to a **Reversals** tab of the Scanner. It stays
+on Analyze if the Scanner is switched off.
+
+**Checked before release.** Two reviewers who had not seen the code being written checked it:
+one for the calculations and these rules, one for the screens. Their findings were fixed, with
+tests. The main ones:
+
+- **Skew read as an edge.** The expected figure was first worked out on the at-the-money
+  volatility, which made out-of-the-money calls look like bargains and puts look dear. Each
+  contract is now read on its own volatility.
+- **A typed entry below the market** showed as an expected gain on shares. Shares are now
+  valued from today's price.
+- **A slow analysis** could replace the stock you had just opened.
+- **Turning a thesis round** kept the old side's levels.
+- **An earnings date** typed for one stock followed Set the limit to another.
+- **A failed second grade** left the first plan on the chart.
+
+The details are in [IMPROVEMENTS.md](IMPROVEMENTS.md#25-one-decision-path).
+
+**Not in this release:**
+
+- a third row in the comparison for a multi-leg structure from the strategy builder;
+- a phone layout for the new screens (they work at phone width, but the lists scroll
+  sideways).
+
 ## 2.4.0
 
 Options analytics, a scanner, a strategy builder, and an AI plug-in for news and the market's
