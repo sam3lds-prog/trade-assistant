@@ -175,7 +175,7 @@ class OptionsEvaluate(Strict):
 
 
 class HistoryImport(Strict):
-    filename: str | None = Field(None, max_length=200)
+    filename: str | None = Field(None, max_length=2000)          # kept to its first 200 characters
     text: str = Field(..., min_length=1, max_length=16_000_000)
 
 
@@ -592,13 +592,8 @@ def build_router(svc: Any) -> APIRouter:
 
     @router.post("/history/imports/{import_id}/remove")
     def history_remove(import_id: int):
-        from .tradehistory import remove_import
 
-        def run():
-            out = remove_import(svc.db, import_id)
-            history._book = None
-            return out
-        return history_call(run)
+        return history_call(lambda: history.remove(import_id))
 
     @router.get("/history/analysis")
     def history_analysis(start: str | None = None, end: str | None = None, by: str = "month", basis: str = "close"):

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,9 +30,9 @@ from .providers.robinhood import records, required, unwrap
 
 # What may be read, by job, in the order tried. Exact names only.
 ACCOUNT_TOOLS: dict[str, tuple[str, ...]] = {
-    "share holdings": ("get_equity_positions", "get_portfolio"),
+    "share holdings": ("get_equity_positions", "get_stock_positions"),
     "option holdings": ("get_option_positions",),
-    "share orders": ("get_equity_orders",),
+    "share orders": ("get_equity_orders", "get_stock_orders"),
     "option orders": ("get_option_orders",),
 }
 ACCOUNT_ALLOWED = frozenset(n for names in ACCOUNT_TOOLS.values() for n in names)
@@ -60,14 +61,24 @@ def _first(d: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return next((d[k] for k in keys if k in d and d[k] not in (None, "")), None)
 
 
+FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,40}")
+
+
 def shape(value: Any, depth: int = 0) -> Any:
-    """The shape of a reply, keys and types only, never values: safe to put in a capture file to share."""
+    """The shape of a reply, field names and types only, never values: safe to put in a capture file to share.
+    A key that is not a plain lower-case field name (an account number, a ticker used as a key) is replaced,
+    and lists are shown by their first item without a count."""
     if depth > 4:
         return "…"
     if isinstance(value, dict):
-        return {k: shape(v, depth + 1) for k, v in list(value.items())[:40]}
+        out: dict[str, Any] = {}
+        for k, v in list(value.items())[:40]:
+            name = k if isinstance(k, str) and FIELD_NAME.fullmatch(k) else "(a key that is a value)"
+            if name not in out:
+                out[name] = shape(v, depth + 1)
+        return out
     if isinstance(value, list):
-        return [shape(value[0], depth + 1), f"({len(value)} items)"] if value else []
+        return [shape(value[0], depth + 1)] if value else []
     return type(value).__name__
 
 
@@ -140,22 +151,21 @@ class RobinhoodAccount:
         offered = self.offered()
         rows: list[dict[str, Any]] = []
         unreadable: list[dict[str, Any]] = []
-        if offered["share orders"]:
-            for rec in self._read_all(offered["share orders"]):
-                if str(rec.get("state") or rec.get("status") or "filled").lower() not in ("filled", "partially_filled", "executed"):
+        for job, what, read in (("share orders", "a share order", lambda r: [_share_row(r)]),
+                                ("option orders", "an option order", _option_rows)):
+            if not offered[job]:
+                continue
+            for rec in self._read_all(offered[job]):
+                # Any order with something filled counts, whatever its state (a cancelled order can have fills);
+                # one with no state and no fills is not guessed to be filled.
+                if not _has_fills(rec):
+                    if not (rec.get("state") or rec.get("status")):
+                        unreadable.append({"what": what, "reason": "no state and no fills", "fields": sorted(rec)[:25]})
                     continue
                 try:
-                    rows.append(_share_row(rec))
+                    rows.extend(read(rec))
                 except ValueError as exc:
-                    unreadable.append({"what": "a share order", "reason": str(exc), "fields": sorted(rec)[:25]})
-        if offered["option orders"]:
-            for rec in self._read_all(offered["option orders"]):
-                if str(rec.get("state") or rec.get("status") or "filled").lower() not in ("filled", "partially_filled", "executed"):
-                    continue
-                try:
-                    rows.extend(_option_rows(rec))
-                except ValueError as exc:
-                    unreadable.append({"what": "an option order", "reason": str(exc), "fields": sorted(rec)[:25]})
+                    unreadable.append({"what": what, "reason": str(exc), "fields": sorted(rec)[:25]})
         return rows, unreadable, offered
 
 
@@ -184,17 +194,43 @@ def _stamp(rec: dict[str, Any]) -> tuple[str, str]:
     return dt.date().isoformat(), dt.isoformat()
 
 
+FILLED_QTY_KEYS = ("cumulative_quantity", "filled_quantity", "processed_quantity")
+FILLED_STATES = ("filled", "executed")
+
+
+def _list(v: Any) -> list[Any]:
+    return v if isinstance(v, list) else []
+
+
+def _has_fills(rec: dict[str, Any]) -> bool:
+    execs = list(_list(rec.get("executions")))
+    for leg in _list(rec.get("legs")):
+        if isinstance(leg, dict):
+            execs += _list(leg.get("executions"))
+    if any(isinstance(e, dict) and (_num(e.get("quantity")) or 0) > 0 for e in execs):
+        return True
+    if (_num(_first(rec, FILLED_QTY_KEYS)) or 0) > 0:
+        return True
+    return str(rec.get("state") or rec.get("status") or "").lower() in FILLED_STATES
+
+
 def _filled(rec: dict[str, Any]) -> tuple[float, float]:
-    """(quantity filled, average price) from executions when given, else the order's own fields."""
-    execs = [e for e in (rec.get("executions") or []) if isinstance(e, dict)]
+    """(quantity filled, average price) from executions when given, else the order's filled fields. The
+    ordered quantity counts only for an order whose state says it filled."""
+    execs = [e for e in _list(rec.get("executions")) if isinstance(e, dict)]
     q = [(_num(e.get("quantity")), _num(e.get("price"))) for e in execs]
     q = [(a, b) for a, b in q if a and b is not None]
     if q:
         total = sum(a for a, _ in q)
         return total, sum(a * b for a, b in q) / total
-    qty, px = _num(_first(rec, QTY_KEYS)), _num(_first(rec, PRICE_KEYS))
+    qty = _num(_first(rec, FILLED_QTY_KEYS))
+    if qty is None and str(rec.get("state") or rec.get("status") or "").lower() in FILLED_STATES:
+        qty = _num(_first(rec, ("quantity", "qty")))
+    px = _num(_first(rec, ("average_price", "avg_price", "executed_price")))
+    if px is None and str(rec.get("state") or rec.get("status") or "").lower() in FILLED_STATES:
+        px = _num(rec.get("price"))
     if not qty or px is None:
-        raise ValueError("no filled quantity and price")
+        raise ValueError("no filled quantity and fill price")
     return qty, px
 
 
@@ -269,19 +305,29 @@ def store_pulled(db: Any, rows: list[dict[str, Any]], unreadable: list[dict[str,
                     ("Robinhood connection", now, len(rows) + len(unreadable)))
         import_id = cur.lastrowid
         added = dup = 0
+        updated = 0
         for n, r in enumerate(rows):
-            cur.execute("""INSERT OR IGNORE INTO broker_activity (import_id, source, row_key, file_order, activity_date, code,
-                           symbol, description, kind, option_type, strike, expiration, quantity, short_flag, price, amount, raw_json)
-                           VALUES (?, 'robinhood_link', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
-                        (import_id, r["row_key"], n, r["activity_date"], r["code"], r["symbol"], r["description"], r["kind"],
-                         r.get("option_type"), r.get("strike"), r.get("expiration"), r["quantity"], r["price"], r["amount"],
-                         json.dumps(r["raw"], sort_keys=True)))
-            if cur.rowcount:
+            raw = json.dumps(r["raw"], sort_keys=True)
+            cur.execute("SELECT id, quantity, price, amount FROM broker_activity WHERE row_key = ?", (r["row_key"],))
+            old = cur.fetchone()
+            if old is None:
+                cur.execute("""INSERT INTO broker_activity (import_id, source, row_key, file_order, activity_date, code,
+                               symbol, description, kind, option_type, strike, expiration, quantity, short_flag, price, amount, raw_json)
+                               VALUES (?, 'robinhood_link', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+                            (import_id, r["row_key"], n, r["activity_date"], r["code"], r["symbol"], r["description"], r["kind"],
+                             r.get("option_type"), r.get("strike"), r.get("expiration"), r["quantity"], r["price"], r["amount"], raw))
                 added += 1
+            elif (old["quantity"], old["price"], old["amount"]) != (r["quantity"], r["price"], r["amount"]):
+                # The order filled further since it was last read: its row now says what filled in all.
+                cur.execute("UPDATE broker_activity SET quantity = ?, price = ?, amount = ?, activity_date = ?, raw_json = ? "
+                            "WHERE id = ?", (r["quantity"], r["price"], r["amount"], r["activity_date"], raw, old["id"]))
+                updated += 1
             else:
                 dup += 1
+            cur.execute("INSERT OR IGNORE INTO broker_import_rows (import_id, activity_id) SELECT ?, id FROM broker_activity "
+                        "WHERE row_key = ?", (import_id, r["row_key"]))
         summary = {"offered": offered, "unreadable": unreadable[:50], "unreadable_total": len(unreadable), "ignored": [],
-                   "unmodelled": [], "unmodelled_total": 0}
+                   "unmodelled": [], "unmodelled_total": 0, "rows_updated": updated}
         cur.execute("""UPDATE broker_imports SET rows_added = ?, rows_duplicate = ?, rows_unreadable = ?, first_date = ?,
                        last_date = ?, summary_json = ? WHERE id = ?""",
                     (added, dup, len(unreadable), dates[0] if dates else None, dates[-1] if dates else None,

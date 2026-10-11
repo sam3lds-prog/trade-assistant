@@ -310,4 +310,8 @@ def test_my_trades_imports_a_report_picks_dates_and_shows_the_statement_rows(tmp
         page.wait_for_selector(".trade-detail", timeout=20000)
         detail = page.inner_text(".trade-detail")
         assert "($300.04)" in detail and "$499.96" in detail and "BTO" in detail and "STC" in detail
+        # All history stays all of it: no dates are filled in, and the whole history is shown again.
+        page.select_option('select[aria-label="Dates"]', "all")
+        page.wait_for_function("[...document.querySelectorAll('section:not(.hidden) p.small > strong')].some(e => e.textContent.startsWith('Jan 5, 2026 to'))", timeout=30000)
+        assert page.input_value('input[aria-label="From"]') == "" and page.input_value('input[aria-label="To"]') == ""
     assert errors == []

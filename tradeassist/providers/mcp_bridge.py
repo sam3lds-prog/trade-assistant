@@ -67,14 +67,14 @@ def acceptable_tool_name(name: str) -> bool:
             and not any(fragment in lowered for fragment in ACCOUNT_FRAGMENTS))
 
 
+ACCOUNT_READ_NAME = re.compile(r"get_(equity|stock|option)_(positions|orders)")
+
+
 def acceptable_account_tool_name(name: str) -> bool:
-    """Whether a name may be on the account-read list: a plain read of holdings or past orders."""
-    lowered = name.lower()
-    if name != lowered or not lowered.startswith(READ_PREFIX) or re.fullmatch(r"[a-z0-9_]+", lowered) is None:
-        return False
-    if any(fragment in lowered for fragment in ACTION_FRAGMENTS):
-        return False
-    return "order" not in lowered or (lowered.endswith("_orders") and lowered.count("order") == 1)
+    """Whether a name may be on the account-read list at all: only a read of share or option positions or of
+    past share or option orders, by one of these exact shapes. Account numbers, balances, buying power, bank
+    links, documents and anything that acts never fit."""
+    return ACCOUNT_READ_NAME.fullmatch(name) is not None and not any(f in name for f in ACTION_FRAGMENTS)
 
 
 def is_read_only(name: str, annotations: Any = None, allowed: frozenset[str] = frozenset()) -> bool:

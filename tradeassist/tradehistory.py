@@ -36,9 +36,10 @@ import io
 import json
 import random
 import re
+import threading
+import time
 from collections import Counter
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 
@@ -56,9 +57,10 @@ IGNORED_WORDS = {"ACH": "bank transfers", "RTP": "instant transfers", "CDIV": "c
                  "MINT": "margin interest", "XENT": "transfers", "ACATI": "account transfers in",
                  "ACATO": "account transfers out", "JNLC": "journal entries", "JNLS": "journal entries",
                  "REC": "receipts", "SOFF": "spin-offs", "MRGS": "mergers", "SXCH": "symbol changes",
-                 "CONV": "conversions", "BCXL": "cancelled trades", "FUTSWP": "futures sweeps"}
+                 "CONV": "conversions", "BCXL": "cancelled trades", "FUTSWP": "futures sweeps",
+                 "SPR": "reverse splits (not modelled)"}
 # Corporate actions that change a holding in ways this app does not model: shown, never silently dropped.
-UNMODELLED_ACTIONS = {"SOFF", "MRGS", "SXCH", "CONV", "ACATI", "ACATO", "REC", "BCXL"}
+UNMODELLED_ACTIONS = {"SOFF", "MRGS", "SXCH", "CONV", "ACATI", "ACATO", "REC", "BCXL", "SPR"}
 MAX_TEXT = 16_000_000
 MAX_ROWS = 200_000
 
@@ -115,7 +117,7 @@ def money(text: str | None) -> float | None:
     if s.startswith("-"):
         neg, s = True, s[1:].strip()
     s = s.replace("$", "").replace(",", "").strip()
-    if not re.fullmatch(r"\d+(?:\.\d+)?|\.\d+", s):
+    if not re.fullmatch(r"\d{1,15}(?:\.\d+)?|\.\d+", s):
         raise ValueError(f"not an amount: {text!r}")
     v = float(s)
     return -v if neg else v
@@ -127,10 +129,11 @@ def quantity(text: str | None) -> tuple[float | None, bool]:
     s = (text or "").strip().replace(",", "")
     if not s:
         return None, False
-    m = re.fullmatch(r"(\d+(?:\.\d+)?|\.\d+)\s*([A-Za-z]?)", s)
+    m = re.fullmatch(r"(-?)(\d{1,12}(?:\.\d+)?|\.\d+)\s*([A-Za-z]?)", s)
     if not m:
         raise ValueError(f"not a quantity: {text!r}")
-    return float(m.group(1)), m.group(2).upper() == "S"
+    v = float(m.group(2))
+    return (-v if m.group(1) else v), m.group(3).upper() == "S"
 
 
 def us_date(text: str | None) -> str | None:
@@ -186,6 +189,15 @@ def parse_report(text: str) -> Parsed:
                                  "download the CSV.")
     col = {name: header.index(name) for name in REQUIRED + OPTIONAL if name in header}
     out, seen = Parsed(), Counter()
+    try:
+        _read_rows(reader, col, header, out, seen)
+    except csv.Error as exc:
+        raise HistoryImportError(f"The file could not be read as CSV near line {reader.line_num}: {exc}. Download the "
+                                 "report from Robinhood again; do not edit it in a spreadsheet first.") from exc
+    return out
+
+
+def _read_rows(reader: Any, col: dict[str, int], header: list[str], out: Parsed, seen: Counter) -> None:
     for line_no, cells in enumerate(reader, start=2):
         if not any(c.strip() for c in cells):
             continue
@@ -218,7 +230,6 @@ def parse_report(text: str) -> Parsed:
             continue
         row.row_key = _key([raw.get(c, "") for c in REQUIRED + OPTIONAL], seen)
         out.rows.append(row)
-    return out
 
 
 def _row(code: str, raw: dict[str, str], order: int) -> Row:
@@ -241,6 +252,8 @@ def _row(code: str, raw: dict[str, str], order: int) -> Row:
         row.symbol, row.option_type, row.strike, row.expiration = terms
         if code in OPTION_CODES and (qty is None or qty <= 0):
             raise ValueError("an option trade without a quantity")
+        if code in OPTION_EVENTS and qty is not None and qty <= 0:
+            raise ValueError("an option event without a quantity")
         if code in OPTION_CODES and amount is None and price is None:
             raise ValueError("an option trade with neither a price nor an amount")
         if code in OPTION_EVENTS and qty is None:
@@ -253,7 +266,7 @@ def _row(code: str, raw: dict[str, str], order: int) -> Row:
         if amount is None and price is None:
             raise ValueError("a share trade with neither a price nor an amount")
     elif code in SPLIT_CODES:
-        if not symbol or qty is None:
+        if not symbol or not qty:
             raise ValueError("a split without a ticker or a quantity")
     return row
 
@@ -281,6 +294,10 @@ def store(db: Any, parsed: Parsed, source: str, filename: str | None) -> dict[st
                 added += 1
             else:
                 dup += 1
+            # Every import lists its rows, those it brought and those already there, so removing one import
+            # keeps the rows another import also has.
+            cur.execute("INSERT OR IGNORE INTO broker_import_rows (import_id, activity_id) "
+                        "SELECT ?, id FROM broker_activity WHERE row_key = ?", (import_id, r.row_key))
         summary = {"ignored": [{"code": c, "rows": n, "what": IGNORED_WORDS.get(c, "other rows")}
                                for c, n in parsed.ignored.most_common()],
                    "unreadable": parsed.unreadable[:50], "unreadable_total": len(parsed.unreadable),
@@ -307,14 +324,22 @@ def imports(db: Any) -> list[dict[str, Any]]:
 
 
 def remove_import(db: Any, import_id: int) -> dict[str, Any]:
+    """Remove one import. Rows another import also brought stay (and are now kept under that import)."""
     with db.tx() as cur:
         cur.execute("SELECT id FROM broker_imports WHERE id = ?", (import_id,))
         if cur.fetchone() is None:
             raise HistoryImportError(f"There is no import {import_id}.")
-        cur.execute("DELETE FROM broker_activity WHERE import_id = ?", (import_id,))
+        cur.execute("DELETE FROM broker_import_rows WHERE import_id = ?", (import_id,))
+        # Rows that came with this import and are also in another: move them to the earliest such import.
+        cur.execute("""UPDATE broker_activity SET import_id = (SELECT MIN(l.import_id) FROM broker_import_rows l
+                       WHERE l.activity_id = broker_activity.id)
+                       WHERE import_id = ? AND EXISTS (SELECT 1 FROM broker_import_rows l WHERE l.activity_id = broker_activity.id)""",
+                    (import_id,))
+        kept = cur.rowcount
+        cur.execute("""DELETE FROM broker_activity WHERE import_id = ?""", (import_id,))
         removed = cur.rowcount
         cur.execute("DELETE FROM broker_imports WHERE id = ?", (import_id,))
-    return {"import_id": import_id, "rows_removed": removed}
+    return {"import_id": import_id, "rows_removed": removed, "rows_kept_by_other_imports": kept}
 
 
 REPORT_SOURCES = ("robinhood_csv", "sample")
@@ -325,12 +350,13 @@ def activity(db: Any, skipped: list[int] | None = None) -> list[dict[str, Any]]:
     first, so a later line in the same file is earlier in the day). Where an imported report covers a day,
     rows pulled through the Robinhood connection for that day are left out (the report has the fees), so
     the same trade is never counted twice; their number is added to `skipped`."""
-    cut = db.one(f"SELECT MAX(activity_date) AS d FROM broker_activity WHERE source IN ({','.join('?' * len(REPORT_SOURCES))})",
-                 REPORT_SOURCES)["d"]
+    ranges = [(r["first_date"], r["last_date"]) for r in db.query(
+        f"SELECT first_date, last_date FROM broker_imports WHERE source IN ({','.join('?' * len(REPORT_SOURCES))}) "
+        "AND first_date IS NOT NULL", REPORT_SOURCES)]
     rows = db.query("SELECT * FROM broker_activity ORDER BY activity_date ASC, import_id ASC, file_order DESC")
     out = []
     for r in rows:
-        if cut and r["source"] == "robinhood_link" and r["activity_date"] <= cut:
+        if r["source"] == "robinhood_link" and any(a <= r["activity_date"] <= b for a, b in ranges):
             if skipped is not None:
                 skipped.append(r["id"])
             continue
@@ -516,15 +542,23 @@ class TradeHistory:
     """Imports, rebuilt trades and their analysis, kept in step with the stored rows."""
 
     MAX_PRICE_SYMBOLS = 80
+    CONNECTION_TTL = 300.0                      # seconds a read of your holdings through the connection is reused
 
     def __init__(self, svc: Any):
         self.svc = svc
-        self._book: tuple[tuple, Any, list[dict[str, Any]]] | None = None
+        self._book: tuple[tuple, Any, list[dict[str, Any]], list[int]] | None = None
         self._closes: dict[str, Any] = {}
+        self._first: str | None = None
+        # One rebuild at a time; a request never sees a half-built history.
+        self._lock = threading.RLock()
+        self._connection: tuple[float, Any] | None = None
+        self._link: tuple[float, Any] | None = None
 
     def _version(self) -> tuple:
-        r = self.svc.db.one("SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS m FROM broker_activity")
-        return (r["n"], r["m"])
+        # Every change adds or removes an import, and each one changes these; the writers here also drop the cache.
+        r = self.svc.db.one("SELECT (SELECT COUNT(*) FROM broker_activity) AS n, (SELECT COALESCE(MAX(id), 0) FROM broker_activity) AS m, "
+                            "(SELECT COUNT(*) FROM broker_imports) AS i, (SELECT COALESCE(MAX(id), 0) FROM broker_imports) AS j")
+        return (r["n"], r["m"], r["i"], r["j"])
 
     def _price_on(self, symbol: str, day: str) -> float | None:
         """The stock's close on `day` (or the last trading day before it), from the app's daily price history.
@@ -533,7 +567,7 @@ class TradeHistory:
             if len(self._closes) >= self.MAX_PRICE_SYMBOLS:
                 return None
             try:
-                first = self._book[1].first_date if self._book else None
+                first = self._first
                 years = 1.0
                 if first:
                     years = min(10.0, max(1.0, (date.today() - date.fromisoformat(first)).days / 365.0 + 0.1))
@@ -551,31 +585,43 @@ class TradeHistory:
 
     def book(self, today: date | None = None) -> tuple[Any, list[dict[str, Any]]]:
         from .tradeanalysis import rebuild, summarize
-        v = self._version()
-        if self._book is None or self._book[0] != v:
-            self._closes = {}
-            self._skipped: list[int] = []
-            book = rebuild(activity(self.svc.db, self._skipped))
-            self._book = (v, book, [])
-            trades = summarize(book, today or date.today(), self._price_on)
-            self._book = (v, book, trades)
-        return self._book[1], self._book[2]
+        with self._lock:
+            v = self._version()
+            if self._book is None or self._book[0] != v:
+                self._closes = {}
+                skipped: list[int] = []
+                book = rebuild(activity(self.svc.db, skipped))
+                self._first = book.first_date
+                trades = summarize(book, today or date.today(), self._price_on)
+                self._book = (v, book, trades, skipped)          # set once, complete
+            return self._book[1], self._book[2]
+
+    @property
+    def _skipped(self) -> list[int]:
+        return self._book[3] if self._book else []
 
     def import_report(self, text: str, filename: str | None, source: str = "robinhood_csv") -> dict[str, Any]:
         parsed = parse_report(text)
         if not parsed.rows and not parsed.read:
             raise HistoryImportError("The report has no rows.")
-        out = store(self.svc.db, parsed, source, filename)
-        self._book = None
+        with self._lock:
+            out = store(self.svc.db, parsed, source, (filename or "")[:200] or None)
+            self._book = None
+        return out
+
+    def remove(self, import_id: int) -> dict[str, Any]:
+        with self._lock:
+            out = remove_import(self.svc.db, import_id)
+            self._book = None
         return out
 
     def load_sample(self) -> dict[str, Any]:
         if self.svc.market.info.mode != "demo":
             raise HistoryImportError("The sample report is for demo mode only, so made-up trades never mix with yours.")
-        self._book = (None, SimpleNamespace(first_date=(date.today() - timedelta(days=600)).isoformat()), [])
-        text = sample_report(date.today(), price_on=self._price_on)
-        self._book = None
-        return self.import_report(text, "sample report (made up).csv", source="sample")
+        with self._lock:
+            self._first = (date.today() - timedelta(days=600)).isoformat()
+            text = sample_report(date.today(), price_on=self._price_on)
+            return self.import_report(text, "sample report (made up).csv", source="sample")
 
     def analysis(self, start: str | None, end: str | None, by: str, basis: str) -> dict[str, Any]:
         from .tradeanalysis import analyse
@@ -585,11 +631,12 @@ class TradeHistory:
                     date.fromisoformat(v)
                 except ValueError as exc:
                     raise ValueError(f"Not a date: {v!r} (use YYYY-MM-DD)") from exc
-        book, trades = self.book()
+        with self._lock:                               # the book and its skipped rows from the same rebuild
+            book, trades = self.book()
+            skipped = len(self._skipped)
         if not book.groups and not book.unmatched:
             return {"empty": True, "imports": imports(self.svc.db), "data_source": self.svc.market.info.mode}
         out = analyse(book, trades, date.today(), start, end, by, basis)
-        skipped = len(getattr(self, "_skipped", []))
         if skipped:
             out["notes"].append(f"{skipped} order row{'s' if skipped != 1 else ''} from the Robinhood connection fell on days "
                                 "your imported report already covers, so the report's rows were used (they include fees) and "
@@ -620,10 +667,13 @@ class TradeHistory:
         on = bool(s.robinhood_account_read)
         out = {"enabled": on, "using_robinhood": self.svc.market.info.mode == "robinhood", "offered": None}
         if on and out["using_robinhood"]:
+            if self._link and time.time() - self._link[0] < self.CONNECTION_TTL:
+                return self._link[1]
             try:
                 out["offered"] = self._account().offered()
             except Exception as exc:                  # noqa: BLE001 - shown, not raised: the screen still works
                 out["error"] = str(exc)[:300]
+            self._link = (time.time(), out)
         return out
 
     def pull(self) -> dict[str, Any]:
@@ -633,11 +683,13 @@ class TradeHistory:
         if not any(offered[j] for j in ("share orders", "option orders")):
             raise HistoryImportError("Robinhood's connection does not offer your order history to this app (it lists no "
                                      "tool for it). Import the account activity report instead.")
-        out = store_pulled(self.svc.db, rows, unreadable, offered)
+        with self._lock:
+            out = store_pulled(self.svc.db, rows, unreadable, offered)
+            self._book = None
+            self._connection = None                    # read the holdings afresh next time too
         if not offered["option orders"]:
             out["note"] = ("Robinhood's connection offers share orders only; your option trades are in the account "
                            "activity report.")
-        self._book = None
         return out
 
     def trade(self, trade_id: int) -> dict[str, Any]:
@@ -669,16 +721,23 @@ class TradeHistory:
                     h["unrealized"] = sign * (px * h["quantity"] - h["cash"])
         connection = None
         if self.svc.settings.robinhood_account_read and self.svc.market.info.mode == "robinhood":
-            try:
-                connection = self._account().holdings()
+            # Read through the connection at most every few minutes, not on every change of dates.
+            if self._connection and time.time() - self._connection[0] < self.CONNECTION_TTL:
+                connection = dict(self._connection[1])
+            else:
+                try:
+                    connection = self._account().holdings()
+                except Exception as exc:              # noqa: BLE001 - shown, not raised
+                    connection = {"error": str(exc)[:300]}
+                self._connection = (time.time(), connection)
+                connection = dict(connection)
+            if "holdings" in connection:
                 connection["compare"] = compare_holdings(items, connection["holdings"])
-            except Exception as exc:                  # noqa: BLE001 - shown, not raised
-                connection = {"error": str(exc)[:300]}
         return {"holdings": items, "connection": connection, "as_of_history": book.last_date, "first_date": book.first_date,
                 "unmatched": len(book.unmatched), "data_source": self.svc.market.info.mode,
                 "note": "From your imported history: correct only if the history reaches back to when each of these "
-                        "was opened. Stock prices are the app's current quotes; option values are not estimated here "
-                        "(price one with Price an option)."}
+                        "was opened. Stock prices are the app's current quotes from your market-data source; option "
+                        "values are not estimated here (price one with Price an option)."}
 
 
 __all__ = ["parse_report", "store", "imports", "remove_import", "activity", "sample_report", "money", "quantity",
