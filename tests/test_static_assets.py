@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
-SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js")                 # in the order index.html loads them
+SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js")                 # in the order index.html loads them
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -134,7 +134,7 @@ def test_every_screen_opens_without_a_script_error(tmp_path):
         page.goto(page.base)
         page.wait_for_function("document.querySelectorAll('#main > section').length > 0", timeout=20000)
         views = page.eval_on_selector_all(".rail button.nav:not(.hidden)", "bs => bs.map(b => b.dataset.view)")
-        assert {"today", "positions", "portfolio", "health", "lab", "scanner", "market"} <= set(views)
+        assert {"today", "positions", "portfolio", "health", "lab", "scanner", "market", "trades"} <= set(views)
         assert page.evaluate("location.hash") == "#today"            # the landing screen (2.5)
         groups = page.eval_on_selector_all(".rail .nav-group:not(.hidden) .nav-group-label", "ls => ls.map(l => l.textContent)")
         assert groups == ["Today", "Find", "Decide", "Price & simulate", "Hold", "Learn", "Trust"]
@@ -272,4 +272,42 @@ def test_turning_the_thesis_round_drops_its_prices_and_a_new_ticker_drops_the_ea
         page.wait_for_selector("text=Simulate this trade", timeout=30000)
         assert page.input_value("section:not(.hidden) input[type=date]") == ""
         assert page.input_value("section:not(.hidden) input.sym") == "MSFT"
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_my_trades_imports_a_report_picks_dates_and_shows_the_statement_rows(tmp_path):
+    """2.6: import a report file, narrow the dates, look closer at a period, open a trade's statement rows."""
+    report = tmp_path / "activity.csv"
+    report.write_text('"Activity Date","Process Date","Settle Date","Instrument","Description","Trans Code","Quantity","Price","Amount"\n'
+                      '"2/2/2026","2/2/2026","2/4/2026","AAPL","AAPL 2/20/2026 Call $190.00","STC","1","$5.00","$499.96"\n'
+                      '"1/5/2026","1/5/2026","1/6/2026","AAPL","AAPL 2/20/2026 Call $190.00","BTO","1","$3.00","($300.04)"\n'
+                      '"1/2/2026","1/2/2026","1/2/2026","","ACH Deposit","ACH","","","$1,000.00"\n'
+                      '\n"The data provided is for informational purposes only."\n')
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#trades")
+        page.wait_for_selector("text=Nothing imported yet", timeout=30000)
+        page.set_input_files('input[type="file"]', str(report))
+        page.click("text=Import the report")
+        page.wait_for_selector("text=In this range", timeout=30000)
+        assert "2 trade rows added" in page.inner_text("section:not(.hidden) .panel >> nth=0")
+        assert "+$199.92" in page.inner_text(".trade-table")
+        # Dates: a range that leaves the trade out, then one that holds it.
+        page.select_option('select[aria-label="Dates"]', "custom")
+        page.fill('input[aria-label="From"]', "2026-03-01")
+        page.fill('input[aria-label="To"]', "2026-03-31")
+        page.click("section:not(.hidden) button:text-is('Show')")
+        page.wait_for_selector("text=0 trades.", timeout=30000)
+        page.fill('input[aria-label="From"]', "2026-01-01")
+        page.click("section:not(.hidden) button:text-is('Show')")
+        page.wait_for_selector("text=1 trade.", timeout=30000)
+        # Look closer at the month: the range becomes that month, grouped by week.
+        page.locator(".chart rect.click").last.click()
+        page.wait_for_function("document.querySelector('select[aria-label=\"Group by\"]').value === 'week'", timeout=30000)
+        assert page.input_value('input[aria-label="From"]') == "2026-02-01"
+        # The statement rows behind the trade, as written in the report.
+        page.locator(".trade-table tbody tr.click").first.click()
+        page.wait_for_selector(".trade-detail", timeout=20000)
+        detail = page.inner_text(".trade-detail")
+        assert "($300.04)" in detail and "$499.96" in detail and "BTO" in detail and "STC" in detail
     assert errors == []
