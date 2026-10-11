@@ -608,19 +608,28 @@ function scoreBars(day) {
     el("p", { class: "small muted", text: `Net ${isNum(day.net_score) ? (day.net_score > 0 ? "+" : "") + num(day.net_score, 0) : "n/a"} points. Evidence points out of 100 on each side, not probabilities.` }));
 }
 
-function trendHistoryChart(t) {
+// The closing price over the last year on its trend state. With a `plan` (2.5, from the thesis on Decide) the
+// axis runs on to the horizon date and adds the plan: target and invalidation lines, the range option prices
+// imply by then (one standard deviation, widening with time), and where the chosen contract breaks even then.
+function trendHistoryChart(t, plan) {
   const rows = t.history, n = rows.length;
-  const wrap = el("div", { class: "panel" }, el("h3", { text: "Trend state over the last year" }));
+  const wrap = el("div", { class: "panel trend-chart" }, el("h3", { text: plan ? `Trend state over the last year, and your plan to ${shortDate(plan.horizonDate)}` : "Trend state over the last year" }));
+  wrap.trend = t;
   if (n < 2) return wrap;
-  const W = 760, H = 250, pad = { l: 58, r: 16, t: 10, b: 54 }, L = pad.l, R = W - pad.r, bandTop = H - pad.b + 8, bandH = 14;
-  const X = i => L + (R - L) * i / (n - 1);
-  const ys = niceScale(Math.min(...rows.map(r => r.close)), Math.max(...rows.map(r => r.close)), 5);
+  const f = plan ? Math.max(1, plan.horizonDays) : 0, last = rows[n - 1].close;
+  const W = 760, H = plan ? 290 : 250, pad = { l: 58, r: plan ? 118 : 16, t: plan ? 18 : 10, b: 54 }, L = pad.l, R = W - pad.r, bandTop = H - pad.b + 8, bandH = 14;
+  const X = i => L + (R - L) * i / (n - 1 + f);
+  const levels = plan ? plan.levels.filter(lv => isNum(lv.price)) : [];
+  const band = plan && plan.band && isNum(plan.band.low) && isNum(plan.band.high) ? plan.band : null;
+  const be = plan && plan.breakeven && isNum(plan.breakeven.price) ? plan.breakeven : null;
+  const span = [...rows.map(r => r.close), ...levels.map(lv => lv.price), ...(band ? [band.low, band.high] : []), ...(be ? [be.price] : [])];
+  const ys = niceScale(Math.min(...span), Math.max(...span), 5);
   const Y = v => pad.t + (H - pad.b - pad.t) * (1 - (v - ys.lo) / (ys.hi - ys.lo));
-  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${t.symbol} closing price with its trend state on each day` });
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${t.symbol} closing price with its trend state on each day${plan ? ", and the plan to the horizon date" : ""}` });
   let start = 0;
   for (let i = 1; i <= n; i++) {
     if (i === n || rows[i].state !== rows[start].state) {
-      const x0 = start === 0 ? L : (X(start - 1) + X(start)) / 2, x1 = i === n ? R : (X(i - 1) + X(i)) / 2;
+      const x0 = start === 0 ? L : (X(start - 1) + X(start)) / 2, x1 = i === n ? (plan ? X(n - 1) : R) : (X(i - 1) + X(i)) / 2;
       root.append(svg("rect", { x: x0, y: pad.t, width: Math.max(0.5, x1 - x0), height: H - pad.b - pad.t, fill: TREND_FILL[rows[start].state], opacity: 0.45 }),
         svg("rect", { x: x0, y: bandTop, width: Math.max(0.5, x1 - x0), height: bandH, fill: TREND_FILL[rows[start].state] }));
       start = i;
@@ -628,7 +637,31 @@ function trendHistoryChart(t) {
   }
   for (const v of ys.ticks) root.append(svg("line", { class: "grid", x1: L, x2: R, y1: Y(v), y2: Y(v) }),
     svg("text", { x: L - 8, y: Y(v) + 4, "text-anchor": "end", text: money(v, ys.step < 1 ? 2 : 0) }));
-  rows.forEach((r, i) => { if (i > 0 && r.date.slice(5, 7) !== rows[i - 1].date.slice(5, 7) && X(i) < R - 24) root.append(svg("text", { x: X(i), y: bandTop + bandH + 14, "text-anchor": "middle", text: monthLabel(r.date) })); });
+  rows.forEach((r, i) => { if (i > 0 && r.date.slice(5, 7) !== rows[i - 1].date.slice(5, 7) && X(i) < (plan ? X(n - 1) - 24 : R - 24)) root.append(svg("text", { x: X(i), y: bandTop + bandH + 14, "text-anchor": "middle", text: monthLabel(r.date) })); });
+  if (plan) {
+    const x0 = X(n - 1), x1 = X(n - 1 + f);
+    if (band) {
+      // The range widens with the square root of time, from today's close to the band on the horizon date.
+      const up = Math.log(band.high / last), dn = Math.log(band.low / last), steps = 24;
+      const pts = k => { const u = k / steps; return [x0 + (x1 - x0) * u, Math.sqrt(u)]; };
+      const top = [...Array(steps + 1).keys()].map(k => { const [x, r] = pts(k); return `${x.toFixed(1)} ${Y(last * Math.exp(up * r)).toFixed(1)}`; });
+      const bot = [...Array(steps + 1).keys()].reverse().map(k => { const [x, r] = pts(k); return `${x.toFixed(1)} ${Y(last * Math.exp(dn * r)).toFixed(1)}`; });
+      root.append(svg("path", { class: "band", d: `M${top.join(" L")} L${bot.join(" L")} Z` }));
+    }
+    root.append(svg("line", { class: "now-line", x1: x0, x2: x0, y1: pad.t, y2: H - pad.b }),
+      svg("line", { class: "grid", x1: x1, x2: x1, y1: pad.t, y2: H - pad.b, "stroke-dasharray": "4 3" }),
+      svg("text", { x: x1, y: bandTop + bandH + 14, "text-anchor": "middle", text: shortDate(plan.horizonDate).replace(/, \d{4}$/, "") }));
+    const labels = [];
+    for (const lv of levels) {
+      root.append(svg("line", { x1: L, x2: x1, y1: Y(lv.price), y2: Y(lv.price), stroke: `var(${lv.color})`, "stroke-width": 1.5, "stroke-dasharray": lv.dash || null }));
+      labels.push({ text: `${lv.label} ${money(lv.price, 0)}`, y: Y(lv.price) + 4 });
+    }
+    if (be) {
+      root.append(svg("path", { d: `M${x1} ${Y(be.price) - 6} L${x1 + 6} ${Y(be.price)} L${x1} ${Y(be.price) + 6} L${x1 - 6} ${Y(be.price)} Z`, fill: "var(--series-2)", stroke: "var(--panel)", "stroke-width": 1.5 }));
+      labels.push({ text: `${be.label} ${money(be.price, 0)}`, y: Y(be.price) + 4 });
+    }
+    for (const e of spreadLabels(labels, 13, pad.t + 4, H - pad.b)) root.append(halo({ x: x1 + 10, y: e.y, class: "lbl", text: e.text }));
+  }
   root.append(svg("path", { d: rows.map((r, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(r.close).toFixed(1)}`).join(" "), fill: "none", stroke: "var(--ink)", "stroke-width": 1.6 }));
   if (!rows[n - 1].complete) root.append(svg("circle", { cx: X(n - 1), cy: Y(rows[n - 1].close), r: 3.5, fill: "var(--panel)", stroke: "var(--ink)", "stroke-dasharray": "2 1.5" }));
   const hover = svg("line", { class: "hover-line", y1: pad.t, y2: bandTop + bandH, visibility: "hidden" });
@@ -636,7 +669,16 @@ function trendHistoryChart(t) {
   const tip = el("div", { class: "tip" });
   root.addEventListener("pointermove", evt => {
     const box = root.getBoundingClientRect();
-    const i = Math.max(0, Math.min(n - 1, Math.round(((evt.clientX - box.left) * W / box.width - L) / (R - L) * (n - 1))));
+    const i = Math.max(0, Math.min(n - 1 + f, Math.round(((evt.clientX - box.left) * W / box.width - L) / (R - L) * (n - 1 + f))));
+    if (i > n - 1) {
+      hover.setAttribute("x1", X(n - 1 + f)); hover.setAttribute("x2", X(n - 1 + f)); hover.setAttribute("visibility", "visible");
+      tip.replaceChildren(el("div", { class: "tip-head", text: `${shortDate(plan.horizonDate)}, the horizon` }),
+        ...levels.map(lv => el("div", { text: `${lv.label}: ${money(lv.price)}` })),
+        band ? el("div", { text: `Option prices imply a typical range of ${money(band.low)} to ${money(band.high)} (one standard deviation)` }) : null,
+        be ? el("div", { text: `${be.legend || be.label}: ${money(be.price)}` }) : null);
+      tooltipAt(tip, box, X(n - 1 + f), W);
+      return;
+    }
     hover.setAttribute("x1", X(i)); hover.setAttribute("x2", X(i)); hover.setAttribute("visibility", "visible");
     tip.replaceChildren(el("div", { class: "tip-head", text: shortDate(rows[i].date) + (rows[i].complete ? "" : " (so far)") }),
       el("div", { text: `${money(rows[i].close)} · ${trendWord(rows[i].state)}` }), el("div", { class: "tip-sub", text: `Net ${num(rows[i].net, 0)} points` }));
@@ -645,7 +687,10 @@ function trendHistoryChart(t) {
   root.addEventListener("pointerleave", () => { hover.setAttribute("visibility", "hidden"); tip.style.display = "none"; });
   const present = TREND_ORDER.filter(s => rows.some(r => r.state === s));
   wrap.append(el("div", { class: "chart" }, root, tip),
-    el("div", { class: "legend" }, present.map(s => el("span", {}, el("b", { class: "key-box", style: `background:${TREND_FILL[s]}` }), trendWord(s)))));
+    el("div", { class: "legend" }, present.map(s => el("span", {}, el("b", { class: "key-box", style: `background:${TREND_FILL[s]}` }), trendWord(s))),
+      plan ? levels.map(lv => el("span", {}, el("i", { style: `background: var(${lv.color})` }), lv.label)) : null,
+      band ? el("span", {}, el("b", { class: "key-box band-key" }), "Range option prices imply (±1 sd)") : null,
+      be ? el("span", {}, el("i", { style: "background: var(--series-2)" }), be.legend || be.label) : null));
   return wrap;
 }
 

@@ -258,4 +258,19 @@ DECIDE_AFTER.push((out, dec) => {
   out.insertBefore(comparePanel(dec, rerun), card ? card.nextSibling : null);
 });
 
+// The trend chart above the thesis carries the plan once it is graded (2.5): levels, the range option prices
+// imply by the horizon, and where the compared contract breaks even then.
+DECIDE_AFTER.push((out, dec) => {
+  const section = out.closest("section"), old = section && section.querySelector(".trend-chart");
+  if (!old || !old.trend) return;
+  const g = dec.grade, o = dec.options, m = o.market;
+  const pick = o.picks.find(x => x.category === "BEST RISK-ADJUSTED") || o.picks[0];
+  const k = pick && pick.contract;
+  const plan = { horizonDate: o.thesis.horizon_date, horizonDays: dec.thesis.horizonDays,
+    levels: [{ label: "Target 1", price: g.levels.target_1, color: "--div-pos" }, { label: "Target 2", price: g.levels.target_2, color: "--div-pos", dash: "5 4" },
+      { label: "Invalidation", price: g.levels.invalidation, color: "--div-neg" }],
+    band: m && m.range_1sd_at_horizon, breakeven: k && isNum(k.breakeven_at_horizon) ? { label: "Breakeven", legend: `Where the ${contractName(k)} breaks even then`, price: k.breakeven_at_horizon } : null };
+  old.replaceWith(trendHistoryChart(old.trend, plan));
+});
+
 Object.assign(BUILDERS, { today: buildToday });

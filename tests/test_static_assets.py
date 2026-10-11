@@ -149,6 +149,10 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
         page.wait_for_selector(".compare .chart svg path", timeout=60000)
         assert page.locator(".compare tbody tr").count() == 2
         assert page.locator(".compare .legend span").count() == 2
+        # The trend chart now carries the plan: the axis runs to the horizon with the levels on it.
+        page.wait_for_selector(".trend-chart h3:has-text('your plan')", timeout=30000)
+        assert page.locator(".trend-chart svg path.band").count() == 1
+        assert "Invalidation" in page.locator(".trend-chart .legend").inner_text()
         assert "unknown" not in page.locator(".compare tbody").inner_text().replace("Unknown", "")
         assert "$0 against" not in page.locator(".compare tbody").inner_text()
         card = page.locator(".panel.thesis .pick").first
