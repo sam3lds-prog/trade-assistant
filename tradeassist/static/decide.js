@@ -122,13 +122,13 @@ function buildToday() {
 const DECIDE_AFTER = [];
 
 // The spread of outcomes on the horizon date that option prices imply (2.5.1): the profit or loss at the
-// 10th, 50th and 90th percentile stock price of one distribution. The middle one, and the range nine in ten
+// 10th, 50th and 90th percentile stock price of one distribution. The middle one, and the range eight in ten
 // fall in. Any missing piece makes the whole band unknown, never $0.
 function bandText(pnls) {
   if (!pnls || pnls.length !== 3 || !pnls.every(isNum)) return el("span", { class: "muted", text: "unknown" });
   const [a, mid, b] = pnls, lo = Math.min(a, b), hi = Math.max(a, b);
   return el("div", { class: "band-cell" }, el("strong", { text: signedMoney(mid, 0) }), el("span", { class: "muted", text: " middle outcome" }),
-    el("div", { class: "small", text: `Nine in ten between ${signedMoney(lo, 0)} and ${signedMoney(hi, 0)}` }));
+    el("div", { class: "small", text: `Eight in ten between ${signedMoney(lo, 0)} and ${signedMoney(hi, 0)}` }));
 }
 
 // A chance that rounds to 0% or 100% is still a measured one: say how small or large, not "0%".
@@ -274,7 +274,7 @@ function comparePanel(dec, rerun) {
   // On average a contract is worth about what it costs, by construction; said once here, not as a column.
   const k = c && c.k;
   const avg = k && isNum(k.implied_value_at_horizon) ? ` Averaged over every outcome, option prices imply the ${contractName(k)} is worth ${money(k.implied_value_at_horizon, 0)} on ${date} against ${money(k.premium, 0)} paid:` : " Averaged over every outcome, a contract is worth";
-  box.append(el("p", { class: "small muted", text: `The middle outcome is the 50th percentile, and nine in ten outcomes fall between the 10th and the 90th.${avg} about what you pay, by construction, since each contract is read on the volatility its own price implies. It is not an edge.` }));
+  box.append(el("p", { class: "small muted", text: `The middle outcome is the 50th percentile, and eight in ten outcomes fall between the 10th and the 90th.${avg} about what you pay, by construction, since each contract is read on the volatility its own price implies. It is not an edge.` }));
   return box;
 }
 

@@ -26,6 +26,7 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "ai_assistant": True,
     "today": True,
     "trade_history": True,
+    "trade_ideas": True,
     "options_backtest": False,
 }
 

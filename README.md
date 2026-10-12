@@ -69,7 +69,7 @@ up to eight stocks leaning long and eight leaning short. Pick one and **Analyze 
 (Decide) opens with that direction, grades the stock trade and finds calls or puts on the same
 levels from one thesis form. It sets the sized shares beside the best risk-adjusted contract:
 what each costs, makes at the target and loses if wrong, the chance option prices imply, and
-the middle outcome with the range nine in ten outcomes fall in on your horizon date. The trend chart
+the middle outcome with the range eight in ten outcomes fall in on your horizon date. The trend chart
 then runs on to your horizon date with the levels, the range option prices imply and where
 the contract breaks even. **Set the limit** on any contract opens Price an option on it,
 already priced on the limit ladder. Scanner rows open Decide too. The menu is grouped Today,
@@ -86,6 +86,14 @@ account activity report and analysed on this computer. For any dates you pick it
 Every trade opens to the statement rows it was built from, so each figure can be checked
 against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
 orders and holdings through the Robinhood connection, read-only.
+
+Version 2.7 adds **Trade ideas** (under Find). It scans up to the 200 largest US companies and lists the
+highest-graded trades to buy and to short: each with its entry, stop, targets, a size for your risk per
+trade, and what it makes if target 1 is reached or loses if stopped. Any of them can be simulated on
+20,000 price paths at the volatility option prices imply, following the trade's own stop and targets.
+The simulation shows how often each way out happens and what each makes or loses, with shares and with
+the best call or put your risk per trade pays for. It is a model with no view on direction, not a
+forecast.
 
 ## Start it
 
@@ -397,6 +405,40 @@ and without rule overrides.
 
 ## Version 2
 
+**Trade ideas (2.7).** Under Find. Switch it off with `FEATURE_TRADE_IDEAS=0`.
+
+1. Pick the stocks: the 200 largest US companies (a fixed list, not updated automatically), the 100
+   large ones, or your watchlist. Press **Scan**. The scan runs in the background with a progress bar and
+   can be stopped.
+   - On demo data the 200 take about two minutes.
+   - With live data, the first scan of the day also fetches each stock's price history, spaced out so the
+     other screens keep working; that takes several minutes. Later scans reuse it.
+   - The last result is kept, also across restarts.
+2. **Highest-graded trades to buy** and **to short**. Each stock's side comes from its trend evidence, as
+   on Today, and is held back the same way. The trade on that side is graded as on Decide: entry at the
+   current price, a stop and two targets from the chart, and shares sized so the stop costs at most your
+   risk per trade (never more than the account). Ranked by grade, then score, then reward to risk. "If
+   target 1 is reached" and "If stopped" are the sized trade's dollars at those prices, not what to
+   expect. Held-back, AVOID and unread stocks are listed below with the reason.
+3. **Simulate** on any row, or type your own levels. The trade is walked over 20,000 price paths to the
+   horizon (20 trading days unless you change it), at the at-the-money volatility option prices imply
+   (or the stock's own when there are none). On each path it exits at the stop or the target, whichever
+   the price touches first, or at the close on the horizon date. Exit plans: all at target 1, all at
+   target 2, or half at each.
+
+   The simulation shows:
+   - how often each way out happens and what each makes or loses;
+   - the price's range day by day, with a few paths;
+   - the spread of results with shares, and with the best call (buy) or put (short) your risk per trade
+     pays for.
+
+   The contract is valued at its own implied volatility, on the same exits. Averaged over every path a
+   trade comes out close to break-even: what is left is the carry in the forward price, not an edge. The
+   model has no view on direction, so any edge is your own view of why the target is likelier than that.
+   Fills are at the levels; a gap through the stop costs more, and a short's borrow fee is not included.
+4. From a result: **Set the limit** on the contract, **Simulate the contract alone**, or **Open the
+   thesis on Decide** with the same levels.
+
 **My trades (2.6).** Your Robinhood trading history, analysed. Switch it off with
 `FEATURE_TRADE_HISTORY=0`.
 
@@ -491,7 +533,7 @@ and find a contract**:
    risk-adjusted and most conservative contracts, and the ones to avoid.
 3. Sets **shares or a contract** side by side: what you pay, the result at target 1 and if
    invalidated, the chance option prices imply of a profit on the horizon date, and the
-   outcome then: the middle one, and the range nine in ten fall in.
+   outcome then: the middle one, and the range eight in ten fall in.
 
 The share figures all start from your entry (or today's price when you leave it blank). The
 outcomes come from the 10th, 50th and 90th percentile stock prices of one distribution, never
@@ -617,6 +659,14 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
 - 2.3.1: two independent reviewers checked 2.1.0 to 2.3.0 for accounting, data loss,
   look-ahead and security; the 27 findings were reproduced, fixed and given regression tests
   (`tests/test_review_fixes.py`; listed in `docs/IMPROVEMENTS.md`).
+- 2.7 (Trade ideas):
+  - each listed trade's side matches Today's rule and its grade, levels and size match Decide's;
+  - the simulation's chance of touching one level before another matches the closed form;
+  - a day where both levels could be touched is checked against a 64-steps-a-day grid;
+  - with no drift a trade averages break-even, and so does a contract off the money;
+  - the scan runs one at a time, can be stopped, survives a restart, and survives one stock's failure.
+
+  Two independent reviews found 31 problems, all fixed or noted (`docs/IMPROVEMENTS.md`).
 - 2.6 (My trades), on hand-made reports in Robinhood's layout:
   - FIFO results from the cash columns;
   - expirations, assignments, exercises, splits and reverse splits;
@@ -721,6 +771,8 @@ tradeassist/
   tradehistory.py          your Robinhood history: the report's parser, imports, the sample (2.6)
   tradeanalysis.py         trades rebuilt from it; strategies, risk, periods and patterns (2.6)
   robinhood_account.py     optional read of your orders and holdings through the connection (2.6)
+  ideas.py                 trade ideas: the background scan of up to 200 stocks, graded and ranked (2.7)
+  tradesim.py              the simulation of one trade: paths, stop and target exits, shares and a contract (2.7)
   makeup.py news.py        the market's make-up; headlines and their tone
   ai.py briefs.py          the AI plug-in (Anthropic API) and what it is asked
   portfolio.py analytics.py alerts.py   portfolio risk, journal analytics, alerts
@@ -729,9 +781,9 @@ tradeassist/
   versions.py              version labels recorded with every result
   static/                  the web page: flow.js (2.5 pure helpers, tested under Node), app.js classic screens,
                            v2.js version 2 screens, lab.js 2.4 screens, decide.js Today and Decide (2.5),
-                           trades.js My trades (2.6)
+                           trades.js My trades (2.6), ideas.js Trade ideas (2.7)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
-docs/IMPROVEMENTS.md       the 2.1.1 to 2.6 engineering record: defects found, tests, reports
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.7 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```

@@ -107,6 +107,45 @@ def rank(rows: list[dict[str, Any]], size: int = LIST_SIZE) -> dict[str, Any]:
             "not_measured": [r["symbol"] for r in rows if not r["measured"]]}
 
 
+def read_stock(analyst: Any, sym: str, regime_key: str | None, check_reversal: bool,
+               buckets: list[dict[str, Any]] | None) -> tuple[dict[str, Any] | None, dict[str, str] | None, str | None]:
+    """One stock's lean (rule b) on its last finished bar: (row, error, reversal-unread note). A stock that
+    cannot be read gives an error and no row: unknown is never a lean and never "no lean"."""
+    try:
+        t = analyst.trend(sym)
+    except (DataError, ValueError) as exc:
+        return None, {"symbol": sym, "error": str(exc)}, None
+    day = t.get("confirmed")
+    if not day:                     # no finished bar to read: unknown, not a lean and not "no lean"
+        return None, {"symbol": t.get("symbol", sym), "error": "no finished bar to read the trend on"}, None
+    net = day.get("net_score")
+    bottom = top = None
+    missed = None
+    # The reversal reading is the slow part, so it is read only where it can change the answer.
+    read = check_reversal and net not in (None, 0) and not hostile("LONG" if net > 0 else "SHORT", regime_key)
+    if read:
+        try:
+            r = analyst.reversal(sym, history=False)["confirmed"]
+            bottom, top = r["bottom"]["stage"], r["top"]["stage"]
+        except (DataError, ValueError, KeyError) as exc:
+            read = False
+            missed = f"{t['symbol']} ({exc})"
+    verdict = lean(net, regime_key, bottom, top, reversal_read=read)
+    hist = t.get("history") or []
+    done = [h for h in hist if h.get("complete")]
+    close = done[-1]["close"] if done else None
+    prev = done[-2]["close"] if len(done) > 1 else None
+    row = {"symbol": t["symbol"], "date": day["date"], "state": day["state"], "label": day["label"],
+           "net_score": net, "bullish_score": day.get("bullish_score"),
+           "bearish_score": day.get("bearish_score"), "coverage": day.get("coverage"),
+           "close": close, "change_pct": 100 * (close / prev - 1) if close and prev else None,
+           "reversal": {"bottom": bottom, "top": top} if read else None,
+           # A lean kept only because its reversal could not be read says so on its own row.
+           "reversal_unread": bool(check_reversal and verdict["lean"] and not read),
+           "past_10d": past_bucket(net, buckets), **verdict}
+    return row, None, missed
+
+
 class Today:
     def __init__(self, svc: Any, analyst: Any, features: dict[str, bool]):
         self.svc = svc
@@ -136,39 +175,13 @@ class Today:
         buckets = cal.get("buckets") if meta else None
         rows, errors, unread = [], [], []
         for sym in names:
-            try:
-                t = self.analyst.trend(sym)
-            except (DataError, ValueError) as exc:
-                errors.append({"symbol": sym, "error": str(exc)})
-                continue
-            day = t.get("confirmed")
-            if not day:                     # no finished bar to read: unknown, not a lean and not "no lean"
-                errors.append({"symbol": t.get("symbol", sym), "error": "no finished bar to read the trend on"})
-                continue
-            net = day.get("net_score")
-            bottom = top = None
-            # The reversal reading is the slow part, so it is read only where it can change the answer.
-            read = check_reversal and net not in (None, 0) and not hostile("LONG" if net > 0 else "SHORT", regime_key)
-            if read:
-                try:
-                    r = self.analyst.reversal(sym, history=False)["confirmed"]
-                    bottom, top = r["bottom"]["stage"], r["top"]["stage"]
-                except (DataError, ValueError, KeyError) as exc:
-                    read = False
-                    unread.append(f"{t['symbol']} ({exc})")
-            verdict = lean(net, regime_key, bottom, top, reversal_read=read)
-            hist = t.get("history") or []
-            done = [h for h in hist if h.get("complete")]
-            close = done[-1]["close"] if done else None
-            prev = done[-2]["close"] if len(done) > 1 else None
-            rows.append({"symbol": t["symbol"], "date": day["date"], "state": day["state"], "label": day["label"],
-                         "net_score": net, "bullish_score": day.get("bullish_score"),
-                         "bearish_score": day.get("bearish_score"), "coverage": day.get("coverage"),
-                         "close": close, "change_pct": 100 * (close / prev - 1) if close and prev else None,
-                         "reversal": {"bottom": bottom, "top": top} if read else None,
-                         # A lean kept only because its reversal could not be read says so on its own row.
-                         "reversal_unread": bool(check_reversal and verdict["lean"] and not read),
-                         "past_10d": past_bucket(net, buckets), **verdict})
+            row, error, missed = read_stock(self.analyst, sym, regime_key, check_reversal, buckets)
+            if error:
+                errors.append(error)
+            if missed:
+                unread.append(missed)
+            if row:
+                rows.append(row)
         if unread:
             notes.append("The reversal reading failed for " + ", ".join(unread) + ": their leans were not checked "
                          "for a forming top or bottom.")
@@ -188,4 +201,4 @@ class Today:
                         "Scores count evidence; they are not chances."}
 
 
-__all__ = ["Today", "lean", "rank", "hostile", "past_bucket", "LIST_SIZE", "HOSTILE", "HOSTILE_ROWS"]
+__all__ = ["Today", "read_stock", "lean", "rank", "hostile", "past_bucket", "LIST_SIZE", "HOSTILE", "HOSTILE_ROWS"]

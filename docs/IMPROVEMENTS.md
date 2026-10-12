@@ -1,4 +1,4 @@
-# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.6)
+# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.7)
 
 This is the engineering record for the improvement programme that follows 2.1.0: the
 baseline it started from, what was found in the code, what each sprint changed, the tests
@@ -762,3 +762,102 @@ Also pinned by tests:
 - a trade's statement rows come back exactly as written in the report.
 
 Tests: 827 passed, 2 skipped, including the Chromium tests; ruff is clean.
+
+## 2.7: trade ideas and a simulation of one trade
+
+Requested: scan the top 200 stocks, show the best trades to buy and to short, and take any of them into a
+simulation that shows the money it can make.
+
+Read as follows:
+
+- **Top 200:** the 200 largest US companies, as a fixed list.
+- **Best trades:** the highest-graded trades on the side the trend evidence points, with what each makes
+  and loses at its levels.
+- **Simulate:** a model of the trade's own exits on paths at the market-implied volatility, with shares
+  and with a contract.
+
+The rules were kept throughout:
+
+- no order path;
+- nothing about the account read or sent;
+- a grade and a score are not chances;
+- the simulation is labelled a model with no view on direction, whose average is about break-even;
+- unknown is never zero.
+
+Built in one part (#30), then the review fixes:
+
+- `scanner.TOP_200`: the 100 large caps plus 100 more, each mapped to a sector fund.
+- `today.read_stock`: Today's per-stock reading, now shared with the scan.
+- `ideas.py`: the background scan, ranking and arithmetic.
+- `tradesim.py`: the simulation.
+- `/v2/ideas`, `/v2/ideas/scan`, `/v2/ideas/stop`, `/v2/ideas/simulate`, behind `FEATURE_TRADE_IDEAS`.
+- The Trade ideas screen (`static/ideas.js`).
+
+### Independent review of 2.7 and fixes
+
+Two reviewers checked the release before it shipped, without having seen it written. One covered the
+arithmetic, statistics and model; the other covered robustness, concurrency, security and the screen in a
+real browser.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| H1 | `ideas.js` declared `renderSimulation`, the name of the simulator's own renderer in `app.js`, so Simulate a trade (and Analyze's reversal options) drew nothing | High | Renamed `renderTradeSim` | `test_no_name_is_declared_at_the_top_of_two_scripts`, `test_simulate_a_trade_still_draws_after_trade_ideas_loads` |
+| F1 | The contract was valued at its own volatility on paths walked at the at-the-money one, so the skew showed as an average profit on calls (+8%) and loss on puts (−12%) | High | The contract walks on the same random numbers at its own volatility and carry | `test_a_contract_off_the_money_is_not_a_profit_or_loss_by_its_skew_alone` |
+| F2 | A day where both the stop and a target could be touched was given to the stop, and independent draws overstated double touches; with tight levels the target came first 42% of the time against 50% | Medium | Such a day is walked again in 32 bridge steps to find which came first | `test_a_day_where_both_levels_could_be_touched_is_walked_again...` |
+| F3 | A short's fallback target 2 could be below zero (CVX: −$3.34), and its Simulate button failed | Medium | Suggested short targets never go below a twentieth of the entry (evaluator 1.1); a plan checks only the levels it uses | `test_a_short_s_suggested_targets_never_fall_to_zero`, `test_levels_on_the_wrong_side_are_refused` |
+| F4 | A trade too large for one share simulated as $0 with a "0%" chance | Medium | One share, with a note; zero shares are refused | `test_with_no_whole_share_inside_the_limit_one_share_is_simulated_and_said` |
+| F5, M4 | A chosen contract expiring before the horizon was valued as alive afterwards (+80% on cost) | Medium | Refused with the reason; its other problems become notes | `test_simulation_requests_that_cannot_be_right_are_refused` |
+| F6 | "Simulate the contract alone" passed a model price for an entry away from the stock | Medium | Passes today's midpoint | browser test |
+| M1 | Opening the screen started a 200-stock scan after every restart, with no way to stop it | Medium | No automatic scan; Stop button; the last result is saved | `test_a_scan_can_be_stopped_and_the_last_result_survives_a_restart`, browser test |
+| M2 | Live data: two history requests per stock (3 then 5 years) and no pacing; Tradier's rate-limit wait held the provider lock | Medium | Five years fetched once; the scan's requests spaced at about half the allowance (`Market.paced`); the wait happens outside the lock | `test_a_background_job_spaces_its_own_requests_only` |
+| M3 | One unexpected exception discarded the whole scan, and its raw text reached the screen | Medium | Each stock is caught and listed with the kind of error; job errors are redacted | `test_one_stock_that_fails_unexpectedly_does_not_stop_the_scan` |
+| F7 | Contracts were valued at the close of the exit day, losing extra time decay | Low | Valued at the middle of the day a level is touched | `test_the_contract_is_sold_on_the_same_exits_at_its_own_value` |
+| F8 | The split plan sold half a contract or half a share | Low | Whole units, the odd one at target 1; one unit is sold at target 1, said | `test_the_split_plan_sells_whole_units...` |
+| F9 | The carry mixed two spot quotes and a different time floor | Low | Read against the evaluator's own spot and time | (review check) |
+| F10 | When the levels failed the options check, the note blamed missing option prices | Low | Says the real reason; the chain's at-the-money volatility is still used | `test_without_option_prices_the_stock_s_own_volatility_is_used_and_said` |
+| F11 | Realized volatility (per trading year) stepped in calendar time | Low | Steps in trading days in that case | (review check) |
+| F12 | The share average is the carry, not zero | Low | Shown as "the carry, not an edge", with its error | (screen) |
+| F13 | Paths out at target 1 and then stopped were drawn as "neither"; "middle path" was a daily median | Low | Legend and colours per exit; "median price each day" | (screen) |
+| F14 | The contract count used the midpoint and the cost note the repriced premium | Low | Both use the repriced premium; the note counts the contracts | (screen) |
+| F15 | Earnings inside the horizon used calendar days in the simulation and trading days in the list | Low | One rule, trading days | (code) |
+| F16 | A stock read but not graded was counted as read and listed as not read | Low | Listed apart as "read but not graded" | `test_one_stock_that_fails_unexpectedly...` |
+| F17 | Size was not capped by the account | Low | Never more than the account, said | (code) |
+| L1 | Reading all stocks before grading any outran the 60-second cache, so trends were built twice | Low | Read and grade each stock in one pass | (timing) |
+| L2 | Polling continued after leaving the screen, carried the whole result each time, and stopped for good on one error | Low | Brief polls, stopped when hidden, retried with backoff | browser test |
+| L3 | Enter on a row's Simulate button ran two simulations; the progress bar had no name and flooded screen readers | Low | The button keeps its Enter; the bar is labelled and only the finish is announced | (screen) |
+| L4 | No range checks on prices; target 2 on the wrong side accepted; a put for a long accepted | Low | Levels between a twentieth and twenty times the entry; target 2 beyond target 1; a long takes a call, a short a put | `test_simulation_requests_that_cannot_be_right_are_refused` |
+| L5 | The Stocks select did not follow the scan shown | Low | It does; a second start says one is already running | `test_the_scan_runs_in_the_background_one_at_a_time` |
+| L6 | "Best trades" and a bold green "At target 1" read as a forecast | Low | "Highest-graded", "If target 1 is reached", not bold | browser test |
+| L7 | The flag test expected Find to vanish with the Scanner off | Low | Checks the Scanner's own button | browser test |
+| N1 | The chain cache was evicted without a lock | Note | Locked | (code) |
+| N2 | Unused names, `__version__`, ties decided by rounding noise, the Decide handoff's contract count | Note | Fixed | (code) |
+| N3 | Two freshness tests failed during market hours (demo quotes read DELAYED), on main as well | Note | They accept DELAYED for a source that is not real-time | `test_freshness.py` |
+
+Noted and left as they are:
+
+- **The lean and the grade during market hours.** The lean reads the last finished bar; the grade reads
+  today's provisional bar when there is one, as on Decide.
+- **The time grid.** Run before the close, the first step covers the rest of today. Market holidays count
+  as trading days, as elsewhere in the app.
+- **Charts on a phone.** At 390 px the charts scroll sideways, the app's convention for wide charts.
+- **The keyboard.** Space does not open a table row; the shared table helper answers Enter only.
+
+The reviewers checked these and found them sound:
+
+- the Brownian-bridge formula for log prices with drift over uneven steps;
+- the closed form for touching one level before another;
+- the shared draw for the two targets;
+- the split plan's logic and labels;
+- the time grid;
+- the side following Today's rule for every row checked;
+- entries equal to Decide's price;
+- the dollar arithmetic for shorts;
+- determinism;
+- one scan at a time, with the result swapped under the lock;
+- shutdown mid-scan;
+- flags off;
+- dark mode;
+- no page-level horizontal scroll at 390 px;
+- every handoff carrying the same contract or levels.
+
+Tests: 855 passed, 2 skipped, including the Chromium tests; ruff is clean.

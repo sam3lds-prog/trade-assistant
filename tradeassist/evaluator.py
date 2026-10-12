@@ -51,6 +51,7 @@ REGIME_FIT_SHORT = {"BEAR_VOLATILE": 90, "BEAR_CALM": 100, "TRANSITION": 45, "RA
 STOP_BUFFER_ATR = 0.25      # the suggested invalidation sits this far beyond the swing or level
 FALLBACK_STOP_ATR = 2.0
 MIN_RR = 0.75
+SHORT_TARGET_FLOOR = 0.05   # 2.7: a short's suggested target is never below a twentieth of the entry
 
 
 class EvaluationError(ValueError):
@@ -114,6 +115,14 @@ def suggest_levels(df: pd.DataFrame, direction: int, entry: float, reversal: flo
         notes.append("Target 1 at the first level in the way; target 2 at three times the risk.")
     else:
         notes.append("Targets at the first two levels in the way.")
+    if direction < 0:
+        # 2.7: a short cannot make more than the price. A multiple of a wide risk can land at or below zero;
+        # such a target is set at a twentieth of the entry instead, and the note says so.
+        floor = SHORT_TARGET_FLOOR * entry
+        if t1 < floor or t2 < floor:
+            notes.append(f"A target at a multiple of the risk would be at or below zero; set at ${floor:,.2f}, a "
+                         "twentieth of the entry, instead.")
+            t1, t2 = max(t1, floor), max(t2, floor)
     return {"invalidation": float(invalidation), "target_1": float(t1), "target_2": float(t2), "atr": atr,
             "structure_state": st["state"], "notes": notes,
             "levels": {"support": st["levels"]["support"], "resistance": st["levels"]["resistance"]}}

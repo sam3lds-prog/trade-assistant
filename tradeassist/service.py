@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -78,6 +79,7 @@ class TradeAssistant:
         self.market = Market(provider, db, settings)
         self.journal = Journal(db)
         self._chains: dict[tuple[str, str], dict[str, Any]] = {}   # last analysed chain per symbol and expiration
+        self._chains_lock = threading.Lock()
         self.sec = sec.SecClient(settings.sec_user_agent, db)
 
     # --- status ------------------------------------------------------------
@@ -202,10 +204,11 @@ class TradeAssistant:
     def _remember_chain(self, symbol: str, expiration: str, analysis: Any) -> dict[str, Any]:
         entry = {"at": time.time(), "analysis": analysis, "calibration": {},
                  "quotes": [q for c in analysis.contracts for q in (c.get("bid"), c.get("ask"))]}
-        self._chains[(symbol, expiration)] = entry
-        if len(self._chains) > 50:                       # keep the newest few; this is one user's screen
-            oldest = min(self._chains, key=lambda k: self._chains[k]["at"])
-            del self._chains[oldest]
+        with self._chains_lock:                          # 2.7: requests and the background scan share it
+            self._chains[(symbol, expiration)] = entry
+            if len(self._chains) > 50:                   # keep the newest few; this is one user's screen
+                oldest = min(self._chains, key=lambda k: self._chains[k]["at"])
+                del self._chains[oldest]
         return entry
 
     def live(self, *, symbol: str, expiration: str, option_type: str, strike: float, side: str = "buy",

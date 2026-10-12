@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
-SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js")                 # in the order index.html loads them
+SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js")     # in the order index.html loads them
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -168,7 +168,7 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
         assert "unknown" not in page.locator(".compare tbody").inner_text().replace("Unknown", "")
         body = page.locator(".compare tbody").inner_text()
         assert "$0 against" not in body and "if bought" not in body
-        assert body.count("middle outcome") == 2 and body.count("Nine in ten between") == 2
+        assert body.count("middle outcome") == 2 and body.count("Eight in ten between") == 2
         card = page.locator(".panel.thesis .pick").first
         chosen = page.evaluate("""() => {
           const k = state.decision.options.picks[0].contract;
@@ -247,7 +247,9 @@ def test_without_the_trend_engine_the_app_lands_on_price_and_keeps_the_reversal_
     with demo_page(tmp_path / "b", {"scanner": False}) as (page, errors):
         page.goto(page.base + "#analyze")
         page.wait_for_selector(".reversal-scan", timeout=20000)
-        assert page.locator('.rail .nav-group[data-group="find"]').is_hidden()
+        # 2.7: Find also holds Trade ideas, so the group stays; the Scanner's own button is what goes.
+        assert page.locator('.rail button.nav[data-view="scanner"]').is_hidden()
+        assert page.locator('.rail button.nav[data-view="ideas"]').is_visible()
     assert errors == []
 
 
@@ -314,4 +316,54 @@ def test_my_trades_imports_a_report_picks_dates_and_shows_the_statement_rows(tmp
         page.select_option('select[aria-label="Dates"]', "all")
         page.wait_for_function("[...document.querySelectorAll('section:not(.hidden) p.small > strong')].some(e => e.textContent.startsWith('Jan 5, 2026 to'))", timeout=30000)
         assert page.input_value('input[aria-label="From"]') == "" and page.input_value('input[aria-label="To"]') == ""
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_trade_ideas_lists_simulate_a_trade_and_hand_it_to_decide(tmp_path):
+    """2.7: the scan's lists, a simulation of one trade with its exits, and the same levels on Decide."""
+    with demo_page(tmp_path) as (page, errors):
+        # The screen does not scan by itself; scan the watchlist through the API first.
+        page.request.post(page.base + "v2/ideas/scan", data={"universe": "watchlist"})
+        for _ in range(400):
+            if page.request.get(page.base + "v2/ideas").json()["job"]["state"] != "running":
+                break
+            time.sleep(0.3)
+        page.goto(page.base + "#ideas")
+        page.wait_for_selector("h3:has-text('Highest-graded trades to buy')", timeout=30000)
+        assert "Highest-graded trades to short" in page.inner_text("section:not(.hidden)")
+        assert page.input_value('select[aria-label="Stocks"]') == "watchlist"         # the select follows the scan
+        row = page.locator(".idea-table tbody tr").first
+        symbol = row.locator("td strong").first.inner_text().strip()
+        row.locator("button:text('Simulate')").click()
+        page.wait_for_selector(".outcome-tiles", timeout=60000)
+        body = page.inner_text(".sim-panel")
+        assert "Stopped out" in body and "20,000 paths" in body and "not a forecast" in body
+        assert page.locator(".sim-panel svg[role=img]").count() == 2
+        # Another exit plan: half out at each target.
+        page.select_option('select[aria-label="Exit plan"]', "split")
+        page.click(".sim-panel button:text-is('Simulate')")
+        page.wait_for_selector("text=Half out at target 1, the rest at target 2", timeout=60000)
+        stop = float(page.input_value('.sim-panel input[aria-label="Stop"]'))
+        page.click("text=Open the thesis on Decide")
+        page.wait_for_function(f"state.thesis && state.thesis.symbol === '{symbol}' && location.hash === '#analyze'", timeout=30000)
+        assert page.evaluate("state.thesis.invalidation") == pytest.approx(stop, abs=0.01)
+    assert errors == []
+
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_simulate_a_trade_still_draws_after_trade_ideas_loads(tmp_path):
+    """2.7 review: a function of the same name in a later script replaced the simulator's renderer."""
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#simulate")
+        page.wait_for_selector('.legs select[aria-label="Strike"] option[value]', state="attached", timeout=30000)
+        page.click("section:not(.hidden) button:text-is('Simulate')")
+        page.wait_for_selector("section:not(.hidden) .sim-controls:not(.hidden)", timeout=30000)
+        assert all(not t.strip() for t in page.locator("section:not(.hidden) .error").all_inner_texts())
+        assert page.locator("section:not(.hidden) svg[role=img]").count() >= 1
+        # Trade ideas waits to be asked: opening it starts nothing.
+        page.click('.rail button.nav[data-view="ideas"]')
+        page.wait_for_selector("text=Not scanned yet", timeout=30000)
+        assert page.request.get(page.base + "v2/ideas?brief=true").json()["job"]["state"] == "idle"
     assert errors == []

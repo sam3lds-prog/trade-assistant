@@ -8,6 +8,6 @@ change would alter the output for the same data.
 SIGNAL_ENGINE_VERSION = "signals-2.1"        # patterns, structure, provisional/confirmed status; 2.1 adds reversals
 TREND_ENGINE_VERSION = "trend_engine_v2.0"
 REGIME_ENGINE_VERSION = "regime_v1.0"
-EVALUATOR_VERSION = "evaluator_v1.0"
+EVALUATOR_VERSION = "evaluator_v1.1"          # 1.1 (2.7): a short's suggested targets stay above zero
 OPTIONS_EVALUATOR_VERSION = "options_evaluator_v1.0"
 REVERSAL_ENGINE_VERSION = "reversal_v1.0"

@@ -69,6 +69,17 @@ class Market:
         self._last_quotes: dict[str, tuple[dict[str, Any], float]] = {}
         self._stale_bars: dict[str, str] = {}
         self._recorder = threading.local()
+        self._background = threading.local()     # 2.7: the pace of a background job's own requests
+
+    @contextmanager
+    def paced(self, seconds: float):
+        """Inside the block, this thread's requests to the source are spaced at least `seconds` apart, so a long
+        background job (the trade-ideas scan) leaves most of the source's request allowance to the screens."""
+        self._background.pace, self._background.last = max(0.0, float(seconds)), 0.0
+        try:
+            yield
+        finally:
+            self._background.pace = 0.0
 
     @property
     def info(self):
@@ -80,6 +91,12 @@ class Market:
     def _call(self, what: str, fn):
         """One request to the data source, counted for its health. While the source is paused after
         repeated failures, nothing is sent and the request fails at once with the reason."""
+        pace = getattr(self._background, "pace", 0.0)
+        if pace:
+            wait = self._background.last + pace - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            self._background.last = time.time()
         left = self.health.paused()
         if left:
             raise DataError(f"{self.info.label} failed {self.health.consecutive_failures} times in a row; requests "
