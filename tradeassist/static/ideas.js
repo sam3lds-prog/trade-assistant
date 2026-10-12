@@ -7,9 +7,8 @@
 const IDEA_UNIVERSES = [["top200", "200 largest US companies"], ["large_caps", "100 large US companies"], ["watchlist", "Your watchlist"]];
 const IDEA_SHOWN = 10;
 // How each way out of a trade reads: in profit, at a loss, or wherever the horizon left it.
-const EXIT_TONE = { target: "pos", both: "pos", t1_horizon: "pos", t1_stop: "mid", stop: "neg", horizon: "mid" };
-const TONE_COLOR = { pos: "--div-pos", neg: "--div-neg", mid: "--muted" };
-const ideaSide = d => d === "LONG" ? "buy" : "short";
+// Part out at a target and part elsewhere reads as "other": it can end either way.
+const EXIT_TONE = { target: "pos", both: "pos", t1_horizon: "mid", t1_stop: "mid", stop: "neg", horizon: "mid" };
 const levelText = v => isNum(v) ? money(v) : "n/a";
 
 function gradeChip(g, score) {
@@ -17,6 +16,14 @@ function gradeChip(g, score) {
 }
 
 /* ---------- the lists ---------- */
+// The row opens the simulation too; the button's own Enter must not also reach the row.
+function simButton(r, onPick) {
+  const b = el("button", { class: "plain small-btn", text: "Simulate" });
+  b.addEventListener("click", e => { e.stopPropagation(); onPick(r); });
+  b.addEventListener("keydown", e => e.stopPropagation());
+  return b;
+}
+
 function ideaTable(rows, onPick) {
   const wrap = table([
     { label: "Stock", cell: r => el("div", {}, el("strong", { text: r.symbol }), el("div", { class: "small" }, trendTag(r.trend.state)),
@@ -25,10 +32,11 @@ function ideaTable(rows, onPick) {
     { label: "Entry", num: true, cell: r => el("span", { title: r.entry_source === "last close" ? "No current price: the last finished close" : "The current price" }, levelText(r.entry)) },
     { label: "Stop", num: true, cell: r => levelText(r.stop) },
     { label: "Target 1", num: true, cell: r => el("div", {}, levelText(r.target_1), el("div", { class: "small muted", text: `${num(r.reward_risk_1, 1)} × the risk` })) },
-    { label: "Shares", num: true, cell: r => r.shares ? num(r.shares, 0) : el("span", { class: "small muted", title: "One share risks more than your per-trade limit", text: "too large" }) },
-    { label: "At target 1", num: true, cell: r => isNum(r.at_target_1) ? el("strong", { class: "pos-text", text: signedMoney(r.at_target_1, 0) }) : "n/a" },
-    { label: "At the stop", num: true, cell: r => isNum(r.at_stop) ? el("span", { class: "neg-text", text: signedMoney(r.at_stop, 0) }) : "n/a" },
-    { label: "", cell: r => { const b = el("button", { class: "plain small-btn", text: "Simulate" }); b.addEventListener("click", e => { e.stopPropagation(); onPick(r); }); return b; } }],
+    { label: "Shares", num: true, cell: r => r.shares ? el("div", {}, num(r.shares, 0), r.capped_by_account ? el("div", { class: "small muted", text: "cut to the account" }) : null)
+      : el("span", { class: "small muted", title: "One share risks more than your per-trade limit", text: "too large" }) },
+    { label: "If target 1 is reached", num: true, cell: r => isNum(r.at_target_1) ? el("span", { class: "pos-text", text: signedMoney(r.at_target_1, 0) }) : "n/a" },
+    { label: "If stopped", num: true, cell: r => isNum(r.at_stop) ? el("span", { class: "neg-text", text: signedMoney(r.at_stop, 0) }) : "n/a" },
+    { label: "", cell: r => simButton(r, onPick) }],
   rows, { onRow: r => onPick(r) });
   wrap.classList.add("idea-table");
   return wrap;
@@ -45,7 +53,7 @@ function ideaPanel(rows, side, onPick) {
     body.replaceChildren(list.length ? ideaTable(list, onPick) : el("p", { class: "muted small", text: `No stock leans ${side === "LONG" ? "long" : "short"} with a grade better than AVOID right now.` }), more || "");
   };
   draw();
-  return el("div", { class: "panel" }, el("h3", { text: `Best trades to ${word}${rows.length > IDEA_SHOWN ? ` (top ${IDEA_SHOWN} of ${rows.length})` : rows.length ? ` (${rows.length})` : ""}` }), body);
+  return el("div", { class: "panel" }, el("h3", { text: `Highest-graded trades to ${word}${rows.length > IDEA_SHOWN ? ` (top ${IDEA_SHOWN} of ${rows.length})` : rows.length ? ` (${rows.length})` : ""}` }), body);
 }
 
 function ideasSummary(d) {
@@ -62,7 +70,7 @@ function ideasRest(d, onPick) {
     el("p", { class: "small muted", text: "As on Today, a lean is withdrawn when the market regime works against that side or the opposite reversal is under way. These are graded on the side their evidence points, and left out of the lists above for the reason given." }),
     table([{ label: "Stock", cell: r => el("strong", { text: r.symbol }) }, { label: "Side", cell: r => r.direction === "LONG" ? "Buy" : "Short" },
       { label: "Grade", cell: r => gradeChip(r.grade, r.score) }, { label: "Why held back", cell: r => r.held_back },
-      { label: "", cell: r => { const b = el("button", { class: "plain small-btn", text: "Simulate" }); b.addEventListener("click", () => onPick(r)); return b; } }], d.held_back)));
+      { label: "", cell: r => simButton(r, onPick) }], d.held_back)));
   if (d.avoid.length) box.append(el("details", {}, el("summary", { text: `Graded AVOID: ${d.avoid.length}` }),
     el("ul", { class: "plain small" }, d.avoid.map(r => el("li", {}, el("strong", { text: `${r.symbol} (${r.direction === "LONG" ? "buy" : "short"}): ` }), r.caps.join(" ") || "the checks add up to under 35 of 100.")))));
   const parts = [];
@@ -70,6 +78,7 @@ function ideasRest(d, onPick) {
   if (d.not_measured.length) parts.push(`${d.not_measured.length} with too little evidence to score (${d.not_measured.join(", ")})`);
   if (parts.length) box.append(el("p", { class: "small", text: `No side: ${parts.join("; ")}.` }));
   if (d.errors.length) box.append(el("p", { class: "small muted", text: `Not read: ${d.errors.map(e => `${e.symbol} (${e.error})`).join("; ")}.` }));
+  if ((d.ungraded || []).length) box.append(el("p", { class: "small muted", text: `Read but not graded: ${d.ungraded.map(e => `${e.symbol} (${e.error})`).join("; ")}.` }));
   box.append(el("p", { class: "small muted", text: d.rule }));
   return box;
 }
@@ -114,16 +123,16 @@ function pathChart(s) {
     const f = s.fan[i - 1];
     cross.setAttribute("x1", X(i)); cross.setAttribute("x2", X(i));
     tip.replaceChildren(el("div", { class: "tip-head", text: shortDate(f.date) }),
-      el("div", { text: `Middle path ${money(f.p50)}` }), el("div", { class: "tip-sub", text: `Half between ${money(f.p25)} and ${money(f.p75)}` }),
+      el("div", { text: `Median ${money(f.p50)}` }), el("div", { class: "tip-sub", text: `Half between ${money(f.p25)} and ${money(f.p75)}` }),
       el("div", { class: "tip-sub", text: `Eight in ten between ${money(f.p10)} and ${money(f.p90)}` }));
     tooltipAt(tip, box, X(i), W);
   };
   hit.addEventListener("pointermove", move);
   hit.addEventListener("pointerleave", () => { tip.style.display = "none"; cross.setAttribute("x1", -10); cross.setAttribute("x2", -10); });
-  const legend = el("div", { class: "legend" }, el("span", {}, el("i", { class: "band-key fan-key" }), "Eight in ten paths"),
-    el("span", {}, el("i", { class: "band-key fan-key inner" }), "Half the paths"), el("span", {}, el("i", { style: "background: var(--ink)" }), "Middle path"),
-    el("span", {}, el("i", { style: "background: var(--div-pos)" }), "A path that reached a target"), el("span", {}, el("i", { style: "background: var(--div-neg)" }), "A path stopped out"),
-    el("span", {}, el("i", { style: "background: var(--muted)" }), "Neither"));
+  const legend = el("div", { class: "legend" }, el("span", {}, el("i", { class: "band-key fan-key" }), "Eight in ten prices each day"),
+    el("span", {}, el("i", { class: "band-key fan-key inner" }), "Half the prices each day"), el("span", {}, el("i", { style: "background: var(--ink)" }), "Median price each day"),
+    el("span", {}, el("i", { style: "background: var(--div-pos)" }), "A path out at a target"), el("span", {}, el("i", { style: "background: var(--div-neg)" }), "A path stopped out"),
+    el("span", {}, el("i", { style: "background: var(--muted)" }), "Other (neither, or part each way)"));
   return el("div", { class: "chart" }, legend, el("div", { class: "chart-scroll" }, root, tip));
 }
 
@@ -181,21 +190,21 @@ function compareTable(s) {
   if (ct) cols.push({ label: `${spec.option_type === "CALL" ? "Call" : "Put"} contract`, num: true, cell: r => r.contract });
   const rowsOf = [
     { what: "What it takes", shares: s.direction === "LONG" ? money(s.position_value, 0) : `${money(s.position_value, 0)} sold short`, contract: ct ? money(ct.cost, 0) : null },
-    { what: "If stopped out", shares: signedMoney(sh.fixed.at_stop, 0), contract: ct ? avgOf(ct, "stop") : null },
-    { what: s.plan === "split" ? "If both targets are reached" : `If ${s.plan === "target_2" ? "target 2" : "target 1"} is reached`,
+    { what: ct ? "If stopped out (the contract: on average)" : "If stopped out", shares: signedMoney(sh.fixed.at_stop, 0), contract: ct ? avgOf(ct, "stop") : null },
+    { what: `${s.plan === "split" ? "If both targets are reached" : `If ${s.plan === "target_2" ? "target 2" : "target 1"} is reached`}${ct ? " (the contract: on average)" : ""}`,
       shares: signedMoney(s.plan === "split" ? sh.fixed.at_split : s.plan === "target_2" ? sh.fixed.at_target_2 : sh.fixed.at_target_1, 0),
       contract: ct ? avgOf(ct, s.plan === "split" ? "both" : "target") : null },
     { what: "1 in 10 did worse than", shares: signedMoney(sh.p10, 0), contract: ct ? signedMoney(ct.p10, 0) : null },
     { what: "Middle result", shares: signedMoney(sh.p50, 0), contract: ct ? signedMoney(ct.p50, 0) : null },
     { what: "1 in 10 did better than", shares: signedMoney(sh.p90, 0), contract: ct ? signedMoney(ct.p90, 0) : null },
     { what: "Paths that made money", shares: chance(sh.chance_profit), contract: ct ? chance(ct.chance_profit) : null },
-    { what: "Average over all paths", shares: signedMoney(sh.mean, 0), contract: ct ? signedMoney(ct.mean, 0) : null },
+    { what: "Average over all paths (the carry, not an edge)", shares: `${signedMoney(sh.mean, 0)} ±${money(2 * sh.standard_error, 0)}`, contract: ct ? `${signedMoney(ct.mean, 0)} ±${money(2 * ct.standard_error, 0)}` : null },
   ];
   return table(cols, rowsOf);
 }
 const avgOf = (r, key) => { const x = r.by_exit.find(b => b.key === key); return x ? signedMoney(x.average, 0) : "n/a"; };
 
-function renderSimulation(s, form) {
+function renderTradeSim(s) {
   const frag = el("div");
   for (const n of s.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
   const dir = s.direction === "LONG" ? "Buy" : "Short";
@@ -212,10 +221,10 @@ function renderSimulation(s, form) {
     compareTable(s));
   const spec = s.contract_spec;
   if (spec) {
-    const contractWords = `${spec.contracts} × ${s.symbol} ${shortDate(spec.expiration)} ${num(spec.strike, spec.strike % 1 ? 2 : 0)} ${spec.option_type === "CALL" ? "call" : "put"} at ${money(spec.premium)} a share`;
+    const contractWords = `${spec.contracts} × ${s.symbol} ${shortDate(spec.expiration)} ${num(spec.strike, spec.strike % 1 ? 2 : 0)} ${spec.option_type === "CALL" ? "call" : "put"} at ${money(spec.premium)} a share, ${money(spec.cost, 0)} in all`;
     const actions = el("div", { class: "row sim-actions" });
     if (BUILDERS.price) { const b = el("button", { class: "plain", text: "Set the limit" }); b.addEventListener("click", () => state.openPricing(FLOW.pricingRequest(s.symbol, spec, spec.contracts, "buy"))); actions.append(b); }
-    if (state.openSimulation) { const b = el("button", { class: "plain", text: "Simulate the contract alone" }); b.addEventListener("click", () => state.openSimulation(s.symbol, [{ expiration: spec.expiration, option_type: spec.option_type.toLowerCase(), strike: spec.strike, side: "buy", contracts: spec.contracts, entry_price: spec.premium, entry_source: "you" }])); actions.append(b); }
+    if (state.openSimulation) { const b = el("button", { class: "plain", text: "Simulate the contract alone" }); b.addEventListener("click", () => state.openSimulation(s.symbol, [{ expiration: spec.expiration, option_type: spec.option_type.toLowerCase(), strike: spec.strike, side: "buy", contracts: spec.contracts, entry_price: spec.midpoint, entry_source: "you" }])); actions.append(b); }
     frag.append(el("p", { class: "small" }, el("strong", { text: "The contract: " }), contractWords,
       spec.category ? `. Chosen as the ${spec.category.toLowerCase()}: ${spec.why.charAt(0).toLowerCase()}${spec.why.slice(1)}` : ".",
       spec.contracts_source === "risk budget" ? " As many as your risk per trade pays for, at least one." : ""),
@@ -225,7 +234,7 @@ function renderSimulation(s, form) {
   if (state.openDecide && featureOn("trend_engine_v2")) {
     const b = el("button", { class: "plain", text: "Open the thesis on Decide" });
     b.addEventListener("click", () => {
-      state.thesis = FLOW.thesis({ symbol: s.symbol, direction: s.direction, entry: s.entry, invalidation: s.stop, target1: s.target_1, target2: s.target_2, horizonDays: s.horizon_days });
+      state.thesis = FLOW.thesis({ symbol: s.symbol, direction: s.direction, entry: s.entry, invalidation: s.stop, target1: s.target_1, target2: s.target_2, horizonDays: s.horizon_days, contracts: spec ? spec.contracts : 1 });
       state.openDecide(s.symbol, s.direction);
     });
     const row = frag.querySelector(".sim-actions") || el("div", { class: "row sim-actions" });
@@ -242,7 +251,7 @@ function simPanel() {
   const dir = el("select", { "aria-label": "Side" }, el("option", { value: "LONG", text: "Buy" }), el("option", { value: "SHORT", text: "Short" }));
   const entry = numInput({ placeholder: "now", "aria-label": "Entry" }), stop = numInput({ placeholder: "suggest", "aria-label": "Stop" });
   const t1 = numInput({ placeholder: "suggest", "aria-label": "Target 1" }), t2 = numInput({ placeholder: "suggest", "aria-label": "Target 2" });
-  const shares = el("input", { type: "number", min: 0, step: 1, placeholder: "sized", "aria-label": "Shares" });
+  const shares = el("input", { type: "number", min: 1, step: 1, placeholder: "sized", "aria-label": "Shares" });
   const days = el("input", { type: "number", min: 1, max: 120, step: 1, value: 20, "aria-label": "Trading days" });
   const plan = el("select", { "aria-label": "Exit plan" }, el("option", { value: "target_1", text: "All out at target 1" }),
     el("option", { value: "target_2", text: "All out at target 2" }), el("option", { value: "split", text: "Half at target 1, half at target 2" }));
@@ -261,7 +270,7 @@ function simPanel() {
     const body = { symbol: sym.value.trim().toUpperCase(), direction: dir.value, horizon_days: Math.round(Number(days.value) || 20), exit_plan: plan.value };
     if (!body.symbol) { err.textContent = "Enter a ticker."; return; }
     for (const [k, input] of [["entry_price", entry], ["stop", stop], ["target_1", t1], ["target_2", t2]]) { const v = val(input); if (v !== null) body[k] = v; }
-    if (shares.value !== "") body.shares = Math.max(0, Math.round(Number(shares.value)));
+    if (shares.value !== "") body.shares = Math.max(1, Math.round(Number(shares.value)));
     if (withContract.value === "none") body.contract = "none";
     out.classList.add("refetching"); run.disabled = true;
     if (!out.firstChild) out.replaceChildren(el("div", { class: "loadnote small muted" }, el("span", { class: "spinner" }), el("span", { text: "Simulating 20,000 paths…" })));
@@ -271,7 +280,7 @@ function simPanel() {
       // Show what was used, so a second run starts from the same trade.
       for (const [input, v] of [[entry, s.entry], [stop, s.stop], [t1, s.target_1], [t2, s.target_2]]) input.value = String(Math.round(v * 100) / 100);
       if (shares.value === "") shares.placeholder = `sized: ${s.shares}`;
-      out.replaceChildren(renderSimulation(s));
+      out.replaceChildren(renderTradeSim(s));
     } catch (e) { if (mine === ticket) { err.textContent = e.message; if (out.querySelector(".loadnote")) out.replaceChildren(); } }
     finally { if (mine === ticket) { out.classList.remove("refetching"); run.disabled = false; } }
   }
@@ -294,13 +303,15 @@ function simPanel() {
 function buildIdeas() {
   const uni = el("select", { "aria-label": "Stocks" }, IDEA_UNIVERSES.map(([v, t]) => el("option", { value: v, text: t })));
   const scan = el("button", { class: "primary", text: "Scan" });
+  const stopBtn = el("button", { class: "plain hidden", text: "Stop" });
   const err = el("div", { class: "error", role: "alert" });
-  const bar = el("progress", { max: 100, value: 0, class: "scan-progress" });
-  const barText = el("span", { class: "small muted", "aria-live": "polite" });
+  const bar = el("progress", { max: 100, value: 0, class: "scan-progress", "aria-label": "Scan progress" });
+  const barText = el("span", { class: "small muted" });
+  const done = el("span", { class: "visually-hidden", "aria-live": "polite" });
   const progress = el("div", { class: "row scan-row hidden" }, bar, barText);
   const out = el("div");
   const sim = simPanel();
-  let timer = null, shownRun = null;
+  let timer = null, shownJob = undefined, running = false, failures = 0;
 
   const render = d => {
     const frag = el("div");
@@ -308,50 +319,59 @@ function buildIdeas() {
     frag.append(ideasSummary(d), ideaPanel(d.long, "LONG", sim.open), ideaPanel(d.short, "SHORT", sim.open), ideasRest(d, sim.open));
     out.replaceChildren(frag);
   };
-  const paint = st => {
+  const empty = () => out.replaceChildren(el("div", { class: "panel" },
+    el("p", {}, "Not scanned yet. Pick the stocks and press ", el("strong", { text: "Scan" }), "."),
+    el("p", { class: "small muted", text: "Each stock's trend, reversal and trade grade are read in turn. On demo data the 200 largest take about two minutes. With live data the first scan of the day also fetches each stock's price history, spaced out so the other screens keep working, which takes several minutes; later scans reuse it. You can keep using the app meanwhile." })));
+  // The latest status: the progress while a scan runs, and the result once there is a new one.
+  async function paint(st) {
     const job = st.job;
-    const running = job.state === "running";
-    scan.disabled = running;
-    uni.disabled = running;
+    running = job.state === "running";
+    scan.disabled = uni.disabled = running;
+    stopBtn.classList.toggle("hidden", !running);
     progress.classList.toggle("hidden", !running);
+    if (job.universe) uni.value = job.universe;
     if (running) {
-      const share = job.total ? job.done / job.total : 0;
-      // Reading the trends is most of the work; grading the trades the rest.
-      bar.value = Math.round(100 * (job.phase === "grading" ? 0.8 + 0.2 * share : 0.8 * share));
-      barText.textContent = job.phase === "grading" ? `Grading the trades: ${job.current || ""} (${job.done + 1} of ${job.total})`
-        : `Reading the trend of each stock: ${job.current || ""} (${job.done + 1} of ${job.total})`;
+      bar.value = job.total ? Math.round(100 * job.done / job.total) : 0;
+      barText.textContent = job.current ? `Reading and grading ${job.current} (${Math.min(job.done + 1, job.total)} of ${job.total})`
+        : `Reading the market regime and prices (${job.total} stocks to go)`;
     }
     if (job.state === "failed") err.textContent = `The scan stopped: ${job.error}`;
-    if (st.result && st.result.checked_at !== shownRun) { shownRun = st.result.checked_at; render(st.result); }
-    else if (!st.result && !running && job.state !== "failed") out.replaceChildren(el("div", { class: "panel" },
-      el("p", { class: "muted", text: "Not scanned yet. Pick the stocks and press Scan: the 200 largest take a minute or two the first time each day." })));
-    return running;
-  };
+    if (job.state === "stopped") err.textContent = "The scan was stopped. The lists below are from the last finished scan.";
+    // A result is known by its scan and its time (scan numbers restart with the app; the saved result does not).
+    const key = `${st.result_job}|${st.result_at}`;
+    if (key !== shownJob) {
+      const full = st.result !== undefined ? st : await api("/v2/ideas");
+      shownJob = `${full.result_job}|${full.result_at}`;
+      if (full.result) { render(full.result); if (job.state === "done") done.textContent = "The scan has finished."; }
+      else empty();
+    }
+  }
+  // Polls only while a scan runs and the screen is showing; a failed poll is tried again a little later.
   async function poll() {
     clearTimeout(timer);
+    if (view.classList.contains("hidden")) return;
     try {
-      const st = await api("/v2/ideas");
-      if (paint(st)) timer = setTimeout(poll, 1200);
-    } catch (e) { err.textContent = e.message; }
+      await paint(await api("/v2/ideas?brief=true"));
+      failures = 0;
+      if (running) timer = setTimeout(poll, 1500);
+    } catch (e) {
+      failures += 1;
+      err.textContent = `${e.message} (trying again)`;
+      timer = setTimeout(poll, Math.min(15000, 1500 * 2 ** failures));
+    }
   }
   scan.addEventListener("click", () => withBusy(scan, err, async () => {
-    paint(await api("/v2/ideas/scan", { universe: uni.value }));
+    err.textContent = "";
+    await paint(await api("/v2/ideas/scan", { universe: uni.value }));
     timer = setTimeout(poll, 800);
   }));
+  stopBtn.addEventListener("click", () => withBusy(stopBtn, err, async () => { await paint(await api("/v2/ideas/stop", {})); poll(); }));
   const view = el("section", {}, el("h2", { text: "Trade ideas" }),
-    el("p", { class: "lede", text: "The best-graded trades to buy and to short across up to 200 large companies, each with its stop, targets, size and what it makes or loses at each. Simulate any one to see how often each happens." }),
-    el("div", { class: "panel" }, el("div", { class: "row" }, field("Stocks", uni), scan), progress, err), out, sim);
-  let started = false;
-  view.onShow = async () => {
+    el("p", { class: "lede", text: "The highest-graded trades to buy and to short across up to 200 large companies, each with its stop, targets, size, and what it makes or loses if the price gets there. Simulate any one to see how often each happens." }),
+    el("div", { class: "panel" }, el("div", { class: "row" }, field("Stocks", uni), scan, stopBtn), progress, done, err), out, sim);
+  view.onShow = () => {
     uni.options[2].textContent = `Your watchlist (${((state.status && state.status.watchlist) || []).length})`;
-    if (started) { poll(); return; }
-    started = true;
-    // The first time the screen opens, scan straight away unless a scan has already run or is running.
-    try {
-      const st = await api("/v2/ideas");
-      if (st.job.state === "idle" && !st.result) { paint(await api("/v2/ideas/scan", { universe: uni.value })); timer = setTimeout(poll, 800); }
-      else if (paint(st)) timer = setTimeout(poll, 1200);
-    } catch (e) { err.textContent = e.message; }
+    poll();
   };
   return view;
 }

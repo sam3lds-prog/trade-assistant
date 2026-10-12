@@ -117,7 +117,8 @@ def market():
 def test_4_2_a_failed_quote_is_never_quietly_replaced():
     m = market()
     good = m.quote("AAPL")
-    assert good["_meta"]["freshness"] in ("FRESH", "LAST_SESSION") and not good["_meta"]["from_cache"]
+    # Demo data is not real-time: during market hours its quotes read DELAYED, after hours LAST_SESSION.
+    assert good["_meta"]["freshness"] in ("FRESH", "LAST_SESSION", "DELAYED") and not good["_meta"]["from_cache"]
     m.provider.down = True
     with pytest.raises(DataError, match="503"):
         m.quote("AAPL")                                             # pricing never gets an old quote
@@ -184,7 +185,7 @@ def test_4_3_positions_and_portfolio_carry_freshness(tmp_path):
     c = TestClient(create_app(settings, svc))
     p = c.post("/v2/positions", json={"symbol": "AAPL", "quantity": 10, "invalidation_price": 1, "entry": {"price": 100}}).json()
     f = p["mark"]["freshness"]
-    assert f["kind"] == "STOCK_QUOTE" and f["provider"] == "Demo data (synthetic)" and f["freshness"] in ("FRESH", "LAST_SESSION")
+    assert f["kind"] == "STOCK_QUOTE" and f["provider"] == "Demo data (synthetic)" and f["freshness"] in ("FRESH", "LAST_SESSION", "DELAYED")
     d = c.get("/v2/data/AAPL").json()
     assert d["quote_freshness"]["instrument"] == "AAPL" and d["bars_freshness"]["kind"] == "DAILY_BARS"
     h = c.get("/v2/source/health").json()

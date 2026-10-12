@@ -37,6 +37,7 @@ class TradierData:
         self._lock = threading.Lock()
         self._rate_available: int | None = None
         self._rate_expiry: float = 0.0
+        self._paused_until: float = 0.0
         if sandbox:
             self.info = ProviderInfo(
                 mode="sandbox", label="Tradier sandbox", realtime=False, has_greeks=False,
@@ -50,13 +51,17 @@ class TradierData:
 
     # --- transport -------------------------------------------------------
     def _wait_for_rate_limit(self) -> None:
+        # 2.7: the wait happens outside the lock, so a long background scan that used up the allowance does not
+        # also hold every other request's bookkeeping; each request waits for the same moment instead.
         with self._lock:
             if self._rate_available is not None and self._rate_available <= 1:
-                delay = self._rate_expiry - time.time()
-                if 0 < delay <= 65:
-                    log.info("Tradier rate limit reached, waiting %.1fs", delay)
-                    time.sleep(delay)
+                if 0 < self._rate_expiry - time.time() <= 65:
+                    self._paused_until = max(self._paused_until, self._rate_expiry)
                 self._rate_available = None
+            delay = self._paused_until - time.time()
+        if 0 < delay <= 65:
+            log.info("Tradier rate limit reached, waiting %.1fs", delay)
+            time.sleep(delay)
 
     def _record_rate_limit(self, headers: Any) -> None:
         try:

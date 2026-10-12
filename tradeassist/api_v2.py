@@ -196,7 +196,7 @@ class TradeSimulate(Strict):
     stop: float | None = Field(None, gt=0)
     target_1: float | None = Field(None, gt=0)
     target_2: float | None = Field(None, gt=0)
-    shares: int | None = Field(None, ge=0, le=10_000_000)
+    shares: int | None = Field(None, ge=1, le=10_000_000)
     horizon_days: int = Field(20, ge=1, le=120)
     exit_plan: Literal["target_1", "target_2", "split"] = "target_1"
     contract: ContractRef | Literal["none"] | None = None
@@ -599,10 +599,17 @@ def build_router(svc: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.get("/ideas")
-    def ideas_status():
+    def ideas_status(brief: bool = False):
+        """The scan's progress, and its latest result unless `brief` (the screen polls briefly while it runs)."""
         need("trade_ideas")
         need("trend_engine_v2")
-        return clean(ideas.status())
+        return clean(ideas.status(brief))
+
+    @router.post("/ideas/stop")
+    def ideas_stop():
+        need("trade_ideas")
+        need("trend_engine_v2")
+        return clean(ideas.stop())
 
     @router.post("/ideas/simulate")
     def ideas_simulate(req: TradeSimulate):
