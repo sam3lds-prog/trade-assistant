@@ -174,6 +174,10 @@ class OptionsEvaluate(Strict):
     entry_price: float | None = Field(None, gt=0)      # 2.5.1: the share entry, for the chance the shares are ahead
 
 
+class IdeasScan(Strict):
+    universe: Literal["top200", "large_caps", "watchlist"] = "top200"
+
+
 class HistoryImport(Strict):
     filename: str | None = Field(None, max_length=2000)          # kept to its first 200 characters
     text: str = Field(..., min_length=1, max_length=16_000_000)
@@ -183,6 +187,20 @@ class ContractRef(Strict):
     option_type: Literal["CALL", "PUT", "call", "put"]
     strike: float = Field(..., gt=0)
     expiration: str
+
+
+class TradeSimulate(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    direction: Literal["LONG", "SHORT"] = "LONG"
+    entry_price: float | None = Field(None, gt=0)
+    stop: float | None = Field(None, gt=0)
+    target_1: float | None = Field(None, gt=0)
+    target_2: float | None = Field(None, gt=0)
+    shares: int | None = Field(None, ge=0, le=10_000_000)
+    horizon_days: int = Field(20, ge=1, le=120)
+    exit_plan: Literal["target_1", "target_2", "split"] = "target_1"
+    contract: ContractRef | Literal["none"] | None = None
+    contracts: int | None = Field(None, ge=1, le=500)
 
 
 class OptionsCompare(OptionsEvaluate):
@@ -563,6 +581,39 @@ def build_router(svc: Any) -> APIRouter:
         try:
             return clean(today.candidates(universe))
         except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- trade ideas (2.7): the best-graded trades across up to 200 stocks, and a simulation of any one ----
+    from .ideas import TradeIdeas
+    from .tradesim import TradeSimError, simulate_trade
+    ideas = svc.ideas if getattr(svc, "ideas", None) else TradeIdeas(svc, analyst, svc.settings.features)
+    svc.ideas = ideas
+
+    @router.post("/ideas/scan")
+    def ideas_scan(req: IdeasScan):
+        need("trade_ideas")
+        need("trend_engine_v2")
+        try:
+            return clean(ideas.start(req.universe))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/ideas")
+    def ideas_status():
+        need("trade_ideas")
+        need("trend_engine_v2")
+        return clean(ideas.status())
+
+    @router.post("/ideas/simulate")
+    def ideas_simulate(req: TradeSimulate):
+        need("trade_ideas")
+        need("trend_engine_v2")
+        body = req.model_dump()
+        if isinstance(req.contract, ContractRef):
+            body["contract"] = req.contract.model_dump()
+        try:
+            return clean(simulate_trade(svc, analyst, body))
+        except (TradeSimError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # --- your trade history (2.6): imported read-only, analysed locally ---------------------------------

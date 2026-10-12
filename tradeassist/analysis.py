@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -44,20 +45,25 @@ class Analyst:
         self.svc = svc
         self.market = svc.market
         self._cache: dict[tuple, tuple[float, Any]] = {}
+        self._cache_lock = threading.Lock()
         self._sectors: dict[str, str | None] = {}
         self._reversal_cases: dict[str, dict[str, list[dict[str, Any]]]] = {}   # this stock's past readings
         self._reversal_pooled: dict[str, list[dict[str, Any]]] = {}            # all stocks', from the history
 
     # --- small helpers ----------------------------------------------------------------
     def _cached(self, key: tuple, build):
-        hit = self._cache.get(key)
+        # 2.7: the trade-ideas scan reads here from a background thread while requests do too, so the cache
+        # itself is locked (the build is not: two threads may build the same value, and either is right).
+        with self._cache_lock:
+            hit = self._cache.get(key)
         if hit is not None and time.time() - hit[0] < CACHE_SECONDS:
             return hit[1]
         value = build()
-        self._cache[key] = (time.time(), value)
-        if len(self._cache) > 256:
-            for k in sorted(self._cache, key=lambda k: self._cache[k][0])[:64]:
-                self._cache.pop(k, None)
+        with self._cache_lock:
+            self._cache[key] = (time.time(), value)
+            if len(self._cache) > 256:
+                for k in sorted(self._cache, key=lambda k: self._cache[k][0])[:64]:
+                    self._cache.pop(k, None)
         return value
 
     def sector(self, symbol: str) -> str | None:

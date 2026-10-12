@@ -42,6 +42,18 @@ LARGE_CAPS = (
     "UPS BA USB SO DUK MMM EMR GD CVS TGT FDX F GM INTC AIG MET COF NKE PYPL TMUS"
 ).split()
 
+# 2.7: the next 100, so LARGE_CAPS + NEXT_100 is close to the 200 largest US companies by market value in
+# mid-2026. A fixed list like the first: not updated when companies grow, shrink, merge or leave. A ticker
+# the data source no longer knows is reported as not read, never dropped silently.
+NEXT_100 = (
+    "MU LRCX KLAC ADI PANW CRWD ANET SNPS CDNS APH FTNT ADSK WDAY ROP MSI TEL GLW DELL APP DDOG "
+    "UBER ABNB DASH HOOD COIN TJX ROST ORLY AZO CMG YUM MAR HLT KR MNST "
+    "ELV CI HCA MCK COR BSX SYK VRTX REGN ZTS BDX CB PGR AON ICE CME MCO KKR BX APO PNC BK TRV ALL AJG "
+    "WM RSG CTAS ITW ETN PH TT JCI CARR NOC LHX TDG GEV HWM CSX SHW ECL APD FCX NEM "
+    "EOG SLB PSX MPC VLO OXY WMB KMI AEP SRE EXC PCG CEG VST PLD AMT EQIX WELL SPG DLR"
+).split()
+TOP_200 = tuple(LARGE_CAPS) + tuple(NEXT_100)
+
 MAX_TECHNICAL_SYMBOLS = 120
 MAX_FLOW_SYMBOLS = 30
 MAX_FLOW_EXPIRATIONS = 6
@@ -68,7 +80,9 @@ def universe(name: str | None, watchlist: Sequence[str], symbols: Iterable[str] 
         return key, list(dict.fromkeys(s.upper() for s in watchlist))
     if key in ("large_caps", "sp100"):
         return "large_caps", list(LARGE_CAPS)
-    raise ValueError("universe must be watchlist or large_caps, or give symbols")
+    if key in ("top200", "top_200"):
+        return "top200", list(TOP_200)
+    raise ValueError("universe must be watchlist, large_caps or top200, or give symbols")
 
 
 def _f(x: Any) -> float | None:
@@ -360,5 +374,5 @@ class Scanner:
                 "data_source": self.market.info.mode, "market": clock.get("state"), "notes": notes}
 
 
-__all__ = ["Scanner", "LARGE_CAPS", "universe", "readings", "technical_row", "matches", "sort_key", "flow_summary",
+__all__ = ["Scanner", "LARGE_CAPS", "NEXT_100", "TOP_200", "universe", "readings", "technical_row", "matches", "sort_key", "flow_summary",
            "flow_expirations"]

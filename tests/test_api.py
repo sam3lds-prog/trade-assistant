@@ -15,6 +15,8 @@ V2_WRITES = {
     "/v2/history/import", "/v2/history/sample", "/v2/history/imports/{import_id}/remove",
     # 2.6: reading past orders through the Robinhood connection (off unless ROBINHOOD_ACCOUNT_READ=1); reads only.
     "/v2/history/pull",
+    # 2.7: start a scan of trade ideas (runs in the background; nothing recorded) and simulate one trade (a model).
+    "/v2/ideas/scan", "/v2/ideas/simulate",
     "/v2/positions", "/v2/positions/{position_id}/executions", "/v2/positions/{position_id}/plan",
     "/v2/positions/{position_id}/cancel", "/v2/positions/{position_id}/snapshot",
     "/v2/position/evaluate", "/v2/options/evaluate", "/v2/options/compare", "/v2/portfolio/stress",
