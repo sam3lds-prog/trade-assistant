@@ -18,6 +18,78 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.7.0
+
+**Trade ideas** (new, under Find) scans up to the 200 largest US companies. It lists the highest-graded
+trades to buy and to short, and simulates any one of them.
+
+- **Requirements.**
+  - No migration and no new setting.
+  - One new flag, `FEATURE_TRADE_IDEAS`, on by default.
+  - No new dependency.
+- **Safety.** Nothing places an order, and nothing about your account is read or sent anywhere.
+
+**The scan.** Pick the 200 largest, the 100 large companies, or your watchlist, and press Scan.
+
+- **Choosing the side.** Each stock's side, buy or short, comes from the same trend evidence as Today, and
+  is held back the same way when the market or a forming reversal works against it.
+- **Grading.** The trade on that side is graded as on Decide:
+  - an entry at the current price;
+  - a stop and two targets from the chart;
+  - shares sized so the stop costs at most your risk per trade, and never more than the account.
+- **Ranking.** Trades are ranked by grade, then score, then reward to risk. Each row shows what the sized
+  trade makes if target 1 is reached and loses if stopped.
+- **These are not forecasts.** The dollars are what happens if the price gets there; a grade sums checks.
+- **Listed separately:**
+  - stocks held back, with the reason;
+  - trades graded AVOID;
+  - stocks that could not be read.
+- **Running a scan.**
+  - It runs in the background with a progress bar, and can be stopped.
+  - On demo data the 200 take about two minutes. With live data, the first scan of the day fetches each
+    stock's history, spaced out so the other screens keep working, which takes several minutes.
+  - The last result is kept, also across restarts.
+
+**Simulate.** Any row, or any stock with your own levels, can be walked on 20,000 price paths at the
+volatility option prices imply. Each path follows the trade's own rules: out at the stop or at the target,
+whichever comes first, or at the close on the horizon date.
+
+- **Exit plans:** all out at target 1, all out at target 2, or half at each.
+- **What it shows:**
+  - how often each exit happens and what each one makes or loses;
+  - the range of results;
+  - the spread of the price over the days.
+- **With a contract.** The same exits are run with the best call (for a buy) or put (for a short) your risk
+  per trade pays for, valued at its own implied volatility.
+- **What the average means.** Averaged over every path, a trade comes out close to break-even. What is
+  left is the carry in the forward price (interest less expected dividends), not an edge; the screen says
+  so.
+- **Next steps from a result:**
+  - Set the limit on the contract;
+  - simulate the contract alone;
+  - open the thesis on Decide with the same levels.
+
+**Also in 2.7.0:**
+
+- **Decide's outcome range.** It now says "eight in ten" outcomes fall between the 10th and 90th
+  percentiles. 2.5.1 said nine in ten, which was wrong.
+- **A short's suggested targets stay above zero.** Before, a wide stop could put target 2 below zero. They
+  now stop at a twentieth of the entry, and the levels note says so.
+- **Sector comparisons.** 3M (MMM) and the newly listed large companies are compared with their sector
+  fund. Before, they were compared with SPY only. MMM's trend score can change slightly.
+- **Tradier waits.** When Tradier's request allowance runs out, waiting for it no longer blocks the
+  app's other requests.
+
+**Before release,** two independent reviews (the arithmetic and model, and the robustness and screen)
+found 31 problems, all fixed or noted. Among them:
+
+- Trade ideas' code replaced the drawing function of Simulate a trade, so that screen drew nothing.
+- The contract's average showed the volatility skew as a profit.
+- Days where both the stop and a target were touched were all counted as stopped.
+- The screen started a 200-stock scan by itself.
+
+The full list is in [IMPROVEMENTS.md](IMPROVEMENTS.md).
+
 ## 2.6.0
 
 **My trades** (new, under Learn) reads your Robinhood history and shows how your trading has
