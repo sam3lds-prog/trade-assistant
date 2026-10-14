@@ -316,7 +316,9 @@ class FakeSMTP:
     def __exit__(self, *a):
         return False
 
-    def starttls(self):
+    def starttls(self, context=None):
+        # 2.8 review M2: the mailer must verify the server's certificate.
+        assert context is not None and context.check_hostname
         self.tls = True
 
     def login(self, user, password):
@@ -419,3 +421,45 @@ def test_the_morning_email_run_skips_weekends(tmp_path, monkeypatch, capsys):
     code = run_mod.morning_email(s, send=False)
     out = capsys.readouterr().out
     assert code == 0 and "closed" in out and "no morning email" in out
+
+def test_a_dry_run_records_nothing_and_a_send_records_only_after_it_works(tmp_path, monkeypatch, capsys):
+    """--morning-print must not count as picks; a failed send must not either (M: record after send)."""
+    import run as run_mod
+    from tradeassist import mailer
+    s = Settings(data_mode="demo", db_path=tmp_path / "t.db",
+                 smtp_user="me@example.com", smtp_password="pw")
+    monkeypatch.setattr(morning_mod, "movers_universe",
+                        lambda watchlist: ["AAPL", "MSFT", "KO", "JPM", "NVDA", "CAT", "PG", "XOM", "UNH", "TSLA"])
+    assert run_mod.morning_email(s, send=False) == 0
+    db = Database(tmp_path / "t.db")
+    try:
+        assert db.query("SELECT COUNT(*) AS n FROM morning_picks")[0]["n"] == 0    # a dry run is not a pick
+        monkeypatch.setattr(mailer, "send", lambda *a, **k: (_ for _ in ()).throw(mailer.MailError("down")))
+        assert run_mod.morning_email(s, send=True) == 1
+        assert db.query("SELECT COUNT(*) AS n FROM morning_picks")[0]["n"] == 0    # a failed send is not one
+        monkeypatch.setattr(mailer, "send", lambda *a, **k: "me@example.com")
+        assert run_mod.morning_email(s, send=True) == 0
+        n = db.query("SELECT COUNT(*) AS n FROM morning_picks")[0]["n"]
+        assert n == db.query("SELECT COUNT(*) AS n FROM morning_picks WHERE source = 'email'")[0]["n"]
+    finally:
+        db.close()
+    capsys.readouterr()
+
+
+def test_the_screen_refuses_to_email_a_stale_plan_and_caps_the_watches(client, monkeypatch):
+    svc = client.app.state.assistant
+    m = Morning(svc, svc.analyst, dict(FEATURE_DEFAULTS))
+    plan = {"day": "2020-01-02", "checked_at": "2020-01-02T07:00:00", "demo": True, "movers": [],
+            "cards": [], "reversal": [], "market": {}, "universe_size": 1, "read": 1, "seconds": 0.1,
+            "rule": "x", "watch_note": "", "errors": []}
+    m.save_result(plan)
+    monkeypatch.setattr("tradeassist.mailer.send", lambda *a, **k: "me@example.com")
+    r = client.post("/v2/morning/email")
+    assert r.status_code == 400 and "2020-01-02" in r.json()["error"]
+    db = svc.db
+    assert db.query("SELECT COUNT(*) AS n FROM morning_picks")[0]["n"] == 0        # the refusal recorded nothing
+    for i in range(40):                                                            # the 41st watch is refused
+        assert client.post("/v2/morning/watch", json={"symbol": "KO", "direction": "LONG", "kind": "below",
+                                                      "level": 0.01 + i / 100}).status_code == 200
+    r = client.post("/v2/morning/watch", json={"symbol": "KO", "direction": "LONG", "kind": "below", "level": 0.9})
+    assert r.status_code == 400 and "40" in r.json()["error"]

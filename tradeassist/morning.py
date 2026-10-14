@@ -37,7 +37,7 @@ import logging
 import math
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import numpy as np
@@ -103,9 +103,13 @@ def limit_prices(*, mid: float, bid: float | None, value_at_target: float, value
     v_t, v_s = max(value_at_target, 0.0), max(value_at_stop, 0.0)
     r = max(min_payoff, 0.1)
     cap = (v_t + r * v_s) / (1 + r)
-    if not (v_t > v_s and cap > 0.011):
+    if v_t - v_s <= 0.005:
         return {"viable": False, "cap": cap, "why": "Even free, the contract is worth no more at the target than "
                                                     "at the stop by the horizon, so no price makes this trade pay."}
+    if cap <= 0.011:
+        return {"viable": False, "cap": cap, "why": f"The price where target 1 pays {r:g} times what the stop loses "
+                                                    "is under a cent, so no tradable price passes. The shares are "
+                                                    "suggested instead."}
     suggested = floor_tick(min(mid, cap))
     patient = max(floor_tick(suggested - tick_of(suggested)), 0.01)
     payoff = (v_t - suggested) / max(suggested - v_s, 1e-9)
@@ -187,7 +191,7 @@ def past_record(frames: dict[str, dict[str, np.ndarray]], *, move_direction: int
     price history: whether those past moves had news is not knowable here."""
     out: dict[str, Any] = {"cases": 0, "horizons": {}, "years": RECORD_YEARS,
                            "what": f"moves of {min_ranges:g}+ daily ranges {'up' if move_direction > 0 else 'down'}"
-                                   + (", overextended" if need_overext else "")}
+                                   + (", already overextended before the move" if need_overext else "")}
     wins = {h: 0 for h in horizons}
     total = {h: 0 for h in horizons}
     moves = {h: [] for h in horizons}
@@ -204,7 +208,9 @@ def past_record(frames: dict[str, dict[str, np.ndarray]], *, move_direction: int
         for i in np.flatnonzero((move_direction * in_ranges >= min_ranges)
                                 & (move_direction * in_pct >= MOVE_MIN_PCT) & np.isfinite(in_ranges)):
             t = i + 1                                   # the index of the big-move day's close
-            if need_overext and not overextended(f, t, move_direction)[0]:
+            # Overextension is read on the bar BEFORE the move, as the live pre-market reading has to read
+            # it (the move's own bar is not finished yet), so the record counts the same pattern.
+            if need_overext and not overextended(f, i, move_direction)[0]:
                 continue
             for h in horizons:
                 if t + h < n:
@@ -249,6 +255,10 @@ class Morning:
             log.warning("Morning plan not saved: %s", exc)
         self._result = result
 
+    def save_result(self, plan: dict[str, Any]) -> None:
+        """Keep a plan built outside the job (the 7:00 email run), so the screen shows it too."""
+        self._keep(dict(plan), {"id": 0})
+
     def start(self) -> dict[str, Any]:
         names = movers_universe(self.svc.settings.watchlist)
 
@@ -286,9 +296,11 @@ class Morning:
             self._news = getattr(self.svc, "news", None) or NewsClient(self.svc.settings, self.svc.db, self.svc.sec)
         return self._news
 
-    def _quotes(self, names: list[str]) -> dict[str, dict[str, Any]]:
+    def _quotes(self, names: list[str], progress=None, total: int = 0) -> dict[str, dict[str, Any]]:
         market, out = self.svc.market, {}
         for i in range(0, len(names), 50):
+            if progress:
+                progress(1 + i // 50, total, "quotes")
             chunk = names[i:i + 50]
             try:
                 out.update(market._call("morning quotes", lambda c=chunk: market.provider.quotes(c)))
@@ -323,7 +335,7 @@ class Morning:
         demo = self.svc.market.info.mode == "demo"
         if demo:
             # Demo headlines exist for every stock; a deterministic split keeps both setups visible in demo.
-            none = int(hashlib.sha256(f"{symbol}|{date.today()}".encode()).hexdigest()[:4], 16) % 3 == 0
+            none = int(hashlib.sha256(f"{symbol}|{datetime.now(NY).date()}".encode()).hexdigest()[:4], 16) % 3 == 0
             if none:
                 return {"state": "no_news", "label": "No news found (made up)", "items": []}
             return {"state": "news", "label": "Demo headline (made up)",
@@ -334,15 +346,9 @@ class Morning:
             got = client.company(symbol, days=3)
         except Exception as exc:                      # noqa: BLE001 - news failing must not sink the plan
             return {"state": "unchecked", "label": f"News check failed ({_why(exc)})", "items": []}
-        cutoff = datetime.now(NY).astimezone() - timedelta(hours=NEWS_HOURS)
         fresh = []
         for it in got.get("items") or []:
-            when = it.get("published")
-            try:
-                ok = when is not None and datetime.fromisoformat(str(when).replace("Z", "+00:00")) >= cutoff
-            except ValueError:
-                ok = False
-            if ok:
+            if _fresh(it.get("published")):
                 fresh.append({"headline": it.get("headline"), "source": it.get("source"),
                               "published": it.get("published"), "url": it.get("url")})
         if got.get("errors") and not fresh:
@@ -372,7 +378,7 @@ class Morning:
 
     def _record(self, frames, *, move_direction: int, min_ranges: float, need_overext: bool,
                 trade_direction: int) -> dict[str, Any]:
-        key = (f"morning:record:{self.svc.market.info.mode}:{date.today()}:{move_direction}:{min_ranges:g}:"
+        key = (f"morning:record:{self.svc.market.info.mode}:{datetime.now(NY).date()}:{move_direction}:{min_ranges:g}:"
                f"{int(need_overext)}:{trade_direction}")
         hit = self.svc.db.cache_get(key, 20 * 3600)
         if hit is not None:
@@ -408,6 +414,9 @@ class Morning:
                        "at_stop": -shares * risk_ps if shares else None,
                        "note": None if shares else "One share risks more than the per-trade limit."},
             "option": None, "warnings": [], "notes": []}
+        if not shares:
+            card["warnings"].append(f"One share of {symbol} risks ${risk_ps:,.2f} to the stop, more than the "
+                                    f"${budget:,.0f} risk per trade: no share position fits the limit.")
         clock = self.svc.market.clock().get("state")
         card["price_basis"] = ("live" if clock == "open" else
                                "the previous close (options trade 9:30–16:00 New York time)")
@@ -444,10 +453,11 @@ class Morning:
                   "spread_pct": row.get("spread_pct"), "category": category, "why": why,
                   "flags": row.get("flags") or [], "limits": limits,
                   "chance_profit_horizon": row.get("market_implied_profit_at_horizon"),
-                  "iv_note": (f"Values at the target assume implied volatility settles {-100 * shift:g} points "
-                              "as the move calms." if shift else None)}
+                  "iv_note": (f"Option values on the horizon date assume implied volatility settles "
+                              f"{-100 * shift:g} points as the move calms." if shift else None)}
         if limits["viable"]:
-            n = max(1, int(budget // (limits["suggested"] * 100)))
+            # At most 10 contracts: filling a big stack of cheap contracts at the suggested limit is not realistic.
+            n = max(1, min(10, int(budget // (limits["suggested"] * 100))))
             cost = n * limits["suggested"] * 100
             per = limits["value_at_target"] - limits["suggested"]
             option.update({"contracts": n, "cost": cost,
@@ -477,6 +487,57 @@ class Morning:
         return (f"{verb} {n} {card['symbol']} · Limit ${card['entry']:.2f} · stop ${card['stop']:.2f}, "
                 f"target ${card['target_1']:.2f}")
 
+    def _mover_setup(self, row: dict[str, Any], frames: dict[str, dict[str, np.ndarray]], d_move: int,
+                     cards: list[dict[str, Any]]) -> None:
+        """One mover's news, setup, past record and (up to MAX_CARDS) trade card, written onto `row`."""
+        f = frames[row["symbol"]]
+        # Overextension on the bar before the move: the reference bar (pre-market, that is the last finished
+        # close; for a close-to-close move, the close before it), matching the past record's reading.
+        over, over_why = overextended(f, row["ref_index"], d_move)
+        news = self._news_state(row["symbol"])
+        setup = classify(ranges=row["ranges"], move_pct=row["move_pct"], direction=d_move,
+                         news_state=news["state"], overext=over, overext_why=over_why)
+        listed = row["ranges"] >= (RIDE_MIN_RANGES if setup["kind"] == "ride" else MOVE_MIN_RANGES)
+        row.update({"news": news, "setup": setup, "overextended": over, "overextended_why": over_why,
+                    "record": None, "card_key": None, "listed": listed})
+        if not setup["kind"]:
+            return
+        trade_d = 1 if setup["direction"] == "LONG" else -1
+        row["record"] = self._record(frames, move_direction=d_move,
+                                     min_ranges=FADE_MIN_RANGES if setup["kind"] == "fade" else RIDE_MIN_RANGES,
+                                     need_overext=setup["kind"] == "fade", trade_direction=trade_d)
+        if len(cards) >= MAX_CARDS:
+            return
+        entry = row["price"]
+        atr = row["atr"]
+        if setup["kind"] == "fade":
+            stop = entry - trade_d * FADE_STOP_ATR * atr
+            t1 = entry + 0.5 * (row["reference"] - entry)           # halfway back to where the move started
+            t2 = row["reference"]
+            why_lv = (f"Stop one daily range {'below' if trade_d > 0 else 'above'} the entry; target 1 halfway "
+                      f"back to the pre-move close (${row['reference']:,.2f}), target 2 all the way.")
+        else:
+            try:
+                from .evaluator import suggest_levels
+                sug = suggest_levels(self.svc.market.enriched(row["symbol"], 3), trade_d, entry)
+                stop, t1, t2 = sug["invalidation"], sug["target_1"], sug["target_2"]
+                why_lv = " ".join(sug["notes"])
+            except Exception as exc:                  # noqa: BLE001 - chart levels are a bonus
+                stop = entry - trade_d * 1.2 * atr
+                t1, t2 = entry + trade_d * 2.4 * atr, entry + trade_d * 3.6 * atr
+                why_lv = f"Chart levels unavailable ({_why(exc)}); stop 1.2 daily ranges, targets 2 and 3 times the risk."
+        try:
+            card = self.card(symbol=row["symbol"], direction=setup["direction"], entry=entry, stop=stop,
+                             target_1=t1, target_2=t2, horizon_days=MOVER_HORIZON, setup=setup["kind"],
+                             levels_why=why_lv)
+            card["key"] = f"{row['symbol']}:{setup['kind']}"
+            card["record"] = row["record"]
+            card["news"] = news
+            cards.append(card)
+            row["card_key"] = card["key"]
+        except (DataError, ValueError) as exc:
+            row["setup"] = {**setup, "why": setup["why"] + f" (No card: {_why(exc)}.)"}
+
     # --- the whole plan ---------------------------------------------------------------------------------
     def plan(self, progress: Callable[[int, int, str | None], None] | None = None) -> dict[str, Any]:
         started = time.time()
@@ -492,7 +553,7 @@ class Morning:
             regime_label = self.analyst.regime()["confirmed"]["label"]
         except (DataError, ValueError, KeyError) as exc:
             notes.append(f"The market regime could not be read ({exc}).")
-        quotes = self._quotes(names + ["SPY"])
+        quotes = self._quotes(names + ["SPY"], progress, total)
         frames = self._frames(names, progress, 8, total)
         spy = None
         try:
@@ -523,51 +584,14 @@ class Morning:
             if progress:
                 progress(done + k, total, row["symbol"])
             d_move = 1 if row["move_pct"] > 0 else -1
-            f = frames[row["symbol"]]
-            over, over_why = overextended(f, len(f["close"]) - 1, d_move)   # at the last finished close
-            news = self._news_state(row["symbol"])
-            setup = classify(ranges=row["ranges"], move_pct=row["move_pct"], direction=d_move,
-                             news_state=news["state"], overext=over, overext_why=over_why)
-            listed = row["ranges"] >= (RIDE_MIN_RANGES if setup["kind"] == "ride" else MOVE_MIN_RANGES)
-            row.update({"news": news, "setup": setup, "overextended": over, "overextended_why": over_why,
-                        "record": None, "card_key": None, "listed": listed})
-            if not setup["kind"]:
-                continue
-            trade_d = 1 if setup["direction"] == "LONG" else -1
-            row["record"] = self._record(frames, move_direction=d_move,
-                                         min_ranges=FADE_MIN_RANGES if setup["kind"] == "fade" else RIDE_MIN_RANGES,
-                                         need_overext=setup["kind"] == "fade", trade_direction=trade_d)
-            if len(cards) >= MAX_CARDS:
-                continue
-            entry = row["price"]
-            atr = row["atr"]
-            if setup["kind"] == "fade":
-                stop = entry - trade_d * FADE_STOP_ATR * atr
-                t1 = entry + 0.5 * (row["reference"] - entry)       # halfway back to where the move started
-                t2 = row["reference"]
-                why_lv = (f"Stop one daily range {'below' if trade_d > 0 else 'above'} the entry; target 1 halfway "
-                          f"back to the pre-move close (${row['reference']:,.2f}), target 2 all the way.")
-            else:
-                try:
-                    from .evaluator import suggest_levels
-                    sug = suggest_levels(self.svc.market.enriched(row["symbol"], 3), trade_d, entry)
-                    stop, t1, t2 = sug["invalidation"], sug["target_1"], sug["target_2"]
-                    why_lv = " ".join(sug["notes"])
-                except Exception as exc:              # noqa: BLE001 - chart levels are a bonus
-                    stop = entry - trade_d * 1.2 * atr
-                    t1, t2 = entry + trade_d * 2.4 * atr, entry + trade_d * 3.6 * atr
-                    why_lv = f"Chart levels unavailable ({_why(exc)}); stop 1.2 daily ranges, targets 2 and 3 times the risk."
             try:
-                card = self.card(symbol=row["symbol"], direction=setup["direction"], entry=entry, stop=stop,
-                                 target_1=t1, target_2=t2, horizon_days=MOVER_HORIZON, setup=setup["kind"],
-                                 levels_why=why_lv)
-                card["key"] = f"{row['symbol']}:{setup['kind']}"
-                card["record"] = row["record"]
-                card["news"] = news
-                cards.append(card)
-                row["card_key"] = card["key"]
-            except (DataError, ValueError) as exc:
-                row["setup"] = {**setup, "why": setup["why"] + f" (No card: {_why(exc)}.)"}
+                self._mover_setup(row, frames, d_move, cards)
+            except Exception as exc:                  # noqa: BLE001 - one stock never stops the morning
+                log.warning("Morning: %s could not be read: %r", row["symbol"], exc)
+                row.update({"news": {"state": "unchecked", "label": f"Not read ({_why(exc)})", "items": []},
+                            "setup": {"kind": None, "direction": None, "why": f"Not read: {_why(exc)}."},
+                            "overextended": False, "overextended_why": [], "record": None, "card_key": None,
+                            "listed": row["ranges"] >= MOVE_MIN_RANGES})
         movers = [r for r in movers if r.get("listed", True)]
 
         # 3. Reversal watch: the watchlist plus today's movers.
@@ -609,10 +633,11 @@ class Morning:
                                          target_2=row.get("target_2") or row["target_1"],
                                          horizon_days=REVERSAL_HORIZON, setup="reversal",
                                          levels_why="Levels from the reversal reading (Analyze a stock has the detail).")
-                        card["key"] = f"{row['symbol']}:reversal"
+                        card["key"] = f"{row['symbol']}:reversal:{row['side']}"
                         cards.append(card)
                         row["card_key"] = card["key"]
-                    except (DataError, ValueError) as exc:
+                    except Exception as exc:          # noqa: BLE001 - one stock never stops the morning
+                        log.warning("Morning: no reversal card for %s: %r", row["symbol"], exc)
                         row["note"] = f"No card: {_why(exc)}."
         else:
             notes.append("Reversal analysis is switched off, so the reversal watch is empty.")
@@ -623,7 +648,7 @@ class Morning:
                  "Stock prices are pre-market; option prices are the previous close's (options trade 9:30–16:00 "
                  "New York time)." if clock == "premarket" else
                  "The market is closed: prices are the last session's.")
-        return {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "day": date.today().isoformat(),
+        return {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "day": datetime.now(NY).date().isoformat(),
                 "seconds": round(time.time() - started, 1), "clock": clock, "price_basis": basis,
                 "market": {"regime": regime_label,
                            "spy_move_pct": spy["move_pct"] if spy else None,
@@ -635,6 +660,23 @@ class Morning:
                         "overextended, is read to snap back. Past records count what followed the same price "
                         "pattern on these stocks over five years: frequencies, not forecasts. Nothing here "
                         "places an order."}
+
+
+def _fresh(when: Any, hours: int = NEWS_HOURS, now: datetime | None = None) -> bool:
+    """Whether a published time falls in the last `hours`. SEC filing dates carry no time of day, so a
+    date-only value counts by its New York date; anything unreadable counts as not fresh, never an error."""
+    if not when:
+        return False
+    now = now or datetime.now(NY)
+    try:
+        parsed = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if parsed.tzinfo is None:
+        if (parsed.hour, parsed.minute, parsed.second) == (0, 0, 0):   # a bare filing date, no time of day
+            return (now.date() - parsed.date()).days * 24 <= hours
+        parsed = parsed.replace(tzinfo=NY)                             # a naive time is read as New York time
+    return parsed >= now - timedelta(hours=hours)
 
 
 def _scenario_values(row: dict[str, Any], shift: float) -> tuple[float, float]:
@@ -681,7 +723,7 @@ def scorecard(svc: Any, days_back: int = 7) -> dict[str, Any]:
     """How the stock plan of each recent pick has gone: the entry against the close 1, 3 and 5 trading days
     on, the trade's way. Option picks are graded by their stock plan too — no source has past option
     prices — and the note says so."""
-    since = (date.today() - timedelta(days=days_back + 3)).isoformat()
+    since = (datetime.now(NY).date() - timedelta(days=days_back + 3)).isoformat()
     rows = svc.db.query("SELECT * FROM morning_picks WHERE day >= ? ORDER BY day DESC, symbol", (since,))
     out, profitable_3d, graded_3d = [], 0, 0
     for r in rows:
@@ -704,8 +746,9 @@ def scorecard(svc: Any, days_back: int = 7) -> dict[str, Any]:
             profitable_3d += item["after"]["3"]["move_pct"] > 0
         out.append(item)
     return {"picks": out, "graded_3d": graded_3d, "profitable_3d": profitable_3d,
-            "note": "Each pick is graded by its stock plan (the entry against later closes, the trade's way). "
-                    "Option picks are graded the same way: no connected source has past option prices."}
+            "note": "Each pick is graded by its stock plan: the entry against the next closes, the trade's way, "
+                    "counting the pick day's own close as the first. Option picks are graded the same way — no "
+                    "connected source has past option prices."}
 
 
 # --- watches ----------------------------------------------------------------------------------------------
@@ -724,7 +767,7 @@ def remove_watch(db: Any, watch_id: int) -> None:
 
 
 def list_watches(db: Any, include_triggered_days: int = 3) -> list[dict[str, Any]]:
-    since = (date.today() - timedelta(days=include_triggered_days)).isoformat()
+    since = (datetime.now(NY).date() - timedelta(days=include_triggered_days)).isoformat()
     rows = db.query("SELECT * FROM morning_watches WHERE active = 1 OR (triggered_at IS NOT NULL AND "
                     "triggered_at >= ?) ORDER BY id DESC", (since,))
     return [dict(r) for r in rows]
@@ -750,22 +793,34 @@ class WatchChecker:
                 self._thread.start()
 
     def _run(self) -> None:
-        while not self.stop.wait(WATCH_SECONDS):
+        while True:
             try:
                 if not self.check():
-                    return                             # no active watches left: the thread ends itself
+                    with self._lock:
+                        # A watch created after check() looked would be orphaned: look once more before ending.
+                        if not any(w["active"] for w in list_watches(self.svc.db)):
+                            self._thread = None
+                            return
             except Exception:                          # noqa: BLE001 - the checker must survive anything
                 log.exception("Watch check failed")
+            if self.stop.wait(WATCH_SECONDS):
+                return
 
     def check(self) -> bool:
         """One pass. Returns False when there is nothing left to watch."""
         active = [w for w in list_watches(self.svc.db) if w["active"]]
         if not active:
             return False
-        if self.svc.market.clock().get("state") not in ("open", "premarket"):
+        state = self.svc.market.clock().get("state")
+        if state not in ("open", "premarket"):
+            if state == "unknown":
+                log.info("Watches not checked: the market clock is unavailable")
             return True
         syms = sorted({w["symbol"] for w in active})
-        quotes = self.svc.market._call("watch quotes", lambda: self.svc.market.provider.quotes(syms))
+        quotes: dict[str, Any] = {}
+        for i in range(0, len(syms), 50):
+            chunk = syms[i:i + 50]
+            quotes.update(self.svc.market._call("watch quotes", lambda c=chunk: self.svc.market.provider.quotes(c)))
         for w in active:
             q = quotes.get(w["symbol"]) or {}
             last = q.get("last")
@@ -796,6 +851,8 @@ class WatchChecker:
             mailer.send(self.svc.settings, subject, body)
             with self.svc.db.tx() as cur:
                 cur.execute("UPDATE morning_watches SET emailed = 1 WHERE id = ?", (w["id"],))
+        except mailer.MailError as exc:               # its message is already scrubbed and says what to fix
+            log.warning("Watch email failed: %s", str(exc)[:300])
         except Exception as exc:                      # noqa: BLE001 - a failed email never kills the checker
             log.warning("Watch email failed: %s", _why(exc))
 

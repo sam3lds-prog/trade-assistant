@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 from email.message import EmailMessage
 from email.utils import formatdate
 from typing import Any
@@ -55,7 +56,9 @@ def send(settings: Any, subject: str, text: str, html: str | None = None) -> str
         msg.add_alternative(html, subtype="html")
     try:
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=TIMEOUT) as server:
-            server.starttls()
+            # The default STARTTLS context does not verify the server's certificate; this one does, so the
+            # password goes only to the real SMTP host, never to whoever answers on a hostile network.
+            server.starttls(context=ssl.create_default_context())
             server.login(settings.smtp_user, settings.smtp_password)
             server.send_message(msg)
     except smtplib.SMTPAuthenticationError as exc:

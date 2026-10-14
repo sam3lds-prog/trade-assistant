@@ -97,6 +97,8 @@ function morningCard(card, actions) {
         el("strong", { text: money(lm.cap) }), ` — above that, reaching target 1 pays less than ${num(lm.min_payoff, 1)}× what the stop loses.`),
       el("div", { class: "m-ladder" }, [["Bid", opt.bid], ["Patient", lm.patient], ["Fair", lm.fair], ["Ask", opt.ask], ["Most to pay", lm.cap]]
         .filter(([, v]) => isNum(v)).map(([k, v]) => el("span", { text: `${k} ${money(v)}` }))),
+      lm.below_bid ? el("div", { class: "small muted", style: "margin-top:6px",
+        text: "This limit is below the current bid, so the order rests until the price comes down to it \u2014 it may not fill." }) : null,
       opt.iv_note ? el("div", { class: "small muted", style: "margin-top:6px", text: opt.iv_note } ) : null,
       el("div", { class: "small muted", style: "margin-top:4px", text: `Prices: ${card.price_basis}.` })));
   } else if (opt && opt.limits && opt.limits.why) {
@@ -147,13 +149,13 @@ function buildMorning() {
   const headline = el("p", { class: "small muted" });
   const out = el("div");
   const watchesBox = el("div");
-  let timer = null, shownJob;
+  let timer = null, shownJob, planDay = "";
 
   async function watchStop(card, button) {
     await withBusy(button, err, async () => {
       const r = await api("/v2/morning/watch", { symbol: card.symbol, direction: card.direction,
         kind: card.direction === "LONG" ? "below" : "above", level: Math.round(card.stop * 100) / 100,
-        why: `The stop of the ${card.setup} ${card.side_word} plan from ${shortDate(card.horizon_date)}` });
+        why: `The stop of the ${card.setup} ${card.side_word} plan${planDay ? ` from ${shortDate(planDay)}` : ""}` });
       renderWatches(r.watches, r.email_configured);
       button.textContent = "Watching";
     });
@@ -248,6 +250,7 @@ function buildMorning() {
       el("p", { class: "small muted", text: "Signs, not certainties: a true bottom or top is only known afterwards. Watch a trigger and the app checks it about once a minute while the market is open." })));
     if (plan.cards && plan.cards.length) {
       frag.append(el("h3", { class: "m-section", text: `Trade cards (${plan.cards.length})` }));
+      planDay = plan.day || "";
       for (const c of plan.cards) frag.append(morningCard(c, { watchStop }));
     } else {
       frag.append(el("div", { class: "panel" }, el("p", { class: "small", text: "No mover supports a setup and no reversal confirmed: not trading is the plan today." })));

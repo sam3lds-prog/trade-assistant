@@ -1,4 +1,4 @@
-# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.7)
+# Reliability, accounting, risk and analytics improvements (2.1.1 to 2.8)
 
 This is the engineering record for the improvement programme that follows 2.1.0: the
 baseline it started from, what was found in the code, what each sprint changed, the tests
@@ -861,3 +861,69 @@ The reviewers checked these and found them sound:
 - every handoff carrying the same contract or levels.
 
 Tests: 855 passed, 2 skipped, including the Chromium tests; ruff is clean.
+
+
+## 2.8: the Morning plan
+
+Requested: in the morning, find the stocks that made really big jumps, judge overextended against
+unfavorably sold, and buy the stock or the option to ride the wave — with the price really close to break
+even, paying a little more premium for how far it can go; watch stocks for a sign of reversal and jump on
+it; a very simple workflow; and the whole thing by email at 7:00 before the market opens.
+
+Read as follows, with the defaults stated on the screen:
+
+- **Big jumps:** at least 3% and two of the stock's own daily ranges, across about 290 large optionable
+  US stocks plus the watchlist (movers cannot be fetched from any connected source, so they are computed).
+- **Ride or fade:** a move **with fresh news** is read to keep going; a move **with no news found**,
+  already overextended **before** it, is read to snap back — the split the drift/reversal evidence
+  supports (Chan 2003; Savor 2012; Lehmann 1990; Jegadeesh 1990). News that could not be checked is
+  "not checked", never "no news".
+- **The price:** the limit is the midpoint capped at `P ≤ (V_target + r·V_stop)/(1 + r)` — the highest
+  price where reaching target 1 still pays `r` (default 1.0×) times what the stop loses.
+- **Reversal:** the 2.1 reversal reading, with a once-a-minute price watch on the confirming level.
+- **7:00:** launchd on the Mac, local time, `run.py --morning-email`; `mailer.py` over verified STARTTLS.
+
+The rules were kept throughout: no order path; nothing about the account read or sent; frequencies are
+never forecasts; unknown is never zero; at 7:00 option prices are the previous close and every card says
+so.
+
+Built in one part (migration 13, `morning.py`, `morning_email.py`, `mailer.py`, `background.py` — the job
+slot shared with Trade ideas — `setup_morning.sh`, `static/morning.js`, `/v2/morning...` behind
+`FEATURE_MORNING`), then the review fixes.
+
+### Independent review of 2.8 and fixes
+
+Two reviewers checked the branch before it shipped, without having seen it written. One covered the
+finance, arithmetic and statistics; the other covered robustness, concurrency, security and the screen.
+The first re-verified the limit-cap formula on 20,000 random cases and the past record's Wilson interval.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| M1 | An SEC date-only `filingDate` compared against an aware cutoff raised `TypeError`, which sank the whole plan in the live+SEC configuration | High | `_fresh()` reads date-only values by New York date, gives naive times a zone, and treats unreadable as not fresh; each mover and reversal card is built in its own `try/except`, so one stock never stops the morning | `test_unknown_news_is_never_read_as_no_news`; plan-level containment in the API test |
+| M2 | `starttls()` used the default context, which does not verify the server's certificate — the SMTP password could have gone to whoever answered on a hostile network | High | `ssl.create_default_context()` | the fake SMTP server asserts a verifying context |
+| M3 | `date.today()` on a UTC machine dated an evening plan tomorrow (plan day, demo news, record cache, scorecard and watch windows) | High | New York dates everywhere: `datetime.now(NY).date()` | screenshots at 23:07 New York; existing date tests |
+| M4 | The past record required overextension at the post-move close while the live rule read the bar before the move, so the record described a different pattern than the one traded | High | both condition on the bar before the move | `test_the_past_record_counts_what_followed_the_same_pattern` |
+| M5 | The email run skipped whenever the clock said "closed" — true every evening and before 7:00 in New York, so a 7:00 east of New York would never have sent; a holiday was indistinguishable | High | only weekends skip (New York calendar); a weekday holiday sends a plan that says the market is closed | `test_the_morning_email_run_skips_weekends` |
+| M6 | A failed send still recorded the picks, and `--morning-print` recorded them too, so the scorecard graded plans nobody saw | Medium | picks recorded only after `mailer.send` returns; a dry run records nothing; the screen's send route the same | `test_a_dry_run_records_nothing_and_a_send_records_only_after_it_works` |
+| M7 | The screen could email yesterday's plan under today's subject, and the subject was dated from the clock rather than the plan | Medium | `/v2/morning/email` refuses a plan whose day is not today; the subject takes the plan's own day | `test_the_screen_refuses_to_email_a_stale_plan_and_caps_the_watches` |
+| M8 | A watch added between the checker's empty look and its thread ending was orphaned until the next add; the first check also waited a minute | Medium | the checker checks at once, and before ending re-checks under its own lock | `test_a_watch_triggers_once_marks_itself_and_survives_no_email` |
+| M9 | No cap on active watches, and the watch quotes went out in one call however many there were | Medium | at most 40 active (the route says why); quotes chunked at 50 | the same API test |
+| M10 | `MailError` in the trigger alert was logged as "an unexpected MailError", hiding the (already scrubbed) guidance | Low | logged by its own message | code read |
+| M11 | The job progress bar could pass 100% (`done` exceeded `total` by the chunk remainder) | Low | `done` clamped to `total` in `OneJob` | code read |
+| M12 | A suggested limit below the bid looked immediate but rests until the price comes to it | Low | the card says so | browser test renders the card |
+| M13 | "Watch the stop" described the plan by its horizon date where its own day was meant | Low | the watch's reason names the plan's day | code read |
+| M14 | Two different non-viable cases shared one message (no price pays at all, and a cap under a cent) | Low | split into their own sentences | `test_the_card_caps_the_limit_and_falls_back_to_shares` |
+| M15 | Zero shares (entry above the budget) dropped silently from the email | Low | a warning on the card, carried into the email's Caution line | `test_without_a_chain_the_shares_carry_the_plan` |
+| M16 | No ceiling on contracts: a cheap option could suggest dozens | Low | at most 10 | `test_the_card_caps_the_limit_and_falls_back_to_shares` |
+| M17 | `setup_morning.sh`: the Linux cron hint broke on paths with spaces; a path with `&`, `<`, `>` or quotes broke the plist XML silently; a 7:45 job from an earlier `--also-45` lingered | Low | the hint is quoted; hostile paths are refused with the reason; the stale job is removed | `bash -n`; manual run |
+| M18 | The scorecard said "days" where it counts closes, the pick day's close first | Low | wording fixed on the screen, in the email and in the docstring | `test_picks_are_recorded_once_and_graded_by_the_stock_plan` |
+| M19 | A plan-build failure in the email run printed the raw exception, which could carry a URL with a token | Low | printed through `redact()`, truncated | code read |
+| M20 | The progress total double-counted the quote pass | Low | one tick per name plus a fixed tail | API test reaches "done" |
+
+The reviewers checked these and found them sound: the limit-cap algebra and its tick rounding; the payoff
+inequality at and below the cap; the Wilson interval; the ATR-ranges move measure and the premarket/stale
+split; the fade's IV settle applied to the scenario values; the one-shot trigger claim
+(`UPDATE … WHERE active = 1`); the kept-result restart path shared with Trade ideas; the flag off; the
+email's escaping of whatever lands in the plan; and that no route places an order.
+
+Tests: 883 passed, 2 skipped, including the Chromium tests; ruff is clean.

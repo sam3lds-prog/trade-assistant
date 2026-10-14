@@ -10,9 +10,14 @@ cd "$(dirname "$0")"
 
 if [ "$(uname)" != "Darwin" ]; then
   echo "This script schedules with launchd, which is macOS only. On Linux, use cron:"
-  echo "  0 7 * * 1-5  cd $(pwd) && .venv/bin/python run.py --morning-email >> data/logs/morning.log 2>&1"
+  echo "  0 7 * * 1-5  cd '$(pwd)' && .venv/bin/python run.py --morning-email >> data/logs/morning.log 2>&1"
   exit 1
 fi
+
+case "$(pwd)" in
+  *[\&\<\>\"\']*) echo "This folder's path ($(pwd)) contains a character that breaks launchd's XML (& < > \" ')."
+     echo "Move or clone the project to a plainer path and run this again."; exit 1;;
+esac
 
 AGENTS="$HOME/Library/LaunchAgents"
 UID_NUM="$(id -u)"
@@ -54,7 +59,7 @@ write_job() {
   <key>StandardErrorPath</key><string>$(pwd)/data/logs/morning.log</string>
 </dict></plist>
 PLIST
-  remove_job_quiet=$(launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true)
+  launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
   launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$label.plist"
   echo "Scheduled $label at $hour:$(printf '%02d' "$minute") local time (weekends skip themselves)."
 }
@@ -62,6 +67,8 @@ PLIST
 write_job com.tradeassist.morning 7 0
 if [ "${1:-}" = "--also-45" ]; then
   write_job com.tradeassist.morning45 7 45
+else
+  remove_job com.tradeassist.morning45   # without --also-45, an older 7:45 job does not linger
 fi
 
 echo

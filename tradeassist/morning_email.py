@@ -71,7 +71,10 @@ def render(plan: dict[str, Any], score: dict[str, Any], *, app_url: str = "http:
     """(subject, plain text, HTML) for the plan. The same lines drive both bodies."""
     cards = plan.get("cards") or []
     pending = [r for r in plan.get("reversal") or [] if not r.get("confirmed") and r.get("trigger")]
-    when = datetime.now(NY).strftime("%a %b %-d")
+    try:
+        when = datetime.fromisoformat(plan.get("day", "")).strftime("%a %b %-d")
+    except ValueError:
+        when = datetime.now(NY).strftime("%a %b %-d")
     demo = plan.get("data_source") == "demo"
     subject = (f"Morning plan, {when}: {len(cards)} trade card{'s' if len(cards) != 1 else ''}, "
                f"{len(pending)} reversal trigger{'s' if len(pending) != 1 else ''}" + (" (demo)" if demo else ""))
@@ -98,10 +101,11 @@ def render(plan: dict[str, Any], score: dict[str, Any], *, app_url: str = "http:
     graded = score.get("graded_3d", 0)
     if graded:
         lines = [f"{p['day']} {p['symbol']} ({p['setup']}, {p['direction'].lower()}): "
-                 f"{p['after']['3']['move_pct']:+.1f}% after 3 days"
+                 f"{p['after']['3']['move_pct']:+.1f}% after 3 closes"
                  for p in score.get("picks", []) if p.get("after", {}).get("3")][:6]
-        lines.append(f"{score.get('profitable_3d', 0)} of the last {graded} picks were in profit after 3 days "
-                     "(graded by the stock plan; past option prices are not available).")
+        lines.append(f"{score.get('profitable_3d', 0)} of the last {graded} picks were in profit after 3 closes "
+                     "(the pick day's close is the first; graded by the stock plan — past option prices "
+                     "are not available).")
         blocks.append(("Recent picks", [lines]))
 
     footer = (f"{plan.get('price_basis', '')} Setups and past frequencies, not forecasts; this app never places "

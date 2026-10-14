@@ -69,10 +69,10 @@ def morning_email(settings, send: bool) -> int:
     if now.weekday() >= 5:
         print(f"{now:%A}: the market is closed, so no morning email.")
         return 0
+    # A weekday holiday is NOT skipped: the plan still goes out, says the market is closed, and prices are
+    # the last session's. Skipping on the clock alone would silently drop real mornings (the clock reads
+    # "closed" before 7:00 New York time, so a 7:00 in a time zone east of New York would never send).
     svc = TradeAssistant(settings)
-    if svc.market.info.mode != "demo" and svc.market.clock().get("state") == "closed":
-        print("The market is closed today (a holiday), so no morning email.")
-        return 0
     if send and not mailer.configured(settings):
         print("Email is not set up: put SMTP_USER and SMTP_PASSWORD in .env (with Gmail, an app password from\n"
               "myaccount.google.com/apppasswords; 2-Step Verification must be on). Or run --morning-print.")
@@ -83,13 +83,15 @@ def morning_email(settings, send: bool) -> int:
         with svc.market.paced(SCAN_PACE.get(svc.market.info.mode, 0.0)):
             plan = morning.plan(progress=_morning_progress)
     except Exception as exc:                          # noqa: BLE001 - the job must end with a plain line
-        print(f"\nThe plan could not be built: {exc}")
+        from tradeassist.events import redact
+        print(f"\nThe plan could not be built: {redact(str(exc))[:400]}")
         return 1
     print(f"\n{len(plan['movers'])} movers, {len(plan['cards'])} trade cards, "
           f"{len(plan['reversal'])} reversal rows, in {plan['seconds']:.0f}s.")
-    record_picks(svc.db, plan, "email")
+    morning.save_result(plan)                          # the screen shows this plan without a rescan
     subject, text, html = renderer.render(plan, scorecard(svc))
     if not send:
+        # A dry run: nothing is sent and nothing is recorded as a pick.
         out = settings.db_path.parent / "morning.html"
         out.write_text(html)
         print("\n" + text)
@@ -100,6 +102,7 @@ def morning_email(settings, send: bool) -> int:
     except mailer.MailError as exc:
         print(f"\n{exc}")
         return 1
+    record_picks(svc.db, plan, "email")                # picks count only once the plan reached you
     print(f"Sent to {to}: {subject}")
     return 0
 

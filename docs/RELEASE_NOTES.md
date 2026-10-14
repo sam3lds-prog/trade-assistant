@@ -18,6 +18,81 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.8.0
+
+**Morning plan** (new, the landing screen) reads the stocks that jumped since the last close, says which
+are worth riding and which look stretched enough to fade, watches for reversals about to confirm, and
+turns each setup into a trade card with the exact limit price to type. Optionally, the same plan arrives
+by email every weekday at 7:00 in your computer's own time zone.
+
+- **Requirements.**
+  - Migration 13 (`morning_picks`, `morning_watches`); the usual backup is made first.
+  - New flag `FEATURE_MORNING`, on by default.
+  - New optional settings: `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_HOST`, `SMTP_PORT`, `EMAIL_TO` for the
+    email, and `MORNING_MIN_PAYOFF` for the limit cap. No new dependency (email uses Python's own
+    `smtplib` over STARTTLS with the server's certificate verified).
+- **Safety.** Nothing places an order. The SMTP password stays in `.env`, is never logged, and is cleaned
+  out of any error message. Nothing about your account is sent anywhere.
+
+**The movers.** About 290 large optionable US stocks plus your watchlist are read each morning.
+
+- A move counts when it is at least 3% **and** two of that stock's own daily ranges, so 4% in a quiet
+  stock counts for more than 4% in a volatile one. Premarket quotes are read against the last finished
+  close; a quote still sitting on the close is read close-to-close.
+- **Ride or fade.** A mover **with fresh news** (headlines or SEC filings within 36 hours) and at least
+  1.5 ranges is read to keep going — the trade goes the move's way. A mover with **no news found**, at
+  least 2.5 ranges, and already overextended **before** the move (RSI at 30/70, two ATR from its 20-day
+  average, or three one-way days) is read to snap back — the trade fades it. News that could not be
+  checked (no news source configured, or one failed) is shown as *not checked* and never treated as
+  "no news".
+- **The past record.** For each setup, five years of saved history across all these stocks is searched for
+  the same pattern, and the card says how often the trade's way was ahead after the horizon — with a
+  plain warning that these are frequencies, not forecasts, and that history cannot say which old moves
+  had news.
+
+**The trade cards.** Each card is a complete plan: entry, stop, two targets, a horizon, shares sized to
+your risk per trade, and the best call or put the budget pays for.
+
+- **The limit price** is capped where reaching target 1 still pays at least `MORNING_MIN_PAYOFF` (default
+  1.0×) what the stop loses: cap = (value at target + payoff × value at stop) ÷ (1 + payoff). The
+  suggested price is the quote midpoint, never above the cap, rounded down to a valid tick. When no price
+  under the cap exists, the card says why and falls back to shares.
+- **Order to copy.** One line — "Buy 2 NKE 2026-10-31 $72 Call · Limit $1.62 · Good for day" — with a
+  Copy button, so the Robinhood ticket takes seconds.
+- At 7:00 options have not traded yet (they trade 9:30–16:00 New York time), so the option prices are the
+  previous close, and every card says so. A second 7:45 run with live prices can be scheduled.
+
+**Reversal watch.** Stocks from your watchlist and the movers whose reversal reading is forming or
+confirmed are listed with the price that would confirm a turn. Press **Watch** and the app checks the
+price about once a minute while the market is open; when it crosses, you get an email (if set up) and the
+screen shows the trigger. Watches survive restarts; at most 40 are active at once.
+
+**The 7:00 email.** `./setup_morning.sh` schedules it on a Mac (launchd, local time; weekends skip
+themselves; `--also-45` adds the 7:45 run; `--remove` undoes it). Linux gets the cron line to paste. Try
+it first without sending: `.venv/bin/python run.py --morning-print`. A weekday holiday still sends — the
+plan says the market is closed rather than silently not arriving.
+
+**The scorecard.** Each emailed or sent pick is recorded and graded against the next closes (the pick
+day's own close is the first), the trade's way. Option picks are graded by their stock plan — no
+connected source has past option prices — and the scorecard says so.
+
+**Before release,** two independent reviews (the finance and arithmetic; the robustness and security)
+checked the branch. Among what they found and was fixed:
+
+- An SEC filing date crashed the news check and sank the whole plan; now one stock can never stop the
+  morning.
+- The email's STARTTLS did not verify the server's certificate, so the SMTP password could have gone to
+  whoever answered on a hostile network.
+- Dates were read in UTC, so a plan built in the evening was dated tomorrow.
+- The past record required overextension *after* the move while the live rule read it *before*; both now
+  read the bar before the move.
+- A failed send still recorded the picks; the dry run recorded them too. Picks now count only once the
+  plan reached you.
+- The holiday check would have silently skipped every real morning east of New York.
+
+The reviewer also verified the limit-cap formula against 20,000 random cases. The full list is in
+[IMPROVEMENTS.md](IMPROVEMENTS.md).
+
 ## 2.7.0
 
 **Trade ideas** (new, under Find) scans up to the 200 largest US companies. It lists the highest-graded

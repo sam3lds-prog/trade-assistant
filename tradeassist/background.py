@@ -61,7 +61,7 @@ class OneJob:
     def _run(self, job: dict[str, Any], work) -> None:
         def progress(done: int, total: int, current: str | None) -> None:
             with self._lock:
-                job.update(done=done, total=total, current=current)
+                job.update(done=min(done, total), total=total, current=current)
                 if job["stop"]:
                     raise JobStopped()
         try:

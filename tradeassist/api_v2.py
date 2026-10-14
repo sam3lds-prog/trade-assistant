@@ -709,6 +709,9 @@ def build_router(svc: Any) -> APIRouter:
         if now is not None and ((req.kind == "above" and now >= req.level) or (req.kind == "below" and now <= req.level)):
             raise HTTPException(status_code=400, detail=f"{req.symbol} is already {req.kind} ${req.level:,.2f} "
                                                         f"(now ${now:,.2f}); there is nothing to wait for.")
+        if sum(1 for w in list_watches(svc.db) if w["active"]) >= 40:
+            raise HTTPException(status_code=400, detail="40 price watches are already active; remove one first "
+                                                        "(each minute's check quotes every watched stock).")
         wid = add_watch(svc.db, symbol=svc._symbol(req.symbol), direction=req.direction, kind=req.kind,
                         level=req.level, why=req.why or f"{'Bottom' if d > 0 else 'Top'} watch")
         watcher.ensure_running()
@@ -726,17 +729,23 @@ def build_router(svc: Any) -> APIRouter:
     @router.post("/morning/email")
     def morning_email_now():
         need_morning()
+        from datetime import datetime as _dt
+
         from . import morning_email as renderer
+        from .optionmath import NY as _NY
         st = morning.status()
         if not st.get("result"):
             raise HTTPException(status_code=400, detail="Build the morning plan first (Scan), then send it.")
         plan = st["result"]
-        record_picks(svc.db, plan, "screen")
+        if plan.get("day") != _dt.now(_NY).date().isoformat():
+            raise HTTPException(status_code=400, detail=f"This plan is from {plan.get('day')}. Build today's "
+                                                        "first (Refresh the plan), then send it.")
         subject, text, html = renderer.render(plan, scorecard(svc))
         try:
             to = mailer.send(svc.settings, subject, text, html)
         except mailer.MailError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        record_picks(svc.db, plan, "screen")           # picks count only once the plan reached you
         return clean({"sent_to": to, "subject": subject})
 
     # --- your trade history (2.6): imported read-only, analysed locally ---------------------------------

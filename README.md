@@ -87,13 +87,19 @@ Every trade opens to the statement rows it was built from, so each figure can be
 against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
 orders and holdings through the Robinhood connection, read-only.
 
-Version 2.7 adds **Trade ideas** (under Find). It scans up to the 200 largest US companies and lists the
-highest-graded trades to buy and to short: each with its entry, stop, targets, a size for your risk per
-trade, and what it makes if target 1 is reached or loses if stopped. Any of them can be simulated on
-20,000 price paths at the volatility option prices imply, following the trade's own stop and targets.
-The simulation shows how often each way out happens and what each makes or loses, with shares and with
-the best call or put your risk per trade pays for. It is a model with no view on direction, not a
-forecast.
+Version 2.8 adds the **Morning plan**, the new landing screen. Each morning it reads about 290 large US
+stocks plus your watchlist, finds the ones that jumped since the last close, and says which look worth
+riding (fresh news behind the move) and which look stretched enough to fade (no news found, already
+overextended before the move). Each setup becomes a trade card: entry, stop, targets, shares sized to
+your risk, the best call or put the budget pays for, and the exact limit price to type — capped where
+reaching target 1 still pays at least what the stop loses. A reversal watch lists stocks about to confirm
+a turn and can watch the trigger price for you. Optionally the whole plan arrives by **email every
+weekday at 7:00** (`./setup_morning.sh` schedules it on a Mac). Setups and past frequencies, not
+forecasts — and nothing places an order.
+
+Version 2.7 added **Trade ideas** (under Find): the 200 largest US companies scanned for the
+highest-graded trades to buy and to short, any of which can be simulated on 20,000 price paths following
+the trade's own stop and targets.
 
 ## Start it
 
@@ -117,6 +123,7 @@ What to put in `.env`:
 | `SEC_USER_AGENT` | Your name and email, which the SEC requires. Switches on filings and the earnings-date estimate. |
 | `FINNHUB_API_KEY` | Optional (free at finnhub.io). Company and market headlines on the Market & news and Analyze screens. |
 | `ANTHROPIC_API_KEY` | Optional. Lets Claude write market and stock briefs with web sources, read headline tone, and read trade descriptions. Billed by Anthropic to that API account; capped by `AI_DAILY_REQUESTS`. Never sent to the browser or logged. |
+| `SMTP_USER`, `SMTP_PASSWORD` | Optional. The 7:00 morning email and trigger alerts. With Gmail, an app password from myaccount.google.com/apppasswords (2-Step Verification must be on). Any SMTP provider works through `SMTP_HOST`/`SMTP_PORT`; `EMAIL_TO` if the destination differs. The password never leaves `.env` except to the verified mail server. |
 
 With no token the app runs on made-up demo data so you can learn the screens.
 Demo data is stored in a separate database file and never mixes with real history.
@@ -405,6 +412,33 @@ and without rule overrides.
 
 ## Version 2
 
+**Morning plan (2.8).** The landing screen. Switch it off with `FEATURE_MORNING=0`.
+
+1. Press **Build the plan** (or let the 7:00 email run it). About 290 large optionable US stocks plus
+   your watchlist are read. A move counts when it is at least 3% and two of that stock's own daily
+   ranges, so 4% in a quiet stock counts for more than 4% in a volatile one.
+2. **Ride or fade.** A mover with fresh news (headlines or SEC filings within 36 hours) is read to keep
+   going; a mover with no news found that was already overextended before the move is read to snap back.
+   News that could not be checked says *not checked* — it is never treated as "no news". Each setup shows
+   its five-year past record on these stocks: how often the trade's way was ahead after the horizon.
+   Frequencies, not forecasts, and history cannot say which old moves had news.
+3. **The trade card** has the whole plan: entry, stop, two targets, shares sized to your risk per trade,
+   the best call or put the budget pays for, and the limit price to type — the quote midpoint, never
+   above the cap where reaching target 1 still pays at least `MORNING_MIN_PAYOFF` (default 1.0×) what the
+   stop loses. One line is ready to copy into Robinhood. At 7:00, option prices are the previous close
+   (options trade 9:30–16:00 New York time) and the card says so; **Price it live** reprices after the
+   open, and a 7:45 second email can be scheduled.
+4. **Reversal watch.** Stocks about to confirm a bottom or top are listed with the trigger price. Press
+   **Watch** and the app checks about once a minute while the market is open, then emails you when it
+   crosses (watches survive restarts; at most 40 at once).
+5. **The scorecard** grades each sent pick against the next closes (the pick day's close is the first),
+   the trade's way. Option picks are graded by their stock plan: no connected source has past option
+   prices, and the scorecard says so.
+6. **The email.** `./setup_morning.sh` schedules every weekday at 7:00 in this computer's own time zone
+   (macOS launchd; `--also-45` adds a 7:45 run at live prices; `--remove` undoes it; Linux gets the cron
+   line). The Mac must be awake — the script prints the `pmset` line that wakes it. Try it without
+   sending: `.venv/bin/python run.py --morning-print`.
+
 **Trade ideas (2.7).** Under Find. Switch it off with `FEATURE_TRADE_IDEAS=0`.
 
 1. Pick the stocks: the 200 largest US companies (a fixed list, not updated automatically), the 100
@@ -659,6 +693,22 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
 - 2.3.1: two independent reviewers checked 2.1.0 to 2.3.0 for accounting, data loss,
   look-ahead and security; the 27 findings were reproduced, fixed and given regression tests
   (`tests/test_review_fixes.py`; listed in `docs/IMPROVEMENTS.md`).
+- 2.8 (Morning plan):
+  - the limit cap is checked against its closed form, against a strict payoff inequality, and on random
+    cases (the independent reviewer re-verified it on 20,000);
+  - ride needs news and fade needs no-news plus pre-move overextension; unchecked news never counts as
+    "no news";
+  - the past record and the live rule condition on the same pre-move bar;
+  - picks are recorded only after a send succeeds, never for a dry run, and the scorecard grades them the
+    trade's way;
+  - a watch triggers exactly once, survives restarts, and waits while the market is closed;
+  - the mailer refuses to send without a verified STARTTLS certificate, and the password never appears in
+    an error;
+  - dates are New York dates even on a UTC machine; weekends skip; a holiday still sends;
+  - one stock's failure never stops the plan; the email escapes whatever lands in it.
+
+  Two independent reviews (finance and arithmetic; robustness and security) checked the branch before
+  release; what they found is listed in `docs/IMPROVEMENTS.md`.
 - 2.7 (Trade ideas):
   - each listed trade's side matches Today's rule and its grade, levels and size match Decide's;
   - the simulation's chance of touching one level before another matches the closed form;
@@ -772,6 +822,10 @@ tradeassist/
   tradeanalysis.py         trades rebuilt from it; strategies, risk, periods and patterns (2.6)
   robinhood_account.py     optional read of your orders and holdings through the connection (2.6)
   ideas.py                 trade ideas: the background scan of up to 200 stocks, graded and ranked (2.7)
+  morning.py               the morning plan: movers, ride/fade setups, limit caps, past records, watches (2.8)
+  morning_email.py         the plan rendered as the 7:00 email, text and HTML (2.8)
+  mailer.py                SMTP over verified STARTTLS; the password scrubbed from every error (2.8)
+  background.py            the shared background-job slot used by Trade ideas and the Morning plan (2.8)
   tradesim.py              the simulation of one trade: paths, stop and target exits, shares and a contract (2.7)
   makeup.py news.py        the market's make-up; headlines and their tone
   ai.py briefs.py          the AI plug-in (Anthropic API) and what it is asked
@@ -781,9 +835,9 @@ tradeassist/
   versions.py              version labels recorded with every result
   static/                  the web page: flow.js (2.5 pure helpers, tested under Node), app.js classic screens,
                            v2.js version 2 screens, lab.js 2.4 screens, decide.js Today and Decide (2.5),
-                           trades.js My trades (2.6), ideas.js Trade ideas (2.7)
+                           trades.js My trades (2.6), ideas.js Trade ideas (2.7), morning.js Morning plan (2.8)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
-docs/IMPROVEMENTS.md       the 2.1.1 to 2.7 engineering record: defects found, tests, reports
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.8 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```
