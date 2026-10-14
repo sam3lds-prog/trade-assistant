@@ -463,3 +463,56 @@ def test_the_screen_refuses_to_email_a_stale_plan_and_caps_the_watches(client, m
                                                       "level": 0.01 + i / 100}).status_code == 200
     r = client.post("/v2/morning/watch", json={"symbol": "KO", "direction": "LONG", "kind": "below", "level": 0.9})
     assert r.status_code == 400 and "40" in r.json()["error"]
+
+def test_a_dead_data_source_fails_the_plan_instead_of_a_quiet_open(svc, monkeypatch):
+    """Sign-in expired, no network: every quote fails. The plan must fail with the source's own message —
+    never finish as 'no stock moved' — and must not grind through the bars of the whole universe."""
+    from tradeassist.market import DataError as MarketDataError
+    monkeypatch.setattr(morning_mod, "movers_universe", lambda watchlist: ["AAPL", "MSFT", "KO", "JPM"])
+    monkeypatch.setattr(svc.market.provider, "quotes", lambda syms: (_ for _ in ()).throw(
+        MarketDataError("The Robinhood sign-in is missing or has expired.")))
+    bars_calls = []
+    monkeypatch.setattr(svc.market, "bars", lambda *a, **k: bars_calls.append(a) or (_ for _ in ()).throw(
+        MarketDataError("down")))
+    m = Morning(svc, Analyst(svc), dict(FEATURE_DEFAULTS))
+    with pytest.raises(morning_mod.DataError, match="sign-in is missing or has expired"):
+        m.plan()
+    assert [c for c in bars_calls if c[0] != "SPY"] == []     # no grind (the regime's SPY read is fine)
+
+
+def test_all_bars_failing_also_fails_the_plan_and_stops_the_grind(svc, monkeypatch):
+    from tradeassist.market import DataError as MarketDataError
+    names = [f"S{i:03d}" for i in range(60)]
+    monkeypatch.setattr(morning_mod, "movers_universe", lambda watchlist: names)
+    monkeypatch.setattr(svc.market.provider, "quotes",
+                        lambda syms: {s: {"last": 100.0} for s in syms})
+    bars_calls = []
+    monkeypatch.setattr(svc.market, "bars", lambda sym, *a, **k: bars_calls.append(sym) or (_ for _ in ()).throw(
+        MarketDataError(f"no history for {sym}")))
+    m = Morning(svc, Analyst(svc), dict(FEATURE_DEFAULTS))
+    with pytest.raises(morning_mod.DataError, match="no price history could be"):
+        m.plan()
+    grind = [sym for sym in bars_calls if sym != "SPY"]       # the regime's SPY read is not the grind
+    assert len(grind) <= 15                           # 15 straight misses with nothing read: the source is down
+
+
+def test_a_failed_plan_emails_the_failure_instead_of_silence(tmp_path, monkeypatch, capsys):
+    import run as run_mod
+    s = Settings(data_mode="demo", db_path=tmp_path / "t.db",
+                 smtp_user="me@example.com", smtp_password="pw")
+    sent = []
+    monkeypatch.setattr(mailer, "send",
+                        lambda settings, subject, text, html=None: sent.append((subject, text)) or "me@example.com")
+    monkeypatch.setattr(morning_mod.Morning, "plan", lambda self, progress=None: (_ for _ in ()).throw(
+        morning_mod.DataError("The Robinhood sign-in is missing or has expired.")))
+    assert run_mod.morning_email(s, send=True) == 1
+    out = capsys.readouterr().out
+    assert "could not be built" in out and "sign-in is missing" in out
+    (subject, text), = sent
+    assert subject.startswith("Morning plan failed") and "sign-in is missing or has expired" in text
+    assert "Nothing was scanned and nothing was recorded" in text
+    db = Database(tmp_path / "t.db")
+    try:
+        assert db.query("SELECT COUNT(*) AS n FROM morning_picks")[0]["n"] == 0
+    finally:
+        db.close()

@@ -298,6 +298,7 @@ class Morning:
 
     def _quotes(self, names: list[str], progress=None, total: int = 0) -> dict[str, dict[str, Any]]:
         market, out = self.svc.market, {}
+        self.last_quote_error: str | None = None
         for i in range(0, len(names), 50):
             if progress:
                 progress(1 + i // 50, total, "quotes")
@@ -306,6 +307,7 @@ class Morning:
                 out.update(market._call("morning quotes", lambda c=chunk: market.provider.quotes(c)))
             except DataError as exc:
                 log.info("Morning quotes failed for a chunk: %s", exc)
+                self.last_quote_error = str(exc)
         return out
 
     def _move(self, q: dict[str, Any], f: dict[str, np.ndarray]) -> dict[str, Any] | None:
@@ -364,6 +366,8 @@ class Morning:
 
     def _frames(self, names: list[str], progress, done_base: int, total: int) -> dict[str, dict[str, np.ndarray]]:
         frames: dict[str, dict[str, np.ndarray]] = {}
+        self._last_frame_error: str | None = None
+        misses = 0
         for i, sym in enumerate(names):
             if progress:
                 progress(done_base + i, total, sym)
@@ -371,9 +375,15 @@ class Morning:
                 f = features_of(self.svc.market.bars(sym, RECORD_YEARS, complete=True))
             except Exception as exc:                  # noqa: BLE001 - one stock never stops the morning
                 log.info("Morning: no bars for %s: %s", sym, exc)
+                self._last_frame_error = _why(exc) if not isinstance(exc, DataError) else str(exc)
                 f = None
             if f is not None:
                 frames[sym] = f
+            else:
+                misses += 1
+                if misses >= 15 and not frames:       # nothing read in 15 names: the source is down, stop grinding
+                    log.warning("Morning: the first %d names all failed; the data source looks down", misses)
+                    break
         return frames
 
     def _record(self, frames, *, move_direction: int, min_ranges: float, need_overext: bool,
@@ -554,7 +564,15 @@ class Morning:
         except (DataError, ValueError, KeyError) as exc:
             notes.append(f"The market regime could not be read ({exc}).")
         quotes = self._quotes(names + ["SPY"], progress, total)
+        if not quotes:
+            # The data source is down for everything (an expired sign-in, no network). Grinding through the
+            # bars of ~290 names would take minutes and end in a plan that reads "a quiet open" — the unknown
+            # shown as calm. Fail now, with the source's own message, which says what to do.
+            raise DataError(f"No quotes could be read, so there is no plan. {self.last_quote_error or ''}".strip())
         frames = self._frames(names, progress, 8, total)
+        if not frames:
+            raise DataError("Quotes were read but no price history could be, so there is no plan. "
+                            "The last error: " + (self._last_frame_error or "none recorded"))
         spy = None
         try:
             spy_f = features_of(self.svc.market.bars("SPY", 1.0, complete=True))
