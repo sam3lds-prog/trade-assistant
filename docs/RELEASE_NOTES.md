@@ -18,6 +18,22 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.8.1
+
+A fix from the first real morning run: with an expired Robinhood sign-in, the scan ground through the
+whole universe against a dead data source and would have finished as "a quiet open" — the unknown shown
+as calm.
+
+- **A dead data source now fails the plan with the source's own message** (for Robinhood: stop the app,
+  run `python run.py --robinhood-check`, restart) instead of finishing empty. When no quotes at all can be
+  read the scan stops at once; when quotes read but the first 15 names have no price history, the grind
+  stops there.
+- **The 7:00 run emails the failure.** If the plan cannot be built and email is set up, a short notice
+  says why and what to do, so a broken morning never looks like a quiet one. Nothing is recorded as a
+  pick.
+
+No migration, no new setting.
+
 ## 2.8.0
 
 **Morning plan** (new, the landing screen) reads the stocks that jumped since the last close, says which

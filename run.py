@@ -84,7 +84,18 @@ def morning_email(settings, send: bool) -> int:
             plan = morning.plan(progress=_morning_progress)
     except Exception as exc:                          # noqa: BLE001 - the job must end with a plain line
         from tradeassist.events import redact
-        print(f"\nThe plan could not be built: {redact(str(exc))[:400]}")
+        reason = redact(str(exc))[:400]
+        print(f"\nThe plan could not be built: {reason}")
+        if send and mailer.configured(settings):
+            # Silence at 7:00 looks like a quiet day. Say that the plan failed, and why, instead.
+            try:
+                mailer.send(settings, f"Morning plan failed \u2014 {now:%a %b %-d}",
+                            f"The morning plan could not be built.\n\n{reason}\n\n"
+                            "Nothing was scanned and nothing was recorded. Fix the cause and run\n"
+                            "'.venv/bin/python run.py --morning-email' by hand, or wait for tomorrow's run.")
+                print("A failure notice was emailed.")
+            except mailer.MailError as mexc:
+                print(f"The failure notice could not be emailed either: {mexc}")
         return 1
     print(f"\n{len(plan['movers'])} movers, {len(plan['cards'])} trade cards, "
           f"{len(plan['reversal'])} reversal rows, in {plan['seconds']:.0f}s.")
