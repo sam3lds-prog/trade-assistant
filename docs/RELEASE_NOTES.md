@@ -18,6 +18,22 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.9.0
+
+**The trade card and the email, on Analyze a stock.** After **Grade and find a contract** runs, the same
+card the Morning plan builds now follows the grade — for your own thesis levels.
+
+- **The card:** the best call or put your risk per trade pays for, the limit price capped where reaching
+  target 1 still pays at least `MORNING_MIN_PAYOFF`× what the stop loses, the one-line order to copy into
+  Robinhood, **Price it live**, and **Watch the stop** (the watch is listed on the Morning plan screen).
+- **Email me this analysis:** one button sends the trend reading and the card to your inbox, built fresh
+  on the server from your thesis levels — never from the browser's copy. The email says the levels are
+  your own, and keeps the honesty lines: frequencies are not forecasts, and nothing places an order.
+- Needs `FEATURE_MORNING` on (the card machinery) and the usual SMTP settings for the email; without them
+  the button answers with the setup guidance rather than failing silently.
+
+No migration, no new setting, no new dependency.
+
 ## 2.8.1
 
 A fix from the first real morning run: with an expired Robinhood sign-in, the scan ground through the

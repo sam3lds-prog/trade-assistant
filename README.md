@@ -439,6 +439,11 @@ and without rule overrides.
    line). The Mac must be awake — the script prints the `pmset` line that wakes it. Try it without
    sending: `.venv/bin/python run.py --morning-print`.
 
+**The trade card on Analyze a stock (2.9).** After **Grade and find a contract**, your thesis gets the
+same card the Morning plan builds: the best contract for your risk per trade, the capped limit price, the
+order to copy, **Watch the stop**, and **Email me this analysis** — the trend reading and the card sent to
+your inbox, built on the server from your own levels.
+
 **Trade ideas (2.7).** Under Find. Switch it off with `FEATURE_TRADE_IDEAS=0`.
 
 1. Pick the stocks: the 200 largest US companies (a fixed list, not updated automatically), the 100

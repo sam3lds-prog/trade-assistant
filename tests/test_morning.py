@@ -516,3 +516,40 @@ def test_a_failed_plan_emails_the_failure_instead_of_silence(tmp_path, monkeypat
         assert db.query("SELECT COUNT(*) AS n FROM morning_picks")[0]["n"] == 0
     finally:
         db.close()
+
+# --- 2.9: the trade card and the email on Analyze a stock ---------------------------------------------------
+
+def test_the_card_route_takes_the_analysis_setup(client):
+    r = client.post("/v2/morning/card", json={"symbol": "KO", "direction": "LONG", "entry": 100.0,
+                                              "stop": 95.0, "target_1": 110.0, "target_2": 115.0,
+                                              "horizon_days": 20, "setup": "analysis"})
+    assert r.status_code == 200
+    card = r.json()
+    assert card["setup"] == "analysis" and "thesis" in card["levels_why"]
+    assert card["order_text"].startswith(("Buy", "Sell short"))
+
+
+def test_the_analysis_email_sends_the_card_with_the_honesty_lines(client, monkeypatch):
+    sent = {}
+    monkeypatch.setattr("tradeassist.mailer.send",
+                        lambda settings, subject, text, html=None: sent.update(subject=subject, text=text,
+                                                                               html=html) or "me@example.com")
+    r = client.post("/v2/analysis/email", json={"symbol": "KO", "direction": "SHORT", "entry": 100.0,
+                                                "stop": 105.0, "target_1": 90.0, "horizon_days": 15})
+    assert r.status_code == 200 and r.json()["sent_to"] == "me@example.com"
+    assert "KO" in sent["subject"] and "short plan" in sent["subject"] and sent["subject"].endswith("(demo)")
+    assert "Order:" in sent["text"] and "never places orders" in sent["text"]
+    assert "your own thesis" in sent["text"]          # the levels are the user's, and the email says so
+    assert "Trend:" in sent["text"]                   # the trend line rides along
+    assert "<script" not in sent["html"]
+
+
+def test_the_analysis_email_refuses_plainly_without_smtp_or_the_flag(client, tmp_path):
+    body = {"symbol": "KO", "direction": "LONG", "entry": 100.0, "stop": 95.0, "target_1": 110.0}
+    r = client.post("/v2/analysis/email", json=body)
+    assert r.status_code == 400 and "SMTP_USER" in r.json()["error"]  # not configured: the guidance, not a crash
+    s = Settings(data_mode="demo", db_path=tmp_path / "o.db", features={**FEATURE_DEFAULTS, "morning": False})
+    service = TradeAssistant(s, provider=DemoData(), db=Database(tmp_path / "o.db"))
+    with TestClient(create_app(s, service)) as c:
+        assert c.post("/v2/analysis/email", json=body).status_code == 404
+    service.db.close()
