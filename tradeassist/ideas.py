@@ -24,15 +24,15 @@ is still there after a restart.
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from datetime import date, datetime
 from typing import Any, Callable
 
 import numpy as np
 
+from .background import OneJob
+from .background import why as _why
 from .evaluator import GRADE_ORDER
-from .events import redact
 from .optionmath import NY
 from .providers.base import DataError
 from .scanner import universe
@@ -50,10 +50,6 @@ REVERSAL_YEARS = 5              # analysis.REVERSAL_YEARS: fetched once up front
 SCAN_PACE = {"live": 1.0, "sandbox": 2.0, "robinhood": 0.5}
 UNIVERSE_WORDS = {"top200": "the 200 largest US companies", "large_caps": "100 large US companies",
                   "watchlist": "your watchlist", "custom": "the symbols given"}
-
-
-class ScanStopped(Exception):
-    pass
 
 
 def money_at(entry: float, stop: float, t1: float, t2: float, direction: int, shares: int) -> dict[str, Any]:
@@ -119,13 +115,6 @@ def rank(ideas: list[dict[str, Any]], held: list[dict[str, Any]]) -> dict[str, A
             "held_back": sorted(held, key=sort_key)}
 
 
-def _why(exc: BaseException) -> str:
-    """What went wrong, for the screen: the message of an expected error, the kind of an unexpected one."""
-    if isinstance(exc, (DataError, ValueError)):
-        return redact(str(exc))[:300]
-    return f"an unexpected {type(exc).__name__}"
-
-
 class TradeIdeas:
     """The scan, run in the background, and its latest result."""
 
@@ -133,67 +122,38 @@ class TradeIdeas:
         self.svc = svc
         self.analyst = analyst
         self.features = features
-        self._lock = threading.Lock()
-        self._job: dict[str, Any] | None = None
         self._result: dict[str, Any] | None = None
         self._loaded = False
-        self._runs = 0
+        self._job = OneJob("trade-ideas", self._keep)
 
     def _key(self) -> str:
         return f"ideas:last:{self.svc.market.info.mode}"
 
-    # --- the background job -------------------------------------------------------------------------
+    # --- the background job (background.OneJob holds the thread, progress and stop flag) ---------------
+    def _keep(self, result: dict[str, Any], job: dict[str, Any]) -> None:
+        result["job_id"] = job["id"]
+        try:
+            from .service import clean
+            self.svc.db.cache_put(self._key(), clean(result))
+        except Exception as exc:                      # noqa: BLE001 - kept in memory even if it cannot be saved
+            log.warning("Trade ideas result not saved: %s", exc)
+        self._result = result
+
     def start(self, universe_name: str | None) -> dict[str, Any]:
         name, names = self._names(universe_name)
-        with self._lock:
-            if self._job and self._job["state"] == "running":
-                out = self._status_locked(brief=True)
-                out["already_running"] = True
-                return out
-            self._runs += 1
-            job = {"id": self._runs, "state": "running", "universe": name, "total": len(names), "done": 0,
-                   "current": None, "started_at": datetime.now(NY).isoformat(timespec="seconds"), "error": None,
-                   "stop": False}
-            self._job = job
-        try:
-            threading.Thread(target=self._run, args=(job, name, names), name="trade-ideas", daemon=True).start()
-        except RuntimeError as exc:                     # no thread could be started: say so, never "running" forever
-            with self._lock:
-                job.update(state="failed", error=_why(exc))
-        return self.status(brief=True)
+
+        def work(progress):
+            with self.svc.market.paced(SCAN_PACE.get(self.svc.market.info.mode, 0.0)):
+                return self.scan(names, name, progress)
+        out = self._job.start({"universe": name}, len(names), work)
+        return {**out, **self._result_line()}
 
     def stop(self) -> dict[str, Any]:
-        with self._lock:
-            if self._job and self._job["state"] == "running":
-                self._job["stop"] = True
-            return self._status_locked(brief=True)
+        return {**self._job.stop(), **self._result_line()}
 
-    def _run(self, job: dict[str, Any], name: str, names: list[str]) -> None:
-        def progress(done: int, total: int, current: str | None) -> None:
-            with self._lock:
-                job.update(done=done, total=total, current=current)
-                if job["stop"]:
-                    raise ScanStopped()
-        try:
-            with self.svc.market.paced(SCAN_PACE.get(self.svc.market.info.mode, 0.0)):
-                result = self.scan(names, name, progress)
-            result["job_id"] = job["id"]
-            try:
-                from .service import clean
-                self.svc.db.cache_put(self._key(), clean(result))
-            except Exception as exc:                  # noqa: BLE001 - kept in memory even if it cannot be saved
-                log.warning("Trade ideas result not saved: %s", exc)
-            with self._lock:
-                self._result = result
-                job.update(state="done", done=job["total"], current=None,
-                           finished_at=datetime.now(NY).isoformat(timespec="seconds"))
-        except ScanStopped:
-            with self._lock:
-                job.update(state="stopped", current=None)
-        except Exception as exc:                      # noqa: BLE001 - reported on the screen, not raised
-            log.exception("Trade ideas scan failed")
-            with self._lock:
-                job.update(state="failed", error=_why(exc), current=None)
+    def _result_line(self) -> dict[str, Any]:
+        r = self._result
+        return {"result_at": r.get("checked_at") if r else None, "result_job": r.get("job_id") if r else None}
 
     def status(self, brief: bool = False) -> dict[str, Any]:
         if not self._loaded:
@@ -202,18 +162,11 @@ class TradeIdeas:
                 saved = self.svc.db.cache_get(self._key())
             except Exception:                         # noqa: BLE001 - a missing or damaged copy is just no result
                 saved = None
-            with self._lock:
-                if self._result is None and saved:
-                    self._result = saved
-        with self._lock:
-            return self._status_locked(brief)
-
-    def _status_locked(self, brief: bool = False) -> dict[str, Any]:
-        job = {k: v for k, v in self._job.items() if k != "stop"} if self._job else {"state": "idle"}
-        r = self._result
-        out = {"job": job, "result_at": r.get("checked_at") if r else None, "result_job": r.get("job_id") if r else None}
+            if self._result is None and saved:
+                self._result = saved
+        out = {**self._job.status_brief(), **self._result_line()}
         if not brief:
-            out["result"] = r
+            out["result"] = self._result
         return out
 
     def _names(self, universe_name: str | None) -> tuple[str, list[str]]:

@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+from datetime import datetime
 
 import uvicorn
 
@@ -19,6 +20,10 @@ def main() -> None:
                         help="Sign in to Robinhood, test every data call the app makes, and write a capture file")
     parser.add_argument("--robinhood-signout", action="store_true",
                         help="Delete the Robinhood sign-in stored on this computer")
+    parser.add_argument("--morning-email", action="store_true",
+                        help="Build the morning plan and email it (for the 7:00 scheduled job), then exit")
+    parser.add_argument("--morning-print", action="store_true",
+                        help="Build the morning plan and print it instead of emailing (a dry run), then exit")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     from tradeassist.events import protect_logging
@@ -34,6 +39,8 @@ def main() -> None:
     if args.robinhood_check:
         robinhood_check(settings, args.robinhood_check.upper())
         return
+    if args.morning_email or args.morning_print:
+        raise SystemExit(morning_email(settings, send=args.morning_email))
     if args.snapshot:
         from tradeassist.service import TradeAssistant
         result = TradeAssistant(settings).snapshot()
@@ -46,6 +53,63 @@ def main() -> None:
         return
     # Localhost only: this app holds a brokerage data token and should not be reachable from the network.
     uvicorn.run(create_app(settings), host="127.0.0.1", port=args.port, log_level="info")
+
+
+def morning_email(settings, send: bool) -> int:
+    """Build today's plan and email it (or print it with --morning-print). Exit code 0 on success and on a
+    deliberate skip (weekend, market holiday); 1 when the plan or the email failed, so launchd logs it."""
+    from tradeassist import mailer, morning_email as renderer
+    from tradeassist.analysis import Analyst
+    from tradeassist.ideas import SCAN_PACE
+    from tradeassist.morning import Morning, record_picks, scorecard
+    from tradeassist.optionmath import NY
+    from tradeassist.service import TradeAssistant
+
+    now = datetime.now(NY)
+    if now.weekday() >= 5:
+        print(f"{now:%A}: the market is closed, so no morning email.")
+        return 0
+    # A weekday holiday is NOT skipped: the plan still goes out, says the market is closed, and prices are
+    # the last session's. Skipping on the clock alone would silently drop real mornings (the clock reads
+    # "closed" before 7:00 New York time, so a 7:00 in a time zone east of New York would never send).
+    svc = TradeAssistant(settings)
+    if send and not mailer.configured(settings):
+        print("Email is not set up: put SMTP_USER and SMTP_PASSWORD in .env (with Gmail, an app password from\n"
+              "myaccount.google.com/apppasswords; 2-Step Verification must be on). Or run --morning-print.")
+        return 1
+    morning = Morning(svc, Analyst(svc), settings.features)
+    print(f"Building the morning plan ({svc.market.info.label})…")
+    try:
+        with svc.market.paced(SCAN_PACE.get(svc.market.info.mode, 0.0)):
+            plan = morning.plan(progress=_morning_progress)
+    except Exception as exc:                          # noqa: BLE001 - the job must end with a plain line
+        from tradeassist.events import redact
+        print(f"\nThe plan could not be built: {redact(str(exc))[:400]}")
+        return 1
+    print(f"\n{len(plan['movers'])} movers, {len(plan['cards'])} trade cards, "
+          f"{len(plan['reversal'])} reversal rows, in {plan['seconds']:.0f}s.")
+    morning.save_result(plan)                          # the screen shows this plan without a rescan
+    subject, text, html = renderer.render(plan, scorecard(svc))
+    if not send:
+        # A dry run: nothing is sent and nothing is recorded as a pick.
+        out = settings.db_path.parent / "morning.html"
+        out.write_text(html)
+        print("\n" + text)
+        print(f"(The HTML version is at {out}.)")
+        return 0
+    try:
+        to = mailer.send(settings, subject, text, html)
+    except mailer.MailError as exc:
+        print(f"\n{exc}")
+        return 1
+    record_picks(svc.db, plan, "email")                # picks count only once the plan reached you
+    print(f"Sent to {to}: {subject}")
+    return 0
+
+
+def _morning_progress(done: int, total: int, current) -> None:
+    if current and done % 25 == 0:
+        print(f"  {done}/{total} {current}", flush=True)
 
 
 def robinhood_check(settings, symbol: str) -> None:

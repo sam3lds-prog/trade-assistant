@@ -276,5 +276,9 @@ def test_your_contract_is_simulated_and_short_horizons_skip_past_cases(client):
     assert mine["own"][0]["simulation"]["curve"]["prices"]
     quick = client.post("/v2/reversal/options", json={"symbol": "AMZN", "horizon_days": 3}).json()
     assert quick["best"]["past_cases"] is None and any("longer than" in n for n in quick["notes"])
-    mine_inv = client.post("/v2/reversal/options", json={"symbol": "AMZN", "invalidation_price": 1.0}).json()
+    # An invalidation on the right side of the reading (the leading side changes with the demo data's day):
+    # beyond the close against the trade, so the thesis takes it as "your price".
+    th = o["thesis"]
+    yours = round(th["spot"] * (0.7 if th["invalidation"] < th["spot"] else 1.3), 2)
+    mine_inv = client.post("/v2/reversal/options", json={"symbol": "AMZN", "invalidation_price": yours}).json()
     assert mine_inv["thesis"]["invalidation_is"] == "your price"

@@ -287,7 +287,9 @@ def test_a_simulation_uses_the_grade_s_levels_and_size_and_the_chain(client):
     assert r.status_code == 200
     s = r.json()
     g = client.post("/v2/position/evaluate", json={"symbol": "AAPL", "direction": "LONG", "entry_price": s["entry"]}).json()
-    assert s["stop"] == pytest.approx(g["levels"]["invalidation"]) and s["shares"] == g["sizing"]["shares"]
+    assert s["stop"] == pytest.approx(g["levels"]["invalidation"])
+    # The simulated size is the grade's, cut to what the account can pay for (never more than the account).
+    assert s["shares"] == min(g["sizing"]["shares"], int(10_000 // s["entry"])) or g["sizing"]["shares"] == 0
     assert s["volatility"]["source"] == "implied" and s["volatility"]["expiration"]
     assert s["with_shares"]["fixed"]["at_stop"] == pytest.approx(s["shares"] * (s["stop"] - s["entry"]))
     if s["contract_spec"]:

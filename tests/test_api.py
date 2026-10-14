@@ -17,6 +17,9 @@ V2_WRITES = {
     "/v2/history/pull",
     # 2.7: start a scan of trade ideas (runs in the background; nothing recorded) and simulate one trade (a model).
     "/v2/ideas/scan", "/v2/ideas/simulate", "/v2/ideas/stop",
+    # 2.8: the morning plan. Scans and cards are models; watches and picks are records; email sends the plan.
+    "/v2/morning/scan", "/v2/morning/stop", "/v2/morning/card", "/v2/morning/watch",
+    "/v2/morning/watches/{watch_id}/remove", "/v2/morning/email",
     "/v2/positions", "/v2/positions/{position_id}/executions", "/v2/positions/{position_id}/plan",
     "/v2/positions/{position_id}/cancel", "/v2/positions/{position_id}/snapshot",
     "/v2/position/evaluate", "/v2/options/evaluate", "/v2/options/compare", "/v2/portfolio/stress",

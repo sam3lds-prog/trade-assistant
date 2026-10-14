@@ -425,23 +425,13 @@ def simulate_trade(svc: Any, analyst: Any, req: dict[str, Any]) -> dict[str, Any
             notes.extend(f"The contract you chose: {a}" for a in (row or {}).get("avoid") or [])
             why = "The contract you chose."
         elif opt:
-            # The best gain at target 1 for each dollar lost if invalidated, among the contracts one of which your
+            # The best gain at target 1 for each dollar lost if invalidated, among the contracts one of which the
             # risk per trade pays for; failing that, the best of all (Decide's pick), said so below.
-            fits = [r for r in opt["contracts"] if r.get("usable") and r.get("reward_to_risk") and r["premium"] <= budget]
-            if fits:
-                row = max(fits, key=lambda r: r["reward_to_risk"])
-                category = "BEST RISK-ADJUSTED WITHIN YOUR RISK PER TRADE"
-                why = (f"For one contract: gains ${row['at_target']:,.0f} at target 1 for ${abs(row['if_invalidated']):,.0f} "
-                       f"lost if invalidated ({row['reward_to_risk']:.2f} to 1), and it costs ${row['premium']:,.0f}, within "
-                       f"your ${budget:,.0f} risk per trade.")
-            else:
-                pick = next((p for p in opt["picks"] if p["category"] == "BEST RISK-ADJUSTED"), None) \
-                    or (opt["picks"][0] if opt["picks"] else None)
-                if pick:
-                    row, category, why = pick["contract"], pick["category"], f"For one contract: {pick['why']}"
-                else:
-                    notes.append("No listed contract passed the checks for this trade (quotes, spread, open interest, "
-                                 "expiring after the horizon, paying at target 1), so only the shares are simulated.")
+            from .options.evaluator import best_within_budget
+            row, category, why = best_within_budget(opt, budget)
+            if row is None:
+                notes.append("No listed contract passed the checks for this trade (quotes, spread, open interest, "
+                             "expiring after the horizon, paying at target 1), so only the shares are simulated.")
         if row and row.get("mid"):
             analysis = svc._chain_for(symbol, row["expiration"])
             chain_row = next((c for c in analysis.contracts if c["option_type"] == row["option_type"].lower()
