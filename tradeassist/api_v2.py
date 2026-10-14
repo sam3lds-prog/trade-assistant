@@ -181,12 +181,12 @@ class OptionsEvaluate(Strict):
 class MorningCard(Strict):
     symbol: str = Field(..., min_length=1, max_length=12)
     direction: Literal["LONG", "SHORT"] = "LONG"
-    setup: Literal["fade", "ride", "reversal", "manual"] = "manual"
+    setup: Literal["fade", "ride", "reversal", "manual", "analysis"] = "manual"
     entry: float | None = Field(None, gt=0)
     stop: float = Field(..., gt=0)
     target_1: float = Field(..., gt=0)
     target_2: float | None = Field(None, gt=0)
-    horizon_days: int = Field(5, ge=1, le=60)
+    horizon_days: int = Field(5, ge=1, le=260)
 
 
 class WatchCreate(Strict):
@@ -690,10 +690,11 @@ def build_router(svc: Any) -> APIRouter:
         need_morning()
         try:
             entry = req.entry if req.entry is not None else svc.market.spot(svc._symbol(req.symbol))
+            why = "Your thesis levels (the grade above settled them)." if req.setup == "analysis" else ""
             return clean(morning.card(symbol=svc._symbol(req.symbol), direction=req.direction, entry=float(entry),
                                       stop=req.stop, target_1=req.target_1,
                                       target_2=req.target_2 if req.target_2 is not None else req.target_1,
-                                      horizon_days=req.horizon_days, setup=req.setup))
+                                      horizon_days=req.horizon_days, setup=req.setup, levels_why=why))
         except (DataError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -746,6 +747,34 @@ def build_router(svc: Any) -> APIRouter:
         except mailer.MailError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         record_picks(svc.db, plan, "screen")           # picks count only once the plan reached you
+        return clean({"sent_to": to, "subject": subject})
+
+    @router.post("/analysis/email")
+    def analysis_email(req: MorningCard):
+        """2.9: email the analyzed stock's trade card (built fresh here, never from the browser's copy)."""
+        need("trend_engine_v2")
+        need_morning()
+        from . import morning_email as renderer
+        sym = svc._symbol(req.symbol)
+        try:
+            entry = req.entry if req.entry is not None else svc.market.spot(sym)
+            card = morning.card(symbol=sym, direction=req.direction, entry=float(entry), stop=req.stop,
+                                target_1=req.target_1,
+                                target_2=req.target_2 if req.target_2 is not None else req.target_1,
+                                horizon_days=req.horizon_days, setup="analysis",
+                                levels_why="Your thesis levels from Analyze a stock.")
+        except (DataError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        trend = None
+        try:
+            trend = analyst.trend(sym)
+        except Exception:                             # noqa: BLE001 - the email is about the trade; no trend line is fine
+            log.info("Analysis email: no trend line for %s", sym)
+        subject, text, html = renderer.render_analysis(sym, trend, card, demo=svc.market.info.mode == "demo")
+        try:
+            to = mailer.send(svc.settings, subject, text, html)
+        except mailer.MailError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return clean({"sent_to": to, "subject": subject})
 
     # --- your trade history (2.6): imported read-only, analysed locally ---------------------------------

@@ -169,6 +169,13 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
         body = page.locator(".compare tbody").inner_text()
         assert "$0 against" not in body and "if bought" not in body
         assert body.count("middle outcome") == 2 and body.count("Eight in ten between") == 2
+        # 2.9: the Morning trade card follows the grade — the capped limit, the order to copy, the email
+        # button — and no "Open on Decide" (this is Decide).
+        page.wait_for_selector(".panel:has(> h3:text-is('The trade card')) .m-card", timeout=60000)
+        tc = page.locator(".panel:has(> h3:text-is('The trade card'))")
+        assert "Order to copy into Robinhood" in tc.inner_text()
+        assert tc.locator("button:text-is('Email me this analysis')").count() == 1
+        assert tc.locator("button:text-is('Open on Decide')").count() == 0
         card = page.locator(".panel.thesis .pick").first
         chosen = page.evaluate("""() => {
           const k = state.decision.options.picks[0].contract;

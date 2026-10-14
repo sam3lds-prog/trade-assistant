@@ -118,7 +118,7 @@ function morningCard(card, actions) {
       { option_type: opt.option_type.toLowerCase(), strike: opt.strike, expiration: opt.expiration }, opt.contracts, "buy")));
     row.append(b);
   }
-  if (state.openDecide && featureOn("trend_engine_v2")) {
+  if (state.openDecide && featureOn("trend_engine_v2") && !(actions && actions.hideDecide)) {
     const b = el("button", { class: "plain", text: "Open on Decide" });
     b.addEventListener("click", () => {
       state.thesis = FLOW.thesis({ symbol: card.symbol, direction: card.direction, entry: card.entry,
@@ -136,6 +136,48 @@ function morningCard(card, actions) {
   box.append(el("div", { class: "m-card-grid" }, left, right));
   return box;
 }
+
+/* ---------- 2.9: the trade card and the email on Analyze a stock ---------- */
+// After "Grade and find a contract" runs, the same card the Morning plan builds — the best contract for
+// the risk budget, the capped limit price and the copy-ready order — is built for the graded thesis, with
+// a button that emails the whole analysis. The card is server-built from the thesis levels.
+if (typeof DECIDE_AFTER !== "undefined") DECIDE_AFTER.push((out, dec) => {
+  if (!featureOn("morning") || !dec || !dec.grade) return;
+  const g = dec.grade, lv = g.levels, t = dec.thesis || {};
+  const req = { symbol: g.symbol, direction: g.direction, entry: g.entry, stop: lv.invalidation,
+    target_1: lv.target_1, target_2: lv.target_2, setup: "analysis",
+    horizon_days: Math.max(1, Math.min(260, Number(t.horizonDays) || 5)) };
+  if (!(req.entry > 0 && req.stop > 0 && req.target_1 > 0)) return;
+  const err = el("div", { class: "error", role: "alert" });
+  const body = el("div", {}, el("div", { class: "loadnote small muted" },
+    el("span", { class: "spinner" }), el("span", { text: "Building the trade card\u2026" })));
+  out.append(el("div", { class: "panel" },
+    el("h3", { text: "The trade card" }),
+    el("p", { class: "small muted", text: "Your thesis as a Morning-plan card: the best contract for your risk per trade, the limit price capped where target 1 still pays the risk, and the order to copy." }),
+    err, body));
+  const watchStop = async (card, button) => {
+    await withBusy(button, err, async () => {
+      await api("/v2/morning/watch", { symbol: card.symbol, direction: card.direction,
+        kind: card.direction === "LONG" ? "below" : "above", level: Math.round(card.stop * 100) / 100,
+        why: `The stop of your ${card.symbol} ${card.side_word} thesis from Analyze` });
+      button.textContent = "Watching (listed on the Morning plan)";
+    });
+  };
+  (async () => {
+    try {
+      const card = await api("/v2/morning/card", req);
+      const mail = el("button", { class: "plain", text: "Email me this analysis" });
+      mail.addEventListener("click", () => withBusy(mail, err, async () => {
+        const r = await api("/v2/analysis/email", req);
+        mail.textContent = `Sent to ${r.sent_to}`;
+      }));
+      body.replaceChildren(morningCard(card, { watchStop, hideDecide: true }),
+        el("div", { class: "row", style: "margin-top:8px" }, mail));
+    } catch (e) {
+      body.replaceChildren(el("p", { class: "small error", text: `No trade card: ${e.message}` }));
+    }
+  })();
+});
 
 /* ---------- the screen ---------- */
 function buildMorning() {

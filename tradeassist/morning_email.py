@@ -139,4 +139,47 @@ def render(plan: dict[str, Any], score: dict[str, Any], *, app_url: str = "http:
     return subject, text, "".join(h)
 
 
-__all__ = ["render"]
+def render_analysis(symbol: str, trend: dict[str, Any] | None, card: dict[str, Any], *, demo: bool = False,
+                    app_url: str = "http://127.0.0.1:8000/#analyze") -> tuple[str, str, str]:
+    """(subject, text, HTML) for one analyzed stock's trade card, sent from Analyze a stock (2.9). The
+    levels are the user's own thesis, so the wording says so; the honesty lines stay."""
+    when = datetime.now(NY).strftime("%a %b %-d")
+    side = "buy" if card["direction"] == "LONG" else "short"
+    subject = f"{symbol}: your {side} plan, {when}" + (" (demo)" if demo else "")
+    now = (trend or {}).get("provisional") or (trend or {}).get("confirmed")
+    trend_line = None
+    if now and now.get("state"):
+        days = (now.get("confirmation") or {}).get("days_in_state")
+        trend_line = (f"Trend: {now['state'].replace('_', ' ').lower()}"
+                      + (f", net {now['net_score']:+.0f} points" if now.get("net_score") is not None else "")
+                      + (f", in this state {days} day{'s' if days != 1 else ''}" if days is not None else "")
+                      + ". Points count evidence; they are not chances.")
+    lines = _card_lines(card)
+    footer = (f"Prices: {card.get('price_basis', 'n/a')}. The levels are your own thesis, graded on Analyze a "
+              f"stock; past frequencies are never forecasts, and this app never places orders. "
+              f"The screen: {app_url}")
+
+    text_parts = [subject, ""]
+    if demo:
+        text_parts += ["Demo data: made-up prices; this says nothing about real stocks.", ""]
+    if trend_line:
+        text_parts += [trend_line, ""]
+    text_parts += [*lines, "", footer]
+    text = "\n".join(text_parts).strip() + "\n"
+
+    h: list[str] = [f"<div style=\"max-width:680px;margin:0 auto;{STYLE_BOX}border:0\">"]
+    if demo:
+        h.append(f"<p style='{STYLE_MUTED}'><b>Demo data:</b> made-up prices; this says nothing about real stocks.</p>")
+    if trend_line:
+        h.append(f"<p>{H.escape(trend_line)}</p>")
+    parts = []
+    for i, line in enumerate(lines):
+        body = f"<b>{H.escape(line)}</b>" if i == 0 and len(lines) > 1 else H.escape(line)
+        muted = f' style="{STYLE_MUTED}"' if line.startswith(("Past record", "Caution")) else ""
+        parts.append(f"<div{muted}>{body}</div>")
+    h.append(f'<div style="{STYLE_BOX}">{"".join(parts)}</div>')
+    h.append(f"<p style='{STYLE_MUTED}'>{H.escape(footer)}</p></div>")
+    return subject, text, "".join(h)
+
+
+__all__ = ["render", "render_analysis"]
