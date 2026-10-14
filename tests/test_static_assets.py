@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
-SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js")     # in the order index.html loads them
+SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js")   # in the order index.html loads them
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -134,8 +134,8 @@ def test_every_screen_opens_without_a_script_error(tmp_path):
         page.goto(page.base)
         page.wait_for_function("document.querySelectorAll('#main > section').length > 0", timeout=20000)
         views = page.eval_on_selector_all(".rail button.nav:not(.hidden)", "bs => bs.map(b => b.dataset.view)")
-        assert {"today", "positions", "portfolio", "health", "lab", "scanner", "market", "trades"} <= set(views)
-        assert page.evaluate("location.hash") == "#today"            # the landing screen (2.5)
+        assert {"today", "morning", "positions", "portfolio", "health", "lab", "scanner", "market", "trades"} <= set(views)
+        assert page.evaluate("location.hash") == "#morning"          # the landing screen (2.8)
         groups = page.eval_on_selector_all(".rail .nav-group:not(.hidden) .nav-group-label", "ls => ls.map(l => l.textContent)")
         assert groups == ["Today", "Find", "Decide", "Price & simulate", "Hold", "Learn", "Trust"]
         for v in views:
@@ -193,7 +193,7 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
 def test_today_lists_lead_to_a_graded_thesis_in_that_direction(tmp_path):
     """2.5: a stock on Today's long or short list opens Decide with that direction and grades it."""
     with demo_page(tmp_path) as (page, errors):
-        page.goto(page.base)
+        page.goto(page.base + "#today")
         page.wait_for_selector(".lean-table tr.click", timeout=60000)
         # Before the signal history exists there is no frequency column, not a column of blanks.
         assert "Higher 10 days later" not in page.locator(".lean-grid").inner_text()
@@ -366,4 +366,41 @@ def test_simulate_a_trade_still_draws_after_trade_ideas_loads(tmp_path):
         page.click('.rail button.nav[data-view="ideas"]')
         page.wait_for_selector("text=Not scanned yet", timeout=30000)
         assert page.request.get(page.base + "v2/ideas?brief=true").json()["job"]["state"] == "idle"
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_the_morning_plan_builds_cards_copies_an_order_and_watches_a_trigger(tmp_path, monkeypatch):
+    """2.8: the landing screen builds the plan, each card shows the capped limit and the order text, and a
+    forming reversal can be watched."""
+    import tradeassist.morning as morning_mod
+    monkeypatch.setattr(morning_mod, "movers_universe",
+                        lambda watchlist: ["AAPL", "MSFT", "KO", "JPM", "NVDA", "CAT", "PG", "XOM", "UNH", "TSLA",
+                                           "META", "HD"])
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base)
+        page.wait_for_selector("text=No plan yet today", timeout=30000)
+        assert page.evaluate("location.hash") == "#morning"
+        page.click("button:text-is('Build the plan')")
+        page.wait_for_selector("text=Big movers since the last close", timeout=120000)
+        body = page.inner_text("section:not(.hidden)")
+        assert "Reversal watch" in body and "not a forecast" in body and "places an order" in body
+        cards = page.locator(".m-card")
+        if cards.count():
+            card = cards.first.inner_text()
+            assert "Order to copy into Robinhood" in card and "Limit" in card
+            if "Limit price to type" in card:
+                assert "never above" in card                     # the payoff cap, spelled out
+            cards.first.locator("button:text-is('Copy order')").click()
+            page.wait_for_selector(".m-card button:text-is('Copied')", timeout=10000)
+        w = page.locator("button:text-is('Watch')")
+        if w.count():
+            w.first.click()
+            page.wait_for_selector("text=Watched triggers", timeout=20000)
+            assert page.locator(".m-watch").count() >= 1
+            page.locator(".m-watch button:text-is('Remove')").first.click()
+        # The plan survives a reload without a rescan (it is kept in the database).
+        page.goto(page.base + "#morning")
+        page.wait_for_selector("text=Big movers since the last close", timeout=30000)
+        assert page.request.get(page.base + "v2/morning?brief=true").json()["job"]["state"] in ("done", "idle")
     assert errors == []

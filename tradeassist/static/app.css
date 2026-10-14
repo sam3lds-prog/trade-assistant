@@ -448,3 +448,34 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .sim-actions { margin: 10px 0; }
 .chart .sample-path.mid { opacity: 0.35; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Morning plan (2.8) */
+.m-steps { display: flex; gap: 10px; margin: 2px 0 16px; flex-wrap: wrap; }
+.m-step { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 4px 12px; font-size: 0.86rem; }
+.m-step b { color: var(--accent); }
+.m-tag { display: inline-block; font-size: 0.78rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
+.m-tag.m-ride { background: var(--pass-bg); color: var(--pass); }
+.m-tag.m-fade { background: var(--sunk); color: var(--accent); border: 1px solid var(--line); }
+.m-tag.m-none, .m-tag.m-unchecked { background: var(--sunk); color: var(--muted); }
+.m-tag.m-news { background: var(--warn-bg); color: var(--warn); }
+.m-tag.m-nonews { background: var(--sunk); color: var(--ink); border: 1px solid var(--line); }
+.m-card-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 18px; }
+@media (max-width: 900px) { .m-card-grid { grid-template-columns: minmax(0, 1fr); } }
+.m-limit { background: var(--sunk); border: 2px solid var(--accent); border-radius: 10px; padding: 12px 14px; }
+.m-big { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; }
+.m-ladder { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.m-ladder span { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 0.82rem; }
+.m-order { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--sunk); padding: 8px 10px;
+  border-radius: 6px; font-size: 0.86rem; margin-top: 6px; overflow-wrap: anywhere; }
+.m-levels { position: relative; height: 46px; margin: 26px 8px 8px; border-top: 2px solid var(--line); }
+.m-level { position: absolute; top: -2px; }
+.m-level i { display: block; width: 2px; height: 14px; background: var(--muted); margin-top: -7px; }
+.m-level.pos i { background: var(--div-pos); } .m-level.neg i { background: var(--div-neg); }
+.m-level b { position: absolute; top: 12px; left: 0; transform: translateX(-50%); font-size: 0.74rem;
+  font-weight: 500; color: var(--muted); white-space: nowrap; }
+.m-level.top b { top: -26px; }
+.m-metrics { margin-top: 14px; }
+.m-watch { align-items: center; margin: 6px 0; }
+.m-watch .grow { flex: 1 1 200px; }
+.m-section { margin: 18px 0 8px; }
+.m-card { scroll-margin-top: 12px; }

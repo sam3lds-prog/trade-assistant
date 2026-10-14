@@ -459,3 +459,42 @@ def broker_import_rows(cur: sqlite3.Cursor) -> None:
         PRIMARY KEY (import_id, activity_id)
     )""")
     cur.execute("INSERT OR IGNORE INTO broker_import_rows (import_id, activity_id) SELECT import_id, id FROM broker_activity")
+
+
+@migration(13, "the morning plan's picks and watches")
+def morning_tables(cur: sqlite3.Cursor) -> None:
+    """2.8: the trade cards the morning plan suggested (so a scorecard can grade them later from price
+    history alone) and the price triggers being watched. Records only; nothing here can place an order."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS morning_picks (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        day          TEXT NOT NULL,
+        symbol       TEXT NOT NULL,
+        setup        TEXT NOT NULL,                 -- fade, ride or reversal
+        direction    TEXT NOT NULL CHECK (direction IN ('LONG', 'SHORT')),
+        entry        REAL NOT NULL,
+        stop         REAL NOT NULL,
+        target_1     REAL NOT NULL,
+        target_2     REAL,
+        horizon_days INTEGER NOT NULL,
+        instrument   TEXT NOT NULL,                 -- SHARES, CALL or PUT
+        option_json  TEXT,
+        limit_price  REAL,
+        contracts    INTEGER,
+        shares       INTEGER,
+        created_at   TEXT NOT NULL,
+        source       TEXT NOT NULL,                 -- email or screen
+        UNIQUE (day, symbol, setup)
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS morning_watches (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol          TEXT NOT NULL,
+        direction       TEXT NOT NULL CHECK (direction IN ('LONG', 'SHORT')),
+        kind            TEXT NOT NULL CHECK (kind IN ('above', 'below')),
+        level           REAL NOT NULL,
+        why             TEXT,
+        created_at      TEXT NOT NULL,
+        active          INTEGER NOT NULL DEFAULT 1,
+        triggered_at    TEXT,
+        triggered_price REAL,
+        emailed         INTEGER NOT NULL DEFAULT 0
+    )""")

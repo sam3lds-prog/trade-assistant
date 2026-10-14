@@ -93,6 +93,17 @@ class Settings:
     # 2.6: read your holdings and past orders through the same connection (off unless ROBINHOOD_ACCOUNT_READ=1)
     robinhood_account_read: bool = False
 
+    # 2.8: the morning email. SMTP settings; with Gmail, SMTP_PASSWORD is an app password
+    # (myaccount.google.com/apppasswords, needs 2-Step Verification). The password never leaves this
+    # computer and never appears in logs or replies.
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = field(default="", repr=False)
+    email_to: str = ""                 # where the morning plan goes; SMTP_USER when empty
+    # 2.8: the limit-price cap: reaching target 1 must pay at least this many times what the stop loses.
+    morning_min_payoff: float = 1.0
+
     # V2 areas that can be switched off (see features.py)
     features: dict[str, bool] = field(default_factory=lambda: dict(FEATURE_DEFAULTS))
     # Seconds a price may age while the market is open before it is called stale (freshness.py)
@@ -166,6 +177,12 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         robinhood_poll_seconds=max(_float("ROBINHOOD_POLL_SECONDS", 3.0), 1.0),
         robinhood_url=(os.getenv("ROBINHOOD_MCP_URL") or "").strip() or "https://agent.robinhood.com/mcp/trading",
         robinhood_account_read=(os.getenv("ROBINHOOD_ACCOUNT_READ") or "0").strip().lower() in ("1", "true", "yes", "on"),
+        smtp_host=(os.getenv("SMTP_HOST") or "").strip() or "smtp.gmail.com",
+        smtp_port=_int("SMTP_PORT", 587),
+        smtp_user=_clean_token(os.getenv("SMTP_USER")),
+        smtp_password=(os.getenv("SMTP_PASSWORD") or "").strip(),
+        email_to=_clean_token(os.getenv("EMAIL_TO")),
+        morning_min_payoff=_float("MORNING_MIN_PAYOFF", 1.0),
         features=load_features(),
         freshness=freshness_thresholds(),
     )

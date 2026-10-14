@@ -12,8 +12,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+import logging
+
 from .positions import PositionError
 from .providers.base import DataError
+
+log = logging.getLogger(__name__)
 
 
 class Strict(BaseModel):
@@ -172,6 +176,25 @@ class OptionsEvaluate(Strict):
     expirations: list[str] | None = Field(None, max_length=6)
     earnings_date: str | None = None
     entry_price: float | None = Field(None, gt=0)      # 2.5.1: the share entry, for the chance the shares are ahead
+
+
+class MorningCard(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    direction: Literal["LONG", "SHORT"] = "LONG"
+    setup: Literal["fade", "ride", "reversal", "manual"] = "manual"
+    entry: float | None = Field(None, gt=0)
+    stop: float = Field(..., gt=0)
+    target_1: float = Field(..., gt=0)
+    target_2: float | None = Field(None, gt=0)
+    horizon_days: int = Field(5, ge=1, le=60)
+
+
+class WatchCreate(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    direction: Literal["LONG", "SHORT"]
+    kind: Literal["above", "below"]
+    level: float = Field(..., gt=0)
+    why: str = Field("", max_length=300)
 
 
 class IdeasScan(Strict):
@@ -622,6 +645,99 @@ def build_router(svc: Any) -> APIRouter:
             return clean(simulate_trade(svc, analyst, body))
         except (TradeSimError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # --- the morning plan (2.8): movers, setups, reversal triggers, the email -----------------------------
+    from . import mailer
+    from .morning import Morning, WatchChecker, add_watch, list_watches, record_picks, remove_watch, scorecard
+    morning = svc.morning if getattr(svc, "morning", None) else Morning(svc, analyst, svc.settings.features)
+    svc.morning = morning
+    watcher = svc.watcher if getattr(svc, "watcher", None) else WatchChecker(svc, morning)
+    svc.watcher = watcher
+    if svc.settings.features.get("morning"):
+        try:
+            if any(w["active"] for w in list_watches(svc.db)):
+                watcher.ensure_running()               # watches left from the last run keep being checked
+        except Exception:                              # noqa: BLE001 - a damaged table must not stop the app
+            log.exception("Morning watches could not be read at startup")
+
+    def need_morning() -> None:
+        need("morning")
+        need("trend_engine_v2")
+
+    @router.get("/morning")
+    def morning_status(brief: bool = False):
+        need_morning()
+        out = morning.status(brief)
+        out["watches"] = list_watches(svc.db)
+        out["email_configured"] = mailer.configured(svc.settings)
+        out["email_to"] = mailer.to_address(svc.settings) if mailer.configured(svc.settings) else None
+        if not brief:
+            out["scorecard"] = scorecard(svc)
+        return clean(out)
+
+    @router.post("/morning/scan")
+    def morning_scan():
+        need_morning()
+        return clean(morning.start())
+
+    @router.post("/morning/stop")
+    def morning_stop():
+        need_morning()
+        return clean(morning.stop())
+
+    @router.post("/morning/card")
+    def morning_card(req: MorningCard):
+        need_morning()
+        try:
+            entry = req.entry if req.entry is not None else svc.market.spot(svc._symbol(req.symbol))
+            return clean(morning.card(symbol=svc._symbol(req.symbol), direction=req.direction, entry=float(entry),
+                                      stop=req.stop, target_1=req.target_1,
+                                      target_2=req.target_2 if req.target_2 is not None else req.target_1,
+                                      horizon_days=req.horizon_days, setup=req.setup))
+        except (DataError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/morning/watch")
+    def morning_watch(req: WatchCreate):
+        need_morning()
+        d = 1 if req.direction == "LONG" else -1
+        # A watch that is already true would fire on the next tick; refuse it so a typo is caught here.
+        try:
+            now = svc.market.spot(svc._symbol(req.symbol))
+        except DataError:
+            now = None
+        if now is not None and ((req.kind == "above" and now >= req.level) or (req.kind == "below" and now <= req.level)):
+            raise HTTPException(status_code=400, detail=f"{req.symbol} is already {req.kind} ${req.level:,.2f} "
+                                                        f"(now ${now:,.2f}); there is nothing to wait for.")
+        wid = add_watch(svc.db, symbol=svc._symbol(req.symbol), direction=req.direction, kind=req.kind,
+                        level=req.level, why=req.why or f"{'Bottom' if d > 0 else 'Top'} watch")
+        watcher.ensure_running()
+        return clean({"id": wid, "watches": list_watches(svc.db),
+                      "email_configured": mailer.configured(svc.settings),
+                      "note": "Checked about once a minute while the market is open (pre-market: stock price only), "
+                              "while the app is running on this computer."})
+
+    @router.post("/morning/watches/{watch_id}/remove")
+    def morning_watch_remove(watch_id: int):
+        need_morning()
+        remove_watch(svc.db, watch_id)
+        return clean({"watches": list_watches(svc.db)})
+
+    @router.post("/morning/email")
+    def morning_email_now():
+        need_morning()
+        from . import morning_email as renderer
+        st = morning.status()
+        if not st.get("result"):
+            raise HTTPException(status_code=400, detail="Build the morning plan first (Scan), then send it.")
+        plan = st["result"]
+        record_picks(svc.db, plan, "screen")
+        subject, text, html = renderer.render(plan, scorecard(svc))
+        try:
+            to = mailer.send(svc.settings, subject, text, html)
+        except mailer.MailError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return clean({"sent_to": to, "subject": subject})
 
     # --- your trade history (2.6): imported read-only, analysed locally ---------------------------------
     from .tradehistory import HistoryImportError, TradeHistory

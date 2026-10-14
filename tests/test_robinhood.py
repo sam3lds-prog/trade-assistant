@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timedelta
 
 import pytest
@@ -654,7 +655,10 @@ def test_volatility_and_greeks_in_other_units_are_set_aside_not_shown():
 
     yearly = altered(lambda g: {**g, "theta": g["theta"] * 365})              # theta per year
     assert all(c["greeks_source"] == "computed" for c in yearly.contracts if c["theta"] is not None)
-    assert any("theta" in n and "365" in n for n in yearly.notes)
+    # The ratio the note prints is the median across the chain, which drifts a little with the demo
+    # data's day: anything near 365 shows the per-year theta was caught.
+    ratio = re.search(r"theta values are about (\d+(?:\.\d+)?) times", " ".join(yearly.notes))
+    assert ratio and 300 <= float(ratio.group(1)) <= 430
     for c in yearly.contracts:
         t = good.find(c["symbol"])
         if c["theta"] is not None and t["theta"] is not None:

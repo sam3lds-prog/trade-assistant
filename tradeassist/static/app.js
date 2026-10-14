@@ -1640,8 +1640,8 @@ async function start() {
   }
   // A group whose screens are all switched off is not shown.
   for (const g of document.querySelectorAll(".rail .nav-group")) g.classList.toggle("hidden", !g.querySelector("button.nav:not(.hidden)"));
-  // Today is the landing screen unless the address names another one (2.5).
+  // The Morning plan is the landing screen (2.8), then Today, unless the address names another one.
   const named = location.hash.slice(1);
-  show(BUILDERS[named] ? named : BUILDERS.today ? "today" : "price");
+  show(BUILDERS[named] ? named : BUILDERS.morning ? "morning" : BUILDERS.today ? "today" : "price");
 }
 document.addEventListener("DOMContentLoaded", start);

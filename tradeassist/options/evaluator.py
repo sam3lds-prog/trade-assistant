@@ -208,6 +208,24 @@ def rank(rows: list[dict[str, Any]], thesis: dict[str, Any]) -> list[dict[str, A
     return picks
 
 
+def best_within_budget(result: dict[str, Any], budget: float) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """One contract for a given risk budget: the usable contract with the best reward to risk whose one-lot
+    premium fits the budget; failing that, the BEST RISK-ADJUSTED pick (or the first pick). Returns
+    (contract row, category, why)."""
+    fits = [r for r in result["contracts"] if r.get("usable") and r.get("reward_to_risk") and r["premium"] <= budget]
+    if fits:
+        row = max(fits, key=lambda r: r["reward_to_risk"])
+        why = (f"For one contract: gains ${row['at_target']:,.0f} at target 1 for ${abs(row['if_invalidated']):,.0f} "
+               f"lost if invalidated ({row['reward_to_risk']:.2f} to 1), and it costs ${row['premium']:,.0f}, within "
+               f"the ${budget:,.0f} risk per trade.")
+        return row, "BEST RISK-ADJUSTED WITHIN YOUR RISK PER TRADE", why
+    pick = next((p for p in result["picks"] if p["category"] == "BEST RISK-ADJUSTED"), None) \
+        or (result["picks"][0] if result["picks"] else None)
+    if pick:
+        return pick["contract"], pick["category"], f"For one contract: {pick['why']}"
+    return None, None, None
+
+
 PERCENTILE_Z = (("p10", -1.2815516), ("p50", 0.0), ("p90", 1.2815516))     # as simulate.market_odds
 
 
