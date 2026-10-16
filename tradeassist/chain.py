@@ -46,8 +46,11 @@ IV_RANGE = (0.01, 5.0)
 
 
 def two_sided(contract: dict[str, Any]) -> bool:
+    """Both sides quoted, with the ask no lower than the bid. A locked quote (the same price on
+    both sides) is the tightest market there is, not a missing one, and counts as two-sided here
+    as it does in freshness.quote_completeness; only a crossed quote is thrown out."""
     bid, ask = contract.get("bid"), contract.get("ask")
-    return bid is not None and ask is not None and bid > 0 and ask > bid
+    return bid is not None and ask is not None and bid > 0 and ask >= bid
 
 
 def mid_price(contract: dict[str, Any]) -> float | None:
@@ -118,7 +121,8 @@ def analyze_chain(symbol: str, expiration: str, contracts: list[dict[str, Any]],
     strikes, ivs, weights = [], [], []
     for row in out:
         is_otm = (row["option_type"] == "call") == (row["strike"] >= forward)
-        if not is_otm or not two_sided(row) or not row["iv"] or not row["spread_pct"]:
+        # A spread of zero is the tightest quote there is, not a missing one: only None means unknown.
+        if not is_otm or not two_sided(row) or not row["iv"] or row["spread_pct"] is None:
             continue
         strikes.append(row["strike"])
         ivs.append(row["iv"])

@@ -123,7 +123,9 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
 
     Within one day, a close that finds nothing open is tried again after that day's opens (the report
     gives no times), and only then listed as opened before the history. Shares delivered by an assignment
-    or an exercise join the option's own trade, so its result includes them."""
+    or an exercise join the option's own trade, so its result includes them: shares delivered in close
+    that trade's own shares before any other lot, and shares it did not hold leave it short. A sale
+    marked short with nothing held opens a short lot, which the buy that covers it closes."""
     rows = list(rows)
     lots: dict[tuple, list[Lot]] = defaultdict(list)
     groups: list[Group] = []
@@ -145,10 +147,51 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
     def shares_held(symbol: str) -> float:
         return sum(lot.qty for lot in lots[("STOCK", symbol)] if lot.side > 0)
 
-    def open_lot(r: dict[str, Any], side: int, seq: int) -> None:
+    def pending(r: dict[str, Any], side: int) -> bool:
+        """Is this day still waiting for shares an assignment or exercise delivered on this side?"""
+        return any(d[1] == side and d[2] > 1e-9 for d in deliveries.get((r["activity_date"], r["symbol"]), []))
+
+    def delivered_lot(r: dict[str, Any], side: int, qty: float, unit: float, est: bool, g: Group) -> None:
+        """Shares the option's trade is left holding (bought) or owing (sold short) after a delivery."""
+        lot = Lot(_key(r), side, qty, unit, r["activity_date"], g.id, r["id"], est)
+        lot.delivered = True
+        lots[_key(r)].append(lot)
+        g.lots.append(lot)
+        if r["id"] not in g.row_ids:
+            g.row_ids.append(r["id"])
+        g.delivered.append({"kind": "STOCK", "side": side, "qty": qty, "cash": -side * unit * qty,
+                            "option_type": None, "strike": None, "expiration": None, "row_id": r["id"],
+                            "estimated": est})
+        g.from_assignment = True
+
+    def delivered_sale(r: dict[str, Any], seq: int, want: float) -> float:
+        """Shares an assignment or an exercise delivered out of a trade this day. They close that
+        trade's own shares first (a covered call delivers the shares it was written against, not an
+        older parcel bought for something else) and then anything else held; what was not held leaves
+        the trade short. Returns the quantity of the sale still to account for."""
+        for d in deliveries.get((r["activity_date"], r["symbol"]), []):
+            if want <= 1e-9:
+                break
+            if d[1] >= 0 or d[2] <= 1e-9:
+                continue
+            g = groups[d[0] - 1]
+            take = min(want, d[2])
+            d[2] -= take
+            want -= take
+            left = close(r, +1, "sold", seq, want=take, prefer_group=g.id)
+            if left > 1e-9:                      # nothing held to deliver: the trade is short those shares
+                unit, est = _unit_cash(r, paying=False)
+                delivered_lot(r, -1, left, unit, est, g)
+            else:
+                g.from_assignment = True
+                if r["id"] not in g.row_ids:
+                    g.row_ids.append(r["id"])
+        return want
+
+    def open_lot(r: dict[str, Any], side: int, seq: int, qty: float | None = None) -> None:
         key = _key(r)
         unit, est = _unit_cash(r, paying=side > 0)
-        qty = float(r["quantity"])
+        qty = float(r["quantity"]) if qty is None else qty
         # Shares delivered by an assignment or exercise this day go into that option's trade.
         if r["kind"] == "STOCK":
             for d in deliveries.get((r["activity_date"], r["symbol"]), []):
@@ -156,15 +199,7 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
                     g = groups[d[0] - 1]
                     take = min(qty, d[2])
                     d[2] -= take
-                    lot = Lot(key, side, take, unit, r["activity_date"], g.id, r["id"], est)
-                    lot.delivered = True
-                    lots[key].append(lot)
-                    g.lots.append(lot)
-                    g.row_ids.append(r["id"])
-                    g.delivered.append({"kind": "STOCK", "side": side, "qty": take, "cash": -side * unit * take,
-                                        "option_type": None, "strike": None, "expiration": None, "row_id": r["id"],
-                                        "estimated": est})
-                    g.from_assignment = True
+                    delivered_lot(r, side, take, unit, est, g)
                     qty -= take
                     if qty <= 1e-9:
                         return
@@ -182,9 +217,10 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
         g.legs.append(leg)
 
     def close(r: dict[str, Any], side_to_close: int, how: str, seq: int, value: float | None = None,
-              want: float | None = None) -> float:
+              want: float | None = None, prefer_group: int | None = None) -> float:
         """Close `quantity` (or `want`) of the lots of `side_to_close` FIFO. `value` is cash per unit at the
-        close (None: from the row's amount). Returns what could not be closed."""
+        close (None: from the row's amount). With `prefer_group`, that trade's own lots go first and the
+        rest stay in order behind them. Returns what could not be closed."""
         key = _key(r)
         want = float(r["quantity"] or 0) if want is None else want
         if value is None:
@@ -192,6 +228,8 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
         else:
             unit, est = value, False
         open_ = [lot for lot in lots[key] if lot.side == side_to_close and lot.qty > 1e-9]
+        if prefer_group is not None:
+            open_.sort(key=lambda lot: lot.group != prefer_group)       # stable: FIFO within each part
         for lot in open_:
             if want <= 1e-9:
                 break
@@ -218,12 +256,20 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
         """Apply one row; returns the quantity of a close that found nothing open (0 for opens)."""
         code = r["code"]
         if code == "Buy":
-            if any(lot.side < 0 for lot in lots[_key(r)]):
+            # Shares an assignment or exercise is delivering in belong to that trade, not to a short lot.
+            if not pending(r, +1) and any(lot.side < 0 for lot in lots[_key(r)]):
                 return close(r, -1, "bought back", seq, want=want)
             open_lot(r, +1, seq)
             return 0.0
         if code == "Sell":
-            # Shares sold by an assignment or exercise close what is held, as any sale.
+            want = float(r["quantity"] or 0) if want is None else want
+            # Shares sold by an assignment or exercise close what that trade holds, as any sale.
+            want = delivered_sale(r, seq, want)
+            if want <= 1e-9:
+                return 0.0
+            if r.get("short_flag") and not any(lot.side > 0 for lot in lots[_key(r)]):
+                open_lot(r, -1, seq, qty=want)                 # sold short: its own lot, covered by a later buy
+                return 0.0
             return close(r, +1, "sold", seq, want=want)
         if code == "BTO":
             open_lot(r, +1, seq)
@@ -248,7 +294,8 @@ def rebuild(rows: Iterable[dict[str, Any]]) -> Book:
         return 0.0
 
     def split(r: dict[str, Any]) -> None:
-        held = [lot for lot in lots[("STOCK", r["symbol"])] if lot.side > 0]
+        # Shares held long or sold short both scale: the quantity by the factor, the cash per share against it.
+        held = [lot for lot in lots[("STOCK", r["symbol"])] if lot.qty > 1e-9]
         before = sum(lot.qty for lot in held)
         delta = float(r["quantity"])           # shares added (a forward split) or, when below zero, taken away
         if before > 0 and before + delta > 0:

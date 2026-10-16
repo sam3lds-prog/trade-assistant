@@ -577,7 +577,11 @@ class Analyst:
             if v["status"] not in ("OPEN", "PARTIALLY_CLOSED", "CLOSED"):
                 continue
             touched_today = any(datetime.fromisoformat(e["executed_at"]) >= start for e in v["executions"])
-            if v["status"] == "CLOSED" and not touched_today:
+            # Money recorded outside the fills and dated today counts too, even on a trade already closed.
+            paid_today = any(not a.get("voided_at") and a.get("effective_at")
+                             and datetime.fromisoformat(a["effective_at"]).astimezone(NY) >= start
+                             for a in v.get("adjustments") or [])
+            if v["status"] == "CLOSED" and not touched_today and not paid_today:
                 continue                                  # closed before today: nothing to count
             held_overnight = any(datetime.fromisoformat(e["executed_at"]) < start for e in v["executions"])
             if held_overnight:

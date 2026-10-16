@@ -57,17 +57,32 @@ def describe(pos: dict[str, Any]) -> str:
     return f"{verb} {qty:,.0f} {pos['symbol']} shares" if qty == int(qty) else f"{verb} {qty:g} {pos['symbol']} shares"
 
 
+def _check_sides(sign: int, reference: float, invalidation: float | None, t1: float | None, t2: float | None,
+                 word: str, basis: str) -> None:
+    if invalidation is not None and sign * (reference - invalidation) <= 0:
+        raise PositionError(f"For a {word} the invalidation price must be {'below' if sign > 0 else 'above'} {basis} "
+                            f"({reference:,.2f}); {invalidation:,.2f} would mean it is wrong from the start.")
+    for name, level in (("target 1", t1), ("target 2", t2)):
+        if level is not None and sign * (level - reference) <= 0:
+            raise PositionError(f"For a {word}, {name} must be {'above' if sign > 0 else 'below'} {basis} "
+                                f"({reference:,.2f}).")
+
+
 def check_levels(direction: str, entry: float, invalidation: float | None, t1: float | None, t2: float | None) -> None:
     """A stock plan's levels must sit on the right sides of the entry: for a long, the invalidation
     below and the targets above; for a short, the other way round."""
     sign = 1 if direction == "LONG" else -1
-    word = "long" if sign > 0 else "short"
-    if invalidation is not None and sign * (entry - invalidation) <= 0:
-        raise PositionError(f"For a {word} the invalidation price must be {'below' if sign > 0 else 'above'} the entry "
-                            f"({entry:,.2f}); {invalidation:,.2f} would mean it is wrong from the start.")
-    for name, level in (("target 1", t1), ("target 2", t2)):
-        if level is not None and sign * (level - entry) <= 0:
-            raise PositionError(f"For a {word}, {name} must be {'above' if sign > 0 else 'below'} the entry ({entry:,.2f}).")
+    _check_sides(sign, entry, invalidation, t1, t2, word="long" if sign > 0 else "short", basis="the entry")
+
+
+def check_option_levels(option_type: str, spot: float, invalidation: float | None, t1: float | None,
+                        t2: float | None) -> None:
+    """An option plan's levels are prices of the stock, and the thesis check reads them that way
+    (bias_of): a bought call is wrong if the stock falls, a bought put if it rises. Levels on the
+    wrong side of the stock would make the plan invalid, or already at its target, the moment it is
+    recorded, so they are refused the same way a stock plan's are."""
+    sign = 1 if option_type == "CALL" else -1
+    _check_sides(sign, spot, invalidation, t1, t2, word=f"long {option_type.lower()}", basis="the stock")
 
 
 class Desk:
@@ -260,6 +275,13 @@ class Desk:
                         "that is wrong; the reconciliation report on the Data health screen lists it."}
 
     # --- changes -------------------------------------------------------------------------
+    def _spot(self, symbol: str) -> float | None:
+        """The stock's price now, or None when the data source cannot be reached."""
+        try:
+            return finite(self.market.spot_from_quote(self.market.quote(symbol), symbol))
+        except (DataError, ValueError, AttributeError, KeyError):
+            return None
+
     def create(self, req: dict[str, Any]) -> dict[str, Any]:
         symbol = self.svc._symbol(req["symbol"])
         instrument = str(req.get("instrument_type", "STOCK")).upper()
@@ -280,9 +302,15 @@ class Desk:
             leg = OptionLeg(kind, float(opt["strike"]), str(opt["expiration"]),
                             occ_symbol(symbol, str(opt["expiration"]), kind.lower(), float(opt["strike"])))
         entry = req.get("entry") or None
+        levels = (req.get("invalidation_price"), req.get("target_1"), req.get("target_2"))
         if instrument == "STOCK" and entry:
-            check_levels(direction, float(entry["price"]), req.get("invalidation_price"), req.get("target_1"),
-                         req.get("target_2"))
+            check_levels(direction, float(entry["price"]), *levels)
+        elif instrument == "OPTION" and any(v is not None for v in levels):
+            # The levels are stock prices. Checked against the stock now, when it can be read; a plan
+            # is never refused because the market could not be reached.
+            spot = finite(req.get("underlying_price")) or self._spot(symbol)
+            if spot:
+                check_option_levels(kind, spot, *levels)
         with self.db.tx() as cur:
             pid = create(cur, symbol=symbol, instrument_type=instrument, direction=direction,
                          quantity=float(req["quantity"]), thesis=req.get("thesis") or "",

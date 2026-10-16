@@ -117,16 +117,24 @@ def _nearest(prices: list[int], target: float) -> int:
 
 
 def quote_age_seconds(contract: dict[str, Any], now: datetime | None = None) -> float | None:
-    """Age of the older of the two quote sides, in seconds."""
+    """Age of the older of the two quote sides, in seconds.
+
+    A stamp without a time zone is read in the same zone as `now` rather than failing: a source that
+    drops the offset still gives an age, which is what the freshness checks are asking for."""
     now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     ages = []
     for key in ("bid_time", "ask_time"):
         stamp = contract.get(key)
         if stamp:
             try:
-                ages.append((now - datetime.fromisoformat(stamp)).total_seconds())
-            except ValueError:
-                pass
+                when = datetime.fromisoformat(stamp)
+            except (TypeError, ValueError):
+                continue
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=now.tzinfo)
+            ages.append((now - when).total_seconds())
     return max(ages) if ages else None
 
 

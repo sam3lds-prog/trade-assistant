@@ -927,3 +927,32 @@ split; the fade's IV settle applied to the scenario values; the one-shot trigger
 email's escaping of whatever lands in the plan; and that no route places an order.
 
 Tests: 883 passed, 2 skipped, including the Chromium tests; ruff is clean.
+
+## 2.9.1: the review of 2.9.0
+
+Eleven cases from the review of 2.9.0, each reproduced on `9da3402` before anything was changed.
+Six are in the trade history's rebuild of your trades, two in what a position's own accounts say,
+and three in the plan, the quote and the chain. Every case is now a test in
+`tests/test_review_2_9.py`, and ten of the eleven fail on the commit before the fixes (the
+eleventh pins behaviour the review asked to keep).
+
+| # | Finding on `9da3402` | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| R1 | A sale the report marks short never opened a lot: `act()` sent every `Sell` to `close(+1, …)`, so the sale was listed as unmatched and the buy that covered it opened a **phantom long**, with the short's profit lost entirely | High | a marked `Sell` with nothing held opens a short lot; the covering `Buy` closes it, and its result is `(sold − covered) × quantity` under **Shares (short)** | `test_a_sale_marked_short_and_the_buy_that_covers_it_are_one_trade` |
+| R2 | — (checked, not a defect) an unmarked sale with nothing open must stay unmatched rather than be guessed into a short | — | the short lot opens only on the report's own mark | `test_a_sell_with_nothing_open_and_no_short_mark_is_still_unmatched` |
+| R3 | An uncovered short call assigned: the delivery was registered but only `open_lot()` consumed it, which `Sell` never reaches. The share sale fell through to a FIFO close, found nothing open, and was reported unmatched — the strike's cash never reached the option's trade | High | `delivered_sale()` consumes the delivery on the `Sell` row; with nothing held, the shares leave the trade short, and the stock cash is one of its legs | `test_an_uncovered_call_assigned_keeps_the_stock_cash_in_the_option_trade` |
+| R4 | A covered call assigned closed shares **first in, first out across every lot**, so an older parcel held for something else was closed instead of the shares the call was written against | High | `close()` takes a `prefer_group`: the delivering trade's own shares go first, the rest stay in order behind them | `test_a_covered_call_assigned_delivers_its_own_shares_not_an_older_parcel` |
+| R5 | A long put exercised: the same gap as R3, so the delivered sale was unmatched and the trade never closed | High | the same path; the put, the shares and the sale are one trade | `test_a_long_put_exercised_sells_its_shares_into_the_option_trade` |
+| R6 | `split()` scaled only lots with `side > 0`, so a split over a short lot left the quantity and cost per share as they were and noted that it "could not be applied" | Medium | every open stock lot scales, long or short: the quantity by the factor, the cash per share against it, so the result is unchanged | `test_a_reverse_split_scales_a_short_lot_and_leaves_its_result_alone` |
+| R7 | `day_pnl()` read the fills only. A borrow fee, a dividend owed or a cash adjustment dated today is cash that moved today, and none of it reached the daily loss stop | Medium | `_financing_today()` adds the recorded amounts dated today; a trade closed earlier with money dated today is no longer filtered out of the day. The borrow **estimate** is still an estimate and stays out | `test_a_borrow_fee_recorded_today_counts_against_the_daily_stop_but_an_estimate_never_does` |
+| R8 | `initial_risk()` measured from `average_entry_price`, the average of every opening fill. Closing part and adding higher up rewrote the risk the trade had taken, and with it every R multiple | Medium | the ledger records `basis_at_max_quantity`, the cost of the quantity open when the position was at its largest, and the risk is measured from that. `average_entry_price` is unchanged | `test_initial_risk_uses_the_cost_basis_at_the_largest_the_position_was` |
+| R9 | `desk.create()` checked a plan's levels for stock only. An option plan's levels are stock prices read by `bias_of()`, so a long put with its invalidation below the stock was accepted and `thesis_check` called it INVALIDATED straight away | Medium | `check_option_levels()` checks them against the stock now — the invalidation above it for a bought put, below for a bought call. A plan is never refused because the market could not be reached | `test_a_long_put_plan_with_its_invalidation_below_the_stock_is_refused` |
+| R10 | `quote_age_seconds()` caught `ValueError` only, so a `bid_time` without an offset raised `TypeError` from `aware − naive` and took down everything that priced a contract | High | a stamp without a zone is read in the same zone as `now`; an unreadable one is skipped as before | `test_a_quote_stamp_without_a_time_zone_still_gives_an_age` |
+| R11 | A locked quote (the same price on both sides) was thrown out of the smile twice over: `two_sided()` required `ask > bid`, and the smile filter read a `spread_pct` of `0.0` as missing. The tightest quote on the chain was the one dropped | Medium | `two_sided()` accepts `ask >= bid` (only a crossed quote is thrown out, as in `freshness.quote_completeness`); the smile filter tests `spread_pct is None` | `test_a_strike_quoted_at_one_price_on_both_sides_stays_in_the_smile` |
+
+Checked and found sound: the duplicate-row key; the same-day retry that puts a close after that day's
+opens; `_unit_cash()` reading the amount with its fees; the assignment and exercise delivery sides
+(`buys = (PUT) == (assigned)`); `financing()`'s uncovered-nights count and its refusal to add the
+estimate; and that no route places an order.
+
+Tests: 911 passed, 2 skipped; ruff is clean.

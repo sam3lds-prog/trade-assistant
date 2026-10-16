@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 
 from .optionmath import NY
-from .positions import Fill, account, adjusted_fills
+from .positions import MONEY_KINDS, Fill, account, adjusted_fills
 from .sectors import SECTOR_FUNDS
 from .simulate import Leg, leg_value
 
@@ -480,6 +480,24 @@ def stress(exposures: list[dict[str, Any]], scenarios: list[dict[str, Any]], acc
     return out
 
 
+def _financing_today(view: dict[str, Any], today_start: datetime) -> float:
+    """Borrow fees, dividends and cash adjustments recorded against this position and effective today."""
+    total = 0.0
+    for a in view.get("adjustments") or []:
+        if a.get("voided_at") or a.get("kind") not in MONEY_KINDS:
+            continue
+        stamp = a.get("effective_at")
+        amount = a.get("amount")
+        if not stamp or not isinstance(amount, (int, float)) or not math.isfinite(amount):
+            continue
+        when = datetime.fromisoformat(stamp)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=today_start.tzinfo)
+        if when.astimezone(today_start.tzinfo) >= today_start:
+            total += float(amount)
+    return total
+
+
 def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
     """Today's realized and unrealized change for one position, from its fills, its mark and the
     previous close of what it holds (`view["prev_close"]`, worked out by the caller).
@@ -489,7 +507,11 @@ def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
     close for what was held overnight; without them it is None, never zero, and `reason` says
     what was missing. Quantity held at midnight is measured from the previous close; quantity
     opened today from its fill, so a position bought last week and sold today counts only
-    today's move."""
+    today's move.
+
+    Money recorded outside the fills and dated today (a borrow fee, a dividend owed or received, a
+    cash adjustment) is cash that left or arrived today, so it counts with the realized figure. An
+    unrecorded cost is never filled in: the borrow estimate is an estimate and stays out."""
     fills = adjusted_fills([Fill(e["side"], e["quantity"], e["price"], e["fees"], e["executed_at"])
                             for e in view["executions"]], view.get("unit_adjustments") or [])
     before = [f for f in fills if datetime.fromisoformat(f.executed_at) < today_start]
@@ -499,9 +521,10 @@ def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
     weight = max(prev_led.open_quantity * (prev_led.cost_basis or 0.0),
                  max(now_led.open_quantity, now_led.closed_quantity - prev_led.closed_quantity) * (now_led.cost_basis or 0.0))
     base = {"weight": abs(weight * mult)}           # capital at cost the day's figure is about
-    if len(before) == len(fills) and now_led.open_quantity <= 0:
-        return {**base, "realized": 0.0, "unrealized_change": 0.0, "known": True}        # nothing happened today
-    realized = now_led.realized_pnl - prev_led.realized_pnl
+    financing_today = _financing_today(view, today_start)
+    if len(before) == len(fills) and now_led.open_quantity <= 0 and not financing_today:
+        return {**base, "realized": 0.0, "unrealized_change": 0.0, "financing": 0.0, "known": True}   # nothing today
+    realized = now_led.realized_pnl - prev_led.realized_pnl + financing_today
     mark = view.get("mark") or {}
     price = finite(mark.get("price"))
     prev = finite(view.get("prev_close"))
@@ -516,11 +539,12 @@ def day_pnl(view: dict[str, Any], today_start: datetime) -> dict[str, Any]:
     if prev_led.open_quantity > 0 and prev is None:
         reasons.append("no previous close" + (f" ({view['prev_reason']})" if view.get("prev_reason") else ""))
     if reasons:
-        return {**base, "realized": realized, "unrealized_change": None, "known": False, "reason": " and ".join(reasons)}
+        return {**base, "realized": realized, "financing": financing_today, "unrealized_change": None,
+                "known": False, "reason": " and ".join(reasons)}
     unreal_now = now_led.unrealized(price) if now_led.open_quantity > 0 else 0.0
     unreal_prev = prev_led.unrealized(prev) if prev_led.open_quantity > 0 else 0.0
-    return {**base, "realized": realized, "unrealized_change": unreal_now - unreal_prev, "known": True,
-            "prev_source": view.get("prev_source")}
+    return {**base, "realized": realized, "financing": financing_today,
+            "unrealized_change": unreal_now - unreal_prev, "known": True, "prev_source": view.get("prev_source")}
 
 
 def daily_loss(views: list[dict[str, Any]], mode: str, account_size: float, stop_pct: float,

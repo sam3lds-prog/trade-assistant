@@ -124,6 +124,9 @@ class Ledger:
     opened_quantity: float = 0.0
     closed_quantity: float = 0.0
     max_open_quantity: float = 0.0
+    # Average cost of the quantity open when the position was at its largest. The risk taken is what
+    # was paid for the shares then, not an average pulled about by an addition made after a part sale.
+    basis_at_max_quantity: float | None = None
     gross_realized: float = 0.0
     fees: float = 0.0
     realized_pnl: float = 0.0                  # gross realised minus every fee paid so far
@@ -219,6 +222,8 @@ def account(direction: str, multiplier: float, fills: Iterable[Fill], allow_reop
             led.opened_quantity += f.quantity
             entry_value += f.price * f.quantity
             led.cost_basis = open_cost / led.open_quantity
+            if led.open_quantity > led.max_open_quantity + EPS or led.basis_at_max_quantity is None:
+                led.basis_at_max_quantity = led.cost_basis
             led.max_open_quantity = max(led.max_open_quantity, led.open_quantity)
             led.closed_at = None
         else:
@@ -267,7 +272,9 @@ def initial_risk(pos: dict[str, Any], led: Ledger) -> float | None:
     """Dollars at risk when the position was opened, for R multiples.
 
     Uses, in order: the risk amount entered; the risk per unit entered; the distance from the
-    average entry to the invalidation price; for a bought option, the premium paid."""
+    invalidation price to what the position cost when it was at its largest; for a bought option,
+    the premium paid. Closing part and then adding at a different price therefore leaves the risk
+    that was taken as it was, instead of rewriting it with a later entry price."""
     # The size actually held at most, once there are fills; the planned size before that.
     size = led.max_open_quantity if led.fills else float(pos.get("quantity") or 0)
     mult = float(pos.get("multiplier") or 1)
@@ -275,7 +282,7 @@ def initial_risk(pos: dict[str, Any], led: Ledger) -> float | None:
         return float(pos["risk_amount"])
     if pos.get("initial_risk_per_unit"):
         return float(pos["initial_risk_per_unit"]) * size * mult
-    entry = led.average_entry_price
+    entry = led.basis_at_max_quantity if led.basis_at_max_quantity is not None else led.average_entry_price
     inv = pos.get("invalidation_price")
     if pos.get("instrument_type") == "STOCK" and entry and inv:
         distance = (entry - inv) if pos["direction"] == "LONG" else (inv - entry)
