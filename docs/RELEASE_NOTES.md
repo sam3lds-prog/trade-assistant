@@ -18,6 +18,59 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.10.0
+
+**Prices you can get, and Live news.**
+
+**A fair price instead of the midpoint.** The limit ladder used to start at the midpoint and walk up to
+80% of the way to the ask, which on wide option spreads paid more than Robinhood fills at. It now
+centres on a fair price: the middle of the evidence the quote carries.
+
+- **The evidence.** The midpoint; the model value from the neighbouring strikes, when it sits inside the
+  quote; the midpoint weighted by the size waiting on each side; and a trade inside the quote in the last
+  15 minutes while the market is open.
+- **Which way it can move.** A buyer's fair price is never above the midpoint, so the evidence can only
+  lower what you pay.
+- **The ladder.** The patient price sits below the fair price, the walk stops at it, and "Most you will
+  pay" defaults to it. The fast price, 30% of the way on toward the ask, is there for when speed matters.
+- **On screen.** Price an option lists every piece of evidence, used or not, and why. Decide shows each
+  contract's fair entry beside its midpoint.
+- **Robinhood's own estimates.** When the connection's quotes carry Robinhood's estimates of a price
+  likely to fill, they are shown for reference and not used.
+
+**Morning cards before the open.** Option quotes before 9:30 are the last session's. When the stock has
+gapped since, the card now reprices the contract at the pre-market stock price instead of using the
+stale midpoint. That midpoint priced fades well above where they open: puts after a gap up, calls after
+a gap down. The card says it is an estimate and to price it live after 9:30, since implied volatility
+often jumps at the open.
+
+**Live news** (new, under Today) listens for stock-moving news and checks the price after each item.
+
+- **Sources.** RTPR press releases, streamed within about a second (`RTPR_API_KEY`; paid at rtpr.io);
+  SEC 8-K filings each minute (`SEC_USER_AGENT`); Finnhub headlines each minute (`FINNHUB_API_KEY`).
+- **Opportunities.** When the price confirms the news (1% and 0.3 of the stock's daily ranges since the
+  item, the day the same way), the screen shows an opportunity with the trade card: shares or calls when
+  the news sends the stock up, a short or puts when it sends it down, the stop just beyond where it stood
+  before the news, and the order to copy.
+- **Stocks you hold** get an alert when the news moves them against you.
+- **Being told.** Browser notifications while the screen is open, and email with `LIVE_NEWS_EMAIL=1`.
+
+**Fixes.**
+
+- Robinhood's clock word for pre-market (`pre`) now counts as pre-market for the price watches and the
+  morning plan's price note.
+- Freshness labels read Robinhood's `pre` and `post` as closed rather than unknown.
+- Two morning-email tests failed on weekends; they now fix their own weekday.
+
+**Upgrading.**
+
+- **New dependency.** `websockets`, for the RTPR stream. `./update.sh` installs it; or run
+  `pip install -r requirements.txt`.
+- **Migration 14** adds `live_news` and `live_signals`. The usual copy of the database is taken first.
+- **New settings,** all optional: `RTPR_API_KEY`, `LIVE_UNIVERSE`, `LIVE_MIN_REACTION_PCT`,
+  `LIVE_MIN_REACTION_ATR`, `LIVE_MIN_DAY_ATR`, `LIVE_MIN_DAY_PCT`, `LIVE_NEWS_EMAIL`, `LIVE_NEWS_AUTOSTART`
+  and `FEATURE_LIVE_NEWS` (see `.env.example`).
+
 ## 2.9.0
 
 **The trade card and the email, on Analyze a stock.** After **Grade and find a contract** runs, the same

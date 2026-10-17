@@ -479,3 +479,19 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .m-watch .grow { flex: 1 1 200px; }
 .m-section { margin: 18px 0 8px; }
 .m-card { scroll-margin-top: 12px; }
+
+/* 2.10: the fair price and its evidence on Price an option */
+.fair-box { margin: 10px 0 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.fair-box summary { color: var(--ink); }
+.fair-box table td { padding: 4px 10px 4px 0; vertical-align: top; border-bottom: 1px solid var(--line); }
+.fair-box table td.num { text-align: right; white-space: nowrap; }
+
+/* 2.10: Live news */
+.live-sources { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 6px; }
+.live-source { font-size: 0.82rem; padding: 3px 10px; border-radius: 12px; border: 1px solid var(--line); background: var(--sunk); }
+.live-source.live-streaming, .live-source.live-polling { background: var(--pass-bg); color: var(--pass); border-color: transparent; }
+.live-source.live-failed { background: var(--fail-bg); color: var(--fail); border-color: transparent; }
+.live-source.live-reconnecting, .live-source.live-connecting { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.live-opp { border-color: var(--accent); }
+.live-opp.live-stopped { border-color: var(--line); opacity: 0.85; }
+.live-row { padding: 8px 0; border-bottom: 1px solid var(--line); }

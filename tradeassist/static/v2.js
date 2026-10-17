@@ -968,6 +968,8 @@ function renderOptionsEval(r) {
     const limit = limitButton(r.symbol, k, th.contracts);
     cards.append(el("div", { class: "pick" }, el("div", { class: "pick-cat", text: pk.category }), el("div", { class: "pick-name", text: contractName(k) }),
       el("div", { class: "small", text: `${money(k.mid)} mid · ${money(k.premium, 0)} for ${th.contracts} · delta ${num(k.delta, 2)}` }),
+      isNum(k.fair_entry) && k.fair_entry < k.mid - 0.004 ? el("div", { class: "small", title: k.fair_basis || "",
+        text: `Fair entry ${money(k.fair_entry)}, under the midpoint: start your limit there (Set the limit prices it live).` }) : null,
       el("div", { class: "small", text: `At target: ${signedMoney(k.at_target)} · if invalidated: ${signedMoney(k.if_invalidated)}` }),
       el("p", { class: "small muted", text: pk.why }), k.flags.length ? el("ul", { class: "plain small" }, k.flags.map(f => el("li", {}, statusTag("warn", "Caution"), ` ${f}`))) : null,
       el("div", { class: "row" }, limit, sim, track), note));
@@ -976,6 +978,7 @@ function renderOptionsEval(r) {
   const usable = r.contracts.filter(k => k.usable);
   if (usable.length) frag.append(el("details", {}, el("summary", { text: `All ${usable.length} contracts that pass the checks` }), table([
     { label: "Contract", cell: k => contractName(k) }, { label: "Mid", num: true, cell: k => money(k.mid) },
+    { label: "Fair entry", num: true, cell: k => isNum(k.fair_entry) ? money(k.fair_entry) : "n/a" },
     { label: "Cost", num: true, cell: k => money(k.premium, 0) }, { label: "Delta", num: true, cell: k => num(k.delta, 2) },
     { label: "At target", num: true, cell: k => signedMoney(k.at_target) }, { label: "Return", num: true, cell: k => isNum(k.return_on_premium) ? signedPct(100 * k.return_on_premium, 0) : "n/a" },
     { label: "If invalidated", num: true, cell: k => signedMoney(k.if_invalidated) }, { label: "Reward : risk", num: true, cell: k => isNum(k.reward_to_risk) ? num(k.reward_to_risk, 2) : "n/a" },

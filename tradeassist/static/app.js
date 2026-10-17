@@ -241,6 +241,8 @@ function spreadRuler(ladder) {
   }
   // Reference marks below the line: midpoint and model value.
   const refs = [{ p: ladder.mid, text: `Midpoint ${money(ladder.mid)}` }];
+  const fairP = ladder.fair && isNum(ladder.fair.anchor) ? ladder.fair.anchor : null;
+  if (isNum(fairP) && Math.abs(fairP - ladder.mid) >= 0.005) refs.push({ p: fairP, text: `Fair ${money(fairP)}` });
   if (isNum(ladder.model_value)) {
     const clamped = Math.min(Math.max(ladder.model_value, ladder.bid), ladder.ask);
     const outside = clamped !== ladder.model_value;
@@ -248,8 +250,8 @@ function spreadRuler(ladder) {
   }
   refs.sort((a, b) => a.p - b.p);
   refs.forEach((r, i) => {
-    const x = X(r.p), close = refs.length === 2 && Math.abs(X(refs[0].p) - X(refs[1].p)) < 170;
-    const y = base + 34 + (close && i === 1 ? 20 : 0);
+    const close = i > 0 && Math.abs(X(r.p) - X(refs[i - 1].p)) < 170;
+    const x = X(r.p), y = base + 34 + (close ? 20 * (i % 3) : 0);
     root.append(svg("line", { class: "ref", x1: x, x2: x, y1: base + 2, y2: y - 12, "stroke-dasharray": r.diamond ? "3 3" : null }));
     if (r.diamond) root.append(svg("path", { d: `M${x} ${base - 5} L${x + 5} ${base} L${x} ${base + 5} L${x - 5} ${base} Z`, fill: "var(--panel)", stroke: "var(--muted)", "stroke-width": 1.5 }));
     const anchor = x > 560 ? "end" : x < 200 ? "start" : "middle";
@@ -261,7 +263,7 @@ function spreadRuler(ladder) {
     root.append(svg("line", { class: "stem", x1: x, x2: x, y1: base, y2: top + 8 }),
       svg("circle", { class: "rung-dot", cx: x, cy: base, r: 6 }),
       svg("text", { x, y: top, "text-anchor": "middle", class: "rung-price", text: money(rung.price) }),
-      svg("text", { x, y: top - 18, "text-anchor": "middle", class: "rung-name", text: rung.name }));
+      svg("text", { x, y: top - 18, "text-anchor": "middle", class: "rung-name", text: rung.name.replace("balanced", "fair") }));
   }
   return root;
 }
@@ -497,9 +499,10 @@ function limitSection(v) {
   if (!lad.ok) return nodes;
   nodes.push(spreadRuler(lad));
   nodes.push(el("p", { class: "small muted", text: `Spread ${money(lad.spread)} (${pct(lad.spread_pct)} of the midpoint). Price increments: ${lad.tick_rule.evidence}.` }));
+  if (lad.fair) nodes.push(fairEvidence(lad.fair));
   const far = v.side === "buy" ? "paying the ask" : "hitting the bid";
   nodes.push(table([
-    { label: "Approach", cell: r => r.name[0].toUpperCase() + r.name.slice(1) },
+    { label: "Approach", cell: r => r.name.split(" / ").map(n => n === "balanced" ? "Fair" : n[0].toUpperCase() + n.slice(1)).join(" / ") },
     { label: "Limit price", num: true, cell: r => el("strong", { text: money(r.price) }) },
     { label: "Across the spread", num: true, cell: r => pct(r.position * 100, 0) },
     { label: `Saves vs ${far}`, num: true, cell: r => money(r.saving_vs_crossing, 0) },
@@ -598,6 +601,24 @@ function renderPrice(data, request) {
   return frag;
 }
 
+/* 2.10: the fair price the ladder centres on, and every piece of evidence behind it, used or not. */
+function fairEvidence(f) {
+  const exact = v => money(v, isNum(v) && Math.abs(v * 100 - Math.round(v * 100)) > 1e-6 ? 3 : 2);
+  const rows = (f.evidence || []).map(e => el("tr", {},
+    el("td", {}, e.label), el("td", { class: "num" }, el("strong", { text: exact(e.price) })),
+    el("td", {}, statusTag(e.used ? "pass" : "info", e.used ? "Used" : "Not used")),
+    el("td", { class: "small muted", text: e.note || "" })));
+  return el("details", { class: "fair-box", open: f.below_mid || f.above_mid || f.used > 1 },
+    el("summary", {}, el("strong", { text: isNum(f.limit) ? `Fair price ${money(f.limit)}` : `Fair estimate ${exact(f.anchor)} (no valid price at or below it)` }),
+      el("span", { class: "muted", text: ` · midpoint ${exact(f.mid)}${f.below_mid ? " · the evidence says pay less than the midpoint" : ""}` })),
+    el("p", { class: "small", text: f.basis + (isNum(f.limit) && Math.abs(f.limit - f.anchor) > 0.0005
+      ? ` The estimate, ${exact(f.anchor)}, is ${f.limit < f.anchor ? "rounded down" : "rounded up"} to ${money(f.limit)}, the nearest valid price on your side of it.` : "") }),
+    el("table", { class: "plain-table small" }, el("tbody", {}, rows)),
+    el("p", { class: "small muted", text: f.side === "buy"
+      ? "A buyer's fair price is never above the midpoint: the evidence can lower what you pay, never raise it. Nothing here predicts a fill."
+      : "A seller's fair price is never below the midpoint: the evidence can raise what you get, never lower it. Nothing here predicts a fill." }));
+}
+
 function labVerdictText(verdicts) {
   if (!verdicts || !verdicts.length) return "Not yet tested in the pattern lab.";
   const ok = verdicts.filter(v => v.verdict === "supported").map(v => `${v.horizon} days`);
@@ -610,7 +631,9 @@ function ticketPanel(data, request) {
   const lad = data.ladder;
   const rung = name => (lad.rungs.find(r => r.name.includes(name)) || lad.rungs[lad.rungs.length - 1]).price;
   const start = el("input", { type: "number", step: "0.01", min: "0.01", value: rung("patient").toFixed(2) });
-  const cap = el("input", { type: "number", step: "0.01", min: "0.01", value: rung("fast").toFixed(2) });
+  // 2.10: the most to pay defaults to the fair price, where the walk stops (it was the fast price).
+  const capValue = lad.walk && isNum(lad.walk.cap) ? lad.walk.cap : rung("balanced");
+  const cap = el("input", { type: "number", step: "0.01", min: "0.01", value: capValue.toFixed(2) });
   const thesis = el("textarea", { placeholder: "What do you expect to happen, by when, and what would prove you wrong?" });
   const target = el("input", { type: "number", step: "5", min: "5", value: 50 });
   const stop = el("input", { type: "number", step: "5", min: "5", max: "100", value: 50 });

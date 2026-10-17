@@ -101,7 +101,7 @@ def session_state(clock: Mapping[str, Any] | None, now: datetime) -> str:
     state = str((clock or {}).get("state") or "").lower()
     if state == "open":
         return "OPEN"
-    if state in ("closed", "premarket", "postmarket"):
+    if state in ("closed", "premarket", "postmarket", "pre", "post"):     # "pre"/"post": Robinhood's clock (2.10)
         return "CLOSED"
     ny = now.astimezone(NY)          # no clock: weekday regular hours
     if ny.weekday() < 5 and MARKET_OPEN <= (ny.hour, ny.minute) < MARKET_CLOSE:

@@ -777,6 +777,36 @@ def build_router(svc: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return clean({"sent_to": to, "subject": subject})
 
+    # --- live news and moves (2.10): news as it arrives, the price's answer, a card when it confirms ----------
+    from .livenews import LiveFeed
+    live = svc.live_feed if getattr(svc, "live_feed", None) else LiveFeed(svc, morning, analyst)
+    svc.live_feed = live                              # not svc.live: that is the live option quote (/api/live)
+    if svc.settings.features.get("live_news"):
+        try:
+            live.resume_if_wanted()                   # LIVE_NEWS_AUTOSTART=1, or it was on when the app last stopped
+        except Exception:                             # noqa: BLE001 - the app starts whatever happens here
+            log.exception("Live news could not be resumed at startup")
+
+    @router.get("/live")
+    def live_snapshot(after: int = 0, all_symbols: bool = False, limit: int = 150):
+        need("live_news")
+        return clean(live.snapshot(after=max(0, after), limit=max(1, min(limit, 500)), all_symbols=all_symbols))
+
+    @router.post("/live/start")
+    def live_start():
+        need("live_news")
+        if not live.source_names():
+            raise HTTPException(status_code=400, detail="No news source is set up. " + " ".join(live.setup_notes()))
+        try:
+            return clean(live.start())
+        except RuntimeError as exc:                   # still finishing the pass it was on when stopped
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.post("/live/stop")
+    def live_stop():
+        need("live_news")
+        return clean(live.stop())
+
     # --- your trade history (2.6): imported read-only, analysed locally ---------------------------------
     from .tradehistory import HistoryImportError, TradeHistory
     history = svc.history if getattr(svc, "history", None) else TradeHistory(svc)

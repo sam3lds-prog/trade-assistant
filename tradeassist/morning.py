@@ -48,7 +48,8 @@ from .background import why as _why
 from .ideas import SCAN_PACE, earnings_within
 from .indicators import atr as atr_series
 from .indicators import rsi as rsi_series
-from .optionmath import NY
+from .optionmath import NY, black76_price
+from .pricer import age_seconds, fair_value
 from .providers.base import DataError
 from .scanner import TOP_200
 from .sectors import TICKER_FUND
@@ -74,6 +75,11 @@ MIN_RECORD_CASES = 30
 FADE_IV_SETTLE = -0.05         # option values at a fade's target assume implied volatility settles 5 points
 WATCH_SECONDS = 60
 MAX_WATCH_SYMBOLS = 40
+PREOPEN_MOVE = 0.0025          # 2.10: the stock moved more than this since the close, so last session's option
+                               # quote is for another stock price and the contract is repriced instead
+OPEN_STATES = ("open",)
+PRE_STATES = ("premarket", "pre")   # Tradier says "premarket", Robinhood's clock "pre"
+POST_STATES = ("postmarket", "post")
 
 
 def movers_universe(watchlist: list[str]) -> list[str]:
@@ -93,13 +99,36 @@ def floor_tick(price: float) -> float:
     return max(t, math.floor(price / t + 1e-9) * t)
 
 
+def _floor_valid(price: float, rule: Any = None) -> float:
+    """The highest valid option price at or below `price`: on the chain's own increments when known (2.10),
+    else the usual penny-under-$3, nickel-above rule. Never below one increment."""
+    if rule is None:
+        return floor_tick(price)
+    c = int(math.floor(price * 100 + 1e-6))
+    c -= c % rule.tick_at(c)
+    return max(c, rule.tick_at(1)) / 100
+
+
+def _step_down(price: float, rule: Any = None) -> float:
+    """The next valid price below `price` (one increment down), never below one increment."""
+    if rule is None:
+        return max(floor_tick(price - tick_of(price)), 0.01)
+    return _floor_valid(price - 0.005, rule)
+
+
 def limit_prices(*, mid: float, bid: float | None, value_at_target: float, value_at_stop: float,
-                 min_payoff: float) -> dict[str, Any]:
+                 min_payoff: float, fair: float | None = None, fair_basis: str | None = None,
+                 rule: Any = None) -> dict[str, Any]:
     """The limit arithmetic. `value_at_target` and `value_at_stop` are the contract's per-share values on
     the horizon date with the stock at target 1 and at the stop. Paying P risks (P − value_at_stop) to make
     (value_at_target − P), so the **cap** is the price where that ratio equals `min_payoff`:
     P = (V_t + r·V_s) / (1 + r). Above the cap the trade pays less than `min_payoff` times what it risks
-    even when the stock does what the plan says."""
+    even when the stock does what the plan says.
+
+    2.10: the suggested price starts from `fair` (entry_estimate: the fair price from the quote's evidence,
+    or before the open the contract repriced at the stock's current price), not from the midpoint, and it
+    sits on the chain's own price increments when `rule` (a pricer.TickRule) is given."""
+    price = fair if fair is not None and fair > 0 else mid
     v_t, v_s = max(value_at_target, 0.0), max(value_at_stop, 0.0)
     r = max(min_payoff, 0.1)
     cap = (v_t + r * v_s) / (1 + r)
@@ -110,18 +139,106 @@ def limit_prices(*, mid: float, bid: float | None, value_at_target: float, value
         return {"viable": False, "cap": cap, "why": f"The price where target 1 pays {r:g} times what the stop loses "
                                                     "is under a cent, so no tradable price passes. The shares are "
                                                     "suggested instead."}
-    suggested = floor_tick(min(mid, cap))
-    patient = max(floor_tick(suggested - tick_of(suggested)), 0.01)
+    suggested = _floor_valid(min(price, cap), rule)
+    patient = _step_down(suggested, rule)
     payoff = (v_t - suggested) / max(suggested - v_s, 1e-9)
-    out = {"viable": True, "fair": mid, "cap": floor_tick(cap), "suggested": suggested, "patient": patient,
+    out = {"viable": True, "fair": price, "mid": mid, "fair_basis": fair_basis or "The midpoint.",
+           "cap": _floor_valid(cap, rule), "suggested": suggested, "patient": patient,
            "payoff_at_suggested": payoff, "value_at_target": v_t, "value_at_stop": v_s, "min_payoff": r}
-    if mid > cap:
+    if price > cap:
         out["viable"] = False
-        out["why"] = (f"The midpoint (${mid:,.2f}) is above the cap (${floor_tick(cap):,.2f}), the price where "
-                      f"target 1 pays {r:g} times what the stop loses: at today's prices the option costs more "
+        out["why"] = (f"The fair price (${price:,.2f}) is above the cap (${_floor_valid(cap, rule):,.2f}), the price "
+                      f"where target 1 pays {r:g} times what the stop loses: at today's prices the option costs more "
                       "than the move pays. The shares are suggested instead.")
     if bid is not None and suggested < bid - 1e-9:
         out["below_bid"] = True
+    return out
+
+
+def last_session_date(now: datetime | None = None) -> Any:
+    """The date of the regular session whose closing quotes an option chain shows outside regular hours: today
+    from 4 p.m. New York time on a weekday, else the weekday before (market holidays are not known here)."""
+    now = (now or datetime.now(NY)).astimezone(NY)
+    day = now.date()
+    if now.weekday() < 5 and (now.hour, now.minute) >= (16, 0):
+        return day
+    day -= timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def entry_estimate(row: dict[str, Any], analyses: list[Any], entry: float, clock: str,
+                   ref_close: float | None, rule: Any = None) -> dict[str, Any]:
+    """2.10: what to pay now for a card's contract, with how it was worked out. `entry` is the stock's price
+    now (not a planned entry: the limit is typed now, against today's stock). `ref_close` is the close of the
+    session the option quotes come from, or None when it could not be confirmed (Morning.card checks its date).
+
+    - While options trade: the fair price from the quote's evidence (pricer.fair_value: midpoint, model value,
+      size-weighted midpoint, a recent trade), never above the midpoint.
+    - Outside regular hours the quotes are that session's closing quotes. When the stock has moved since, the
+      quote is for another stock price, so the contract is repriced: Black-76 at the volatility its own last
+      midpoint implies against the forward at that close, with the forward moved by entry / close (sticky
+      strike). Before 2.10 the card used the old midpoint, which for a fade (puts after a gap up, calls after
+      a gap down) priced the contract well above where it opens.
+    - When the close or the clock cannot be read, nothing is repriced and the basis says so (`unchecked`)."""
+    from .optionmath import implied_vol
+    from .pricer import to_cents
+    mid = float(row["mid"])
+    a = next((x for x in analyses if getattr(x, "expiration", None) == row.get("expiration")), None)
+    c = a.find(row["option_symbol"]) if a is not None and row.get("option_symbol") else None
+    out: dict[str, Any] = {"price": mid, "mid": mid, "repriced": False, "unchecked": True, "evidence": [],
+                           "basis": "The midpoint (the contract's chain row was not found)."}
+    if a is None or c is None or not (a.spot and a.spot > 0 and a.forward and a.forward > 0 and entry > 0):
+        return out
+    tick = rule.tick_at(to_cents(mid)) if rule is not None else 1
+    strike, kind = float(c["strike"]), c["option_type"]
+
+    def from_quote(model_value: Any, live: bool, note: str, unchecked: bool) -> dict[str, Any]:
+        f = fair_value(c.get("bid"), c.get("ask"), "buy", model_value=model_value, bidsize=c.get("bidsize"),
+                       asksize=c.get("asksize"), last=c.get("last"), last_age_seconds=age_seconds(c.get("trade_time")),
+                       quote_live=live, fill_prices=c.get("fill_prices"), tick_cents=tick)
+        if f is None:
+            return out
+        out.update({"price": f["anchor"], "basis": f["basis"] + note, "evidence": f["evidence"], "unchecked": unchecked})
+        return out
+
+    vol = c.get("model_vol") or c.get("iv")
+    if clock in OPEN_STATES:
+        model_now = (black76_price(a.forward * entry / a.spot, strike, a.t, a.rate, float(vol), kind)
+                     if vol and vol > 0 and a.t > 0 else None)
+        return from_quote(model_now, True, "", False)
+    if clock not in (*PRE_STATES, *POST_STATES, "closed"):
+        return from_quote(c.get("model_value"), False, " The market clock could not be read, so whether these quotes "
+                                                       "are live is unknown: check them against Robinhood.", True)
+    if not ref_close or ref_close <= 0:
+        return from_quote(c.get("model_value"), False, " Option quotes are the last session's, and the close they were "
+                                                       "made at could not be confirmed, so any move since is not allowed "
+                                                       "for: price it live after 9:30.", True)
+    moved = entry / ref_close - 1.0
+    if abs(moved) < PREOPEN_MOVE:
+        return from_quote(c.get("model_value"), False, " Quotes are the last session's; the stock has not moved enough "
+                                                       "since to reprice them.", False)
+    # The forward at that close: parity on those very quotes, or the carry forward rebuilt from the close.
+    f_ref = a.forward if a.forward_method == "parity" else a.forward * ref_close / a.spot
+    own = implied_vol(mid, f_ref, strike, a.t, a.rate, kind) if a.t > 0 else None
+    vol_used = own or vol
+    if not vol_used or vol_used <= 0 or a.t <= 0:
+        return from_quote(c.get("model_value"), False, " The stock has moved since the close but the contract's "
+                                                       "volatility is unknown, so it is not repriced: price it live "
+                                                       "after 9:30.", True)
+    price = float(black76_price(f_ref * entry / ref_close, strike, a.t, a.rate, float(vol_used), kind))
+    out.update({"price": price, "repriced": True, "unchecked": False, "basis": (
+        f"Option quotes are the last session's, made with the stock at ${ref_close:,.2f}; it is now ${entry:,.2f} "
+        f"({100 * moved:+.1f}%). The contract is repriced at that stock price with "
+        f"{'the volatility its last midpoint implies' if own else 'the chain model volatility'} "
+        f"({100 * float(vol_used):.0f}%): the midpoint of ${mid:,.2f} is for the old price. Implied volatility often "
+        "jumps at the open after a gap, which makes the contract dearer than this: price it live after 9:30 before you "
+        "trust the limit."),
+        "evidence": [{"key": "midpoint", "label": "Last session's midpoint", "price": mid, "used": False,
+                      "note": "Quoted when the stock was at its close; not used."},
+                     {"key": "repriced", "label": "Repriced at the stock's price now", "price": price, "used": True,
+                      "note": "Black-76, the forward moved with the stock, at the contract's own volatility."}]})
     return out
 
 
@@ -438,7 +555,8 @@ class Morning:
             earnings = self.svc._earnings(symbol, None)
             opt = evaluate(symbol=symbol, direction=d, spot=entry, analyses=analyses, target_1=target_1,
                            target_2=target_2, invalidation=stop, horizon=horizon_days,
-                           rate=s.risk_free_rate, contracts=1, earnings=earnings, entry=entry)
+                           rate=s.risk_free_rate, contracts=1, earnings=earnings, entry=entry,
+                           quote_live=clock in OPEN_STATES)
         except (DataError, ValueError) as exc:
             card["notes"].append(f"No contract: {exc}. The shares carry the plan.")
             card["order_text"] = self._order_text(card, None)
@@ -455,8 +573,38 @@ class Morning:
             return card
         shift = FADE_IV_SETTLE if setup == "fade" else 0.0
         v_t, v_s = _scenario_values(row, shift)
-        limits = limit_prices(mid=float(row["mid"]), bid=row.get("bid"), value_at_target=v_t,
-                              value_at_stop=v_s, min_payoff=s.morning_min_payoff)
+        ref_close = None
+        if clock not in OPEN_STATES:
+            # The close the option quotes belong to, only when the saved history reaches that very session (a
+            # failed refresh or the minutes before a bar is final leave it unconfirmed, and nothing is repriced).
+            try:
+                done = self.svc.market.bars(symbol, 0.3, complete=True)
+                if done["date"].iloc[-1].date() == last_session_date():
+                    ref_close = float(done["close"].iloc[-1])
+            except Exception:                         # noqa: BLE001 - unconfirmed: the estimate says so
+                ref_close = None
+        a_row = next((x for x in analyses if x.expiration == row.get("expiration")), None)
+        rule = None
+        if a_row is not None:
+            from .pricer import tick_rule
+            rule = tick_rule([q for k in a_row.contracts for q in (k.get("bid"), k.get("ask"))],
+                             next((k.get("min_ticks") for k in a_row.contracts if k.get("min_ticks")), None))
+        # The stock's price now, which is not always the card's entry: a thesis on Decide can plan an entry
+        # away from today's price, but the limit is typed today.
+        stock_now = entry
+        if setup in ("analysis", "manual"):
+            try:
+                last = self.svc.market.quote(symbol).get("last")
+                stock_now = float(last) if last and last > 0 else entry
+            except DataError:
+                stock_now = entry
+        est = entry_estimate(row, analyses, stock_now, clock or "unknown", ref_close, rule)
+        limits = limit_prices(mid=float(row["mid"]), bid=row.get("bid") if clock in OPEN_STATES else None,
+                              value_at_target=v_t, value_at_stop=v_s, min_payoff=s.morning_min_payoff,
+                              fair=est["price"], fair_basis=est["basis"], rule=rule)
+        limits["fair_evidence"] = est["evidence"]
+        limits["repriced"] = est["repriced"]
+        limits["unchecked"] = est["unchecked"]
         option = {"option_type": row["option_type"], "strike": row["strike"], "expiration": row["expiration"],
                   "dte": row["dte"], "bid": row.get("bid"), "ask": row.get("ask"), "mid": row.get("mid"),
                   "delta": row.get("delta"), "iv": row.get("iv"), "open_interest": row.get("open_interest"),
@@ -664,7 +812,7 @@ class Morning:
             notes.insert(0, "Demo prices and headlines are synthetic: this plan says nothing about real stocks.")
         basis = ("Live prices." if clock == "open" else
                  "Stock prices are pre-market; option prices are the previous close's (options trade 9:30–16:00 "
-                 "New York time)." if clock == "premarket" else
+                 "New York time)." if clock in PRE_STATES else
                  "The market is closed: prices are the last session's.")
         return {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "day": datetime.now(NY).date().isoformat(),
                 "seconds": round(time.time() - started, 1), "clock": clock, "price_basis": basis,
@@ -830,7 +978,7 @@ class WatchChecker:
         if not active:
             return False
         state = self.svc.market.clock().get("state")
-        if state not in ("open", "premarket"):
+        if state not in ("open", *PRE_STATES):         # 2.10: Robinhood's clock says "pre", Tradier's "premarket"
             if state == "unknown":
                 log.info("Watches not checked: the market clock is unavailable")
             return True

@@ -48,6 +48,24 @@ def _int(name: str, default: int) -> int:
     return int(_float(name, default))
 
 
+def _flag(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be 1 or 0, got {raw!r}")
+
+
+def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    raw = (os.getenv(name) or "").strip().lower() or default
+    if raw not in allowed:
+        raise ValueError(f"{name} must be one of {', '.join(allowed)}, got {raw!r}")
+    return raw
+
+
 @dataclass(frozen=True)
 class Settings:
     live_token: str = field(default="", repr=False)
@@ -103,6 +121,17 @@ class Settings:
     email_to: str = ""                 # where the morning plan goes; SMTP_USER when empty
     # 2.8: the limit-price cap: reaching target 1 must pay at least this many times what the stop loses.
     morning_min_payoff: float = 1.0
+
+    # 2.10: live news and moves. RTPR (rtpr.io, a paid real-time press-release feed) is optional; SEC 8-K filings
+    # (SEC_USER_AGENT) and Finnhub headlines (FINNHUB_API_KEY) are used when set. The key never leaves the server.
+    rtpr_api_key: str = field(default="", repr=False)
+    live_universe: str = "large"            # large: the ~330 large stocks plus watchlist and holdings; all: any ticker
+    live_min_reaction_pct: float = 1.0      # a move since the news of at least this percent...
+    live_min_reaction_atr: float = 0.3      # ...and this many of the stock's daily ranges
+    live_min_day_atr: float = 1.5           # when the news reached us late: the day's move in daily ranges...
+    live_min_day_pct: float = 3.0           # ...and in percent
+    live_news_email: bool = False           # email each new opportunity and each alert on a stock you hold
+    live_news_autostart: bool = False       # start listening when the app starts
 
     # V2 areas that can be switched off (see features.py)
     features: dict[str, bool] = field(default_factory=lambda: dict(FEATURE_DEFAULTS))
@@ -183,12 +212,23 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         smtp_password=(os.getenv("SMTP_PASSWORD") or "").strip(),
         email_to=_clean_token(os.getenv("EMAIL_TO")),
         morning_min_payoff=_float("MORNING_MIN_PAYOFF", 1.0),
+        rtpr_api_key=_clean_token(os.getenv("RTPR_API_KEY")),
+        live_universe=_choice("LIVE_UNIVERSE", "large", ("large", "all")),
+        live_min_reaction_pct=_float("LIVE_MIN_REACTION_PCT", 1.0),
+        live_min_reaction_atr=_float("LIVE_MIN_REACTION_ATR", 0.3),
+        live_min_day_atr=_float("LIVE_MIN_DAY_ATR", 1.5),
+        live_min_day_pct=_float("LIVE_MIN_DAY_PCT", 3.0),
+        live_news_email=_flag("LIVE_NEWS_EMAIL"),
+        live_news_autostart=_flag("LIVE_NEWS_AUTOSTART"),
         features=load_features(),
         freshness=freshness_thresholds(),
     )
     for name, value in (("ACCOUNT_SIZE", settings.account_size), ("MAX_RISK_PER_TRADE_PCT", settings.max_risk_per_trade_pct),
                         ("MAX_OPEN_RISK_PCT", settings.max_open_risk_pct),
-                        ("DAILY_LOSS_STOP_PCT", settings.daily_loss_stop_pct)):
+                        ("DAILY_LOSS_STOP_PCT", settings.daily_loss_stop_pct),
+                        ("LIVE_MIN_REACTION_PCT", settings.live_min_reaction_pct),
+                        ("LIVE_MIN_REACTION_ATR", settings.live_min_reaction_atr),
+                        ("LIVE_MIN_DAY_ATR", settings.live_min_day_atr), ("LIVE_MIN_DAY_PCT", settings.live_min_day_pct)):
         if value <= 0:
             raise ValueError(f"{name} must be above zero, got {value:g}")
     return settings

@@ -113,6 +113,43 @@ class SecClient:
                     raise ResearchError("The SEC's ticker list has an unreadable entry for this symbol") from exc
         raise ResearchError(f"{ticker} is not in the SEC's ticker list (funds and some foreign companies are not).")
 
+    def tickers_for_cik(self, cik: int) -> list[str]:
+        """2.10: the tickers the SEC lists for a company (a company can have several share classes), in the
+        app's spelling (BRK.B). Empty when the company has none, as funds and some foreign issuers do."""
+        table = self._get_json(TICKER_MAP_URL, "sec:tickers", 7 * 86400)
+        if getattr(self, "_cik_map_source", None) is not table:
+            index: dict[int, list[str]] = {}
+            for row in (table.values() if isinstance(table, dict) else table):
+                try:
+                    index.setdefault(int(row["cik_str"]), []).append(str(row["ticker"]).upper().replace("-", "."))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self._cik_map, self._cik_map_source = index, table
+        return list(self._cik_map.get(int(cik), []))
+
+    def get_text(self, url: str, timeout: float = 15) -> str:
+        """A plain GET with the SEC's required User-Agent and the same pacing as the JSON reads (2.10: the
+        current-filings feed, which is Atom XML)."""
+        if not self.enabled:
+            raise ResearchError("Set SEC_USER_AGENT in .env to read SEC filings.")
+        with self._lock:
+            wait = MIN_INTERVAL - (time.time() - self._last_request)
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                resp = self._session.get(url, headers={"User-Agent": self.user_agent,
+                                                       "Accept-Encoding": "gzip, deflate"}, timeout=timeout)
+            except requests.RequestException as exc:
+                raise ResearchError(f"Could not reach the SEC: {exc.__class__.__name__}") from exc
+            finally:
+                self._last_request = time.time()
+        if resp.status_code == 403:
+            raise ResearchError("The SEC refused the request. Check that SEC_USER_AGENT names you and gives "
+                                "a contact email.")
+        if resp.status_code != 200:
+            raise ResearchError(f"SEC request failed: HTTP {resp.status_code}")
+        return resp.text
+
     def submissions(self, cik: int) -> dict[str, Any]:
         return self._get_json(SUBMISSIONS_URL.format(cik=cik), f"sec:submissions:{cik}", 6 * 3600)
 

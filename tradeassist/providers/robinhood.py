@@ -63,7 +63,22 @@ INSTRUMENT_TTL = 6 * 3600.0
 
 NO_QUOTE: dict[str, Any] = {"bid": None, "ask": None, "bidsize": None, "asksize": None, "last": None, "volume": 0.0,
                             "open_interest": 0.0, "bid_time": None, "ask_time": None, "trade_time": None,
-                            "prevclose": None}
+                            "prevclose": None, "fill_prices": None}
+
+# 2.10: Robinhood's option market data has carried its own estimates of a buy or sell price likely (and less
+# likely) to fill. Read when the reply has them, shown beside the fair price for reference, never used in it.
+FILL_PRICE_FIELDS = {"buy_likely": ("high_fill_rate_buy_price",), "buy_less_likely": ("low_fill_rate_buy_price",),
+                     "sell_likely": ("high_fill_rate_sell_price",), "sell_less_likely": ("low_fill_rate_sell_price",)}
+
+
+def fill_prices(raw: dict[str, Any]) -> dict[str, float] | None:
+    """Robinhood's fill-likelihood prices in a quote, when present and usable; None otherwise."""
+    out = {}
+    for key, names in FILL_PRICE_FIELDS.items():
+        value = num(pick(raw, *names))
+        if value is not None and value > 0:
+            out[key] = value
+    return out or None
 
 
 def is_market_data_tool(name: str, annotations: Any = None) -> bool:
@@ -541,6 +556,7 @@ class RobinhoodData:
                 "bid_time": bid_time, "ask_time": ask_time, "trade_time": trade_time,
                 "prevclose": num(pick(raw, "previous_close_price", "previous_close", "adjusted_previous_close",
                                       "official_close")),
+                "fill_prices": fill_prices(raw),
                 "greeks": {"delta": num(pick(greeks_raw, "delta")), "gamma": num(pick(greeks_raw, "gamma")),
                            "theta": num(pick(greeks_raw, "theta")), "vega": num(pick(greeks_raw, "vega")),
                            "bid_iv": None, "mid_iv": iv, "ask_iv": None, "smv_vol": None,

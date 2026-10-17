@@ -4,4 +4,4 @@ This package never places orders. It reads market data, computes prices and
 risk checks, and keeps a journal. Orders are entered by hand at the broker.
 """
 
-__version__ = "2.9.0"
+__version__ = "2.10.0"

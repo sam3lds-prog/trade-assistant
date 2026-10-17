@@ -28,6 +28,7 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "trade_history": True,
     "trade_ideas": True,
     "morning": True,
+    "live_news": True,
     "options_backtest": False,
 }
 

@@ -7,6 +7,8 @@ scipy>=1.13
 requests>=2.31
 python-dotenv>=1.0
 pydantic>=2.5
+# 2.10: the RTPR press-release stream (optional; without it RTPR is polled every five minutes)
+websockets>=13
 # Robinhood data connection (DATA_MODE=robinhood). Version 2 of this package is required.
 mcp>=2.2,<3
 

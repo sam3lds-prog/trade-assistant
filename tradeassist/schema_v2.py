@@ -498,3 +498,54 @@ def morning_tables(cur: sqlite3.Cursor) -> None:
         triggered_price REAL,
         emailed         INTEGER NOT NULL DEFAULT 0
     )""")
+
+
+@migration(14, "live news items and the price signals they set off")
+def live_news_tables(cur: sqlite3.Cursor) -> None:
+    """2.10: stock-moving news as it arrived (press releases, 8-K filings, headlines) and, per stock, what the
+    price did after it: watched, turned into a trade card, or no reaction. Records only; nothing here can place
+    an order. Kept for a week (livenews.KEEP_DAYS)."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS live_news (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        source       TEXT NOT NULL,                 -- RTPR, SEC EDGAR, Finnhub or Demo
+        external_id  TEXT NOT NULL,                 -- the source's own id, so an item is kept once
+        symbols      TEXT NOT NULL DEFAULT '[]',    -- JSON list of tickers
+        headline     TEXT NOT NULL,
+        summary      TEXT NOT NULL DEFAULT '',
+        url          TEXT,
+        kind         TEXT NOT NULL DEFAULT 'news',  -- press_release, filing or news
+        published_at TEXT,
+        received_at  TEXT NOT NULL,
+        tone         REAL,
+        extra_json   TEXT,                          -- impact score, rule names, filing items
+        UNIQUE (source, external_id)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_live_news_received ON live_news (received_at)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS live_signals (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol        TEXT NOT NULL,
+        news_id       INTEGER NOT NULL REFERENCES live_news (id) ON DELETE CASCADE,
+        news_ids      TEXT NOT NULL DEFAULT '[]',   -- later items on the same stock that joined this signal
+        opened_at     TEXT NOT NULL,
+        state         TEXT NOT NULL CHECK (state IN ('waiting', 'watching', 'opportunity', 'no_reaction',
+                                                      'stopped', 'done', 'skipped')),
+        direction     TEXT CHECK (direction IN ('LONG', 'SHORT')),
+        path          TEXT,                         -- reaction or day_move
+        opportunity_at TEXT,                        -- when the move confirmed; it is watched for an hour after
+        ref_price     REAL,                         -- the stock when the item arrived
+        ref_at        TEXT,
+        prev_close    REAL,
+        atr           REAL,
+        last_price    REAL,
+        last_at       TEXT,
+        checks        INTEGER NOT NULL DEFAULT 0,
+        checks_json   TEXT NOT NULL DEFAULT '[]',
+        next_check_at TEXT,
+        card_json     TEXT,
+        holdings_json TEXT,
+        reason        TEXT,
+        emailed       INTEGER NOT NULL DEFAULT 0,
+        updated_at    TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_live_signals_symbol ON live_signals (symbol, opened_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_live_signals_due ON live_signals (state, next_check_at)")
