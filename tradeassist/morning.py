@@ -288,7 +288,8 @@ def classify(*, ranges: float | None, move_pct: float, direction: int, news_stat
                 "why": f"No news found behind a {ranges:.1f}-range move, and it looks overextended "
                        f"({', '.join(overext_why)}): moves like this have tended to reverse ({word})."}
     if news_state == "unchecked":
-        why = "News could not be checked (no source set up, or the check failed), so neither setup applies."
+        why = ("News could not be checked or ruled out (no source set up, the check failed, or headlines came back "
+               "that could not be matched to the stock), so neither setup applies.")
     elif ranges < RIDE_MIN_RANGES:
         why = f"An ordinary move for this stock ({ranges:.1f} of its daily ranges)."
     elif news_state == "no_news" and ranges < FADE_MIN_RANGES:
@@ -465,7 +466,7 @@ class Morning:
             return {"state": "unchecked", "label": "News not checked (no Finnhub key, no SEC contact, search off)",
                     "items": []}
         try:
-            got = client.company(symbol, days=3, deep=True)
+            got = client.company(symbol, days=3, deep=True, fresh_hours=NEWS_HOURS)
         except Exception as exc:                      # noqa: BLE001 - news failing must not sink the plan
             return {"state": "unchecked", "label": f"News check failed ({_why(exc)})", "items": []}
         fresh = []
@@ -475,6 +476,13 @@ class Morning:
                               "published": it.get("published"), "url": it.get("url")})
         if got.get("errors") and not fresh:
             return {"state": "unchecked", "label": "News check failed; not treated as no news", "items": []}
+        if not fresh and got.get("unmatched"):
+            # 2.11: a search returned recent headlines that could not be tied to this stock (a name that is also
+            # a word, a brand the name list does not know). That is not "no news", so the fade does not apply.
+            n = int(got["unmatched"])
+            return {"state": "unchecked", "items": [],
+                    "label": f"News not ruled out: the search found {n} recent headline{'s' if n != 1 else ''} that "
+                             f"may be about {symbol} but could not be matched to it; read them before fading"}
         if not fresh:
             return {"state": "no_news", "label": f"No news found (last {NEWS_HOURS}h: "
                                                  f"{', '.join(got.get('sources') or []) or 'nothing checked'})",

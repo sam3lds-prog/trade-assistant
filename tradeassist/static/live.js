@@ -160,12 +160,13 @@ function buildLive() {
       el("strong", { text: s.name }), ` ${LIVE_SOURCE_WORDS[s.state] || s.state}`,
       s.items ? el("span", { class: "muted", text: ` · ${s.items} item${s.items === 1 ? "" : "s"}` }) : "",
       s.name === "Brave" && d.search && d.search.brave_usage ? el("span", { class: "muted",
-        text: ` · ${d.search.brave_usage.month} of ${d.search.brave_usage.month_limit} this month` }) : "")));
+        text: ` · ${d.search.brave_usage.month} of ${d.search.brave_usage.month_limit} in ${d.search.brave_usage.window_days || 31} days` }) : "")));
     if (!(d.sources || []).length) sourcesBox.replaceChildren(el("span", { class: "small muted", text: "No news source is set up yet." }));
     const notes = [];
     if (d.mode === "demo") notes.push(banner("warn", "Demo data: the news items and the price moves after them are made up, so you can learn the screen on any day."));
     if (d.session === "closed") notes.push(banner("info", "The market is closed: news is collected now, and each stock is priced when trading resumes (pre-market included)."));
     for (const s of d.sources || []) if (s.state === "failed" && s.note) notes.push(banner("fail", s.note));
+    if (d.search && d.search.google_paused_until) notes.push(banner("warn", `Google News refused a search, so it is paused until ${clockTime(d.search.google_paused_until).slice(0, 5)} New York time; it resumes by itself.`));
     for (const n of d.setup_notes || []) notes.push(el("p", { class: "small muted", text: n }));
     notesBox.replaceChildren(...notes);
     const t = d.thresholds || {};

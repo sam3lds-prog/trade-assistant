@@ -224,17 +224,21 @@ class NewsClient:
             out.append(it)
         return out
 
-    def company(self, symbol: str, days: int = 7, deep: bool = False) -> dict[str, Any]:
-        """Headlines and filings for one stock. With search on (2.11), Google News is searched too; with `deep`
-        (the Morning plan's ride-or-fade check), Brave is also asked when nothing at all was found, so "no news"
-        rests on more than one source."""
+    def company(self, symbol: str, days: int = 7, deep: bool = False, fresh_hours: int | None = None) -> dict[str, Any]:
+        """Headlines and filings for one stock. With search on (2.11), Google News is searched too (over
+        `fresh_hours`, else up to three days); with `deep` (the Morning plan's ride-or-fade check), Brave is also
+        asked when nothing inside `fresh_hours` was found by the other sources.
+
+        Adds "unmatched" (search results inside the window that could not be tied to the stock) and "skipped"
+        (searches a limit did not allow), so a caller can tell "nothing came back" from "not sure"."""
         symbol = symbol.upper()
         days = min(DAY_CHOICES, key=lambda d: (abs(d - int(days)), d))   # a few windows, so the cache stays small
-        key = f"news:company:{symbol}:{days}:{self.configured}:{self.demo}:{self.searchable}:{bool(deep)}"
+        key = (f"news:company:{symbol}:{days}:{self.configured}:{self.demo}:{self.searchable}:{bool(deep)}:"
+               f"{fresh_hours or ''}")
         hit = self.db.cache_get(key, CACHE_SECONDS)
         if hit is not None:
             return {**hit, "cached": True}
-        items, errors, sources = [], [], []
+        items, errors, sources, skipped, unmatched = [], [], [], [], 0
         today = datetime.now(NY)
         if self.configured:
             try:
@@ -257,17 +261,29 @@ class NewsClient:
             if "ticker list" not in str(exc):            # funds and some foreign companies do not file: not a failure
                 errors.append(self._failed("SEC filings", exc))
         if self.searchable:
+            hours = int(fresh_hours or min(days * 24, 72))
+            since = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+            def fresh(it: dict[str, Any]) -> bool:
+                try:
+                    when = datetime.fromisoformat(str(it.get("published")).replace("Z", "+00:00"))
+                    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)) >= since
+                except ValueError:
+                    return False
             try:
-                got = self.search.search(symbol, hours=min(days * 24, 72), brave="fallback" if deep else "never",
-                                         have=len(items))
+                got = self.search.search(symbol, hours=hours, brave="fallback" if deep else "never",
+                                         have=sum(1 for it in items if fresh(it)))
                 items += got["items"]
                 sources += [c for c in got["checked"] if c not in sources]
                 errors += got["errors"]
+                skipped += got.get("skipped") or []
+                unmatched += int(got.get("unmatched") or 0)
             except Exception as exc:                     # noqa: BLE001 - search is a bonus; its failure is reported
                 errors.append(self._failed("news search", exc))
         items = self._dedupe(items)[:MAX_ITEMS]
         out = {"symbol": symbol, "days": days, "items": items, "tone": summarize_tone(items), "sources": sources,
-               "errors": errors, "finnhub": self.configured, "demo": self.demo,
+               "errors": errors, "skipped": skipped, "unmatched": unmatched, "finnhub": self.configured,
+               "demo": self.demo,
                "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "notes": self._notes()}
         if not errors:
             self.db.cache_put(key, out)

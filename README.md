@@ -89,12 +89,14 @@ orders and holdings through the Robinhood connection, read-only.
 
 Version 2.11 finds news by searching, at no cost, so the news checks no longer depend on a paid feed.
 
-- **Google News search** (free, no key, on by default) is searched for each stock by its company name and
-  ticker. Results count only when the headline names the company, so "Visa" news is not taken for every
-  "V". It feeds the news on Analyze, the Morning plan's ride-or-fade check and Live news.
+- **Google News search** (free, no key, on by default) is searched for each stock by the names news uses
+  for it (Google for Alphabet, BofA for Bank of America) and its ticker. A result counts only when its
+  headline names the company, so a student-visa story is not Visa news and "UK PM" is not Philip Morris.
+  It feeds the news on Analyze, the Morning plan's ride-or-fade check and Live news.
 - **Brave news search** (optional, `BRAVE_API_KEY`) is asked only when nothing else found news. Brave no
-  longer has a free plan: its $5 monthly credit buys about 1,000 searches, and the app stops at 900 a
-  month (`BRAVE_MONTHLY_LIMIT`) so the credit is never exceeded.
+  longer has a free plan: its $5 monthly credit buys about 1,000 searches. The app counts each search in
+  its database before sending it and stops at 900 in any 31 days (`BRAVE_MONTHLY_LIMIT`), so no billing
+  month can pass the credit.
 - **"Why is it moving?"** on Live news: every five minutes the app looks for stocks that moved 3% and
   1.5 daily ranges since the close with nothing in the feed, searches the news for them, and lists what
   it found. News found joins the feed and is judged like any other item. A big move with no news found is
@@ -161,8 +163,8 @@ What to put in `.env`:
 | `ACCOUNT_SIZE` and the limits | The sizing checks are percentages of this. The default is a placeholder of $10,000. |
 | `SEC_USER_AGENT` | Your name and email, which the SEC requires. Switches on filings and the earnings-date estimate. |
 | `FINNHUB_API_KEY` | Optional (free at finnhub.io). Company and market headlines on the Market & news and Analyze screens. |
-| `GOOGLE_NEWS` | On unless set to 0. Searches Google News for each stock's news (free, no key; an unofficial personal-use feed, asked at most every two seconds). |
-| `BRAVE_API_KEY` | Optional (brave.com/search/api; needs a card, $5 of searches free each month, billed past that). Asked only when nothing else found news, and stopped at `BRAVE_MONTHLY_LIMIT` (900) and `BRAVE_DAILY_LIMIT` (40) so it stays inside the credit. |
+| `GOOGLE_NEWS` | On unless set to 0. Searches Google News for each stock's news (free, no key; an unofficial personal-use feed, asked once every two seconds at most, by the app and its morning email together). |
+| `BRAVE_API_KEY` | Optional (brave.com/search/api; needs a card, $5 of searches free each month, billed past that). Asked only when nothing else found news, and stopped at `BRAVE_MONTHLY_LIMIT` (900 in any 31 days) and `BRAVE_DAILY_LIMIT` (40) so it stays inside the credit. |
 | `RTPR_API_KEY` | Optional (rtpr.io; the paid plan, about $139 a month, streams press releases within about a second, and the free plan is five minutes late). The fastest source for Live news. In RTPR's dashboard, create the "All articles" rule: the stream sends what your rules match. Never sent anywhere but rtpr.io, and never logged. |
 | `ANTHROPIC_API_KEY` | Optional. Lets Claude write market and stock briefs with web sources, read headline tone, and read trade descriptions. Billed by Anthropic to that API account; capped by `AI_DAILY_REQUESTS`. Never sent to the browser or logged. |
 | `SMTP_USER`, `SMTP_PASSWORD` | Optional. The 7:00 morning email and trigger alerts. With Gmail, an app password from myaccount.google.com/apppasswords (2-Step Verification must be on). Any SMTP provider works through `SMTP_HOST`/`SMTP_PORT`; `EMAIL_TO` if the destination differs. The password never leaves `.env` except to the verified mail server. |
@@ -488,7 +490,7 @@ background, and keeps doing so while it runs. It remembers that it was on and re
 | RTPR | press releases from Business Wire, PR Newswire, GlobeNewswire and AccessWire | pushed over a WebSocket, about a second after the wire (paid plan) | `RTPR_API_KEY`, plus the "All articles" rule in RTPR's dashboard |
 | SEC EDGAR | 8-K filings: earnings releases, deals, guidance, executive changes | read once a minute; usually minutes behind the wire | `SEC_USER_AGENT` (free) |
 | Finnhub | headlines tagged with a ticker, general and for your watchlist | read once a minute | `FINNHUB_API_KEY` (free) |
-| Google News (2.11) | search results for your holdings, then your watchlist, four stocks every five minutes (the last six hours), and for movers with no news | minutes behind publication: a search engine has to index the story first | on unless `GOOGLE_NEWS=0` (free) |
+| Google News (2.11) | search results for your holdings, then your watchlist, four stocks every five minutes (every 30 while the market is closed; the last six hours), and for movers with no news | minutes behind publication: a search engine has to index the story first | on unless `GOOGLE_NEWS=0` (free) |
 | Brave (2.11) | news search, only for a mover that nothing else found news for | as Google News | `BRAVE_API_KEY`, capped by `BRAVE_MONTHLY_LIMIT` and `BRAVE_DAILY_LIMIT` |
 | Demo | made-up items whose made-up price moves let you learn the screen on any day | every 35 seconds | demo data only |
 
@@ -539,7 +541,18 @@ searches the news, six stocks a scan, and a stock where nothing was found is sea
   the day's-move rule above can turn it into an opportunity.
 - **No news found.** Said in so many words. A big move with no news found can snap back (the Morning
   plan's fade), so check it before riding it.
+- **Brave** is asked at most once a stock a day here, and half of `BRAVE_DAILY_LIMIT` is kept for the
+  Morning plan.
 - **Analyze** opens the stock in Decide, leaning the way it moved.
+- The list is the day's: it starts empty each morning. The searches run on their own thread, so a slow
+  search never delays the price checks.
+
+**One move, one opportunity.** A stock that already had an opportunity today gets no second one from a
+later story about the same move: search results and late headlines keep arriving for hours after a big
+move, and each would otherwise read as news behind it. The later story is listed, not traded.
+
+**After the close.** From 4 p.m. the day's move is measured from today's close, not yesterday's, so after-
+hours news is judged by what the stock did after the session.
 
 **Stocks you hold** get an alert: **against** you (consider selling, covering or tightening the stop) or
 **with** you.
@@ -567,8 +580,9 @@ Nothing here places an order. Switch the screen off with `FEATURE_LIVE_NEWS=0`.
    ranges, so 4% in a quiet stock counts for more than 4% in a volatile one.
 2. **Ride or fade.** A mover with fresh news (headlines or SEC filings within 36 hours) is read to keep
    going; a mover with no news found that was already overextended before the move is read to snap back.
-   Since 2.11 the check also searches Google News, and Brave when it is set up and nothing else found news,
-   so "no news" rests on more than one source. News that could not be checked says *not checked* — it is never treated as "no news". Each setup shows
+   Since 2.11 the check also searches Google News, and Brave when it is set up and nothing else found news
+   in the 36 hours. Headlines that came back but could not be tied to the stock leave the news *not ruled
+   out*, so the fade does not apply. News that could not be checked says *not checked* — it is never treated as "no news". Each setup shows
    its five-year past record on these stocks: how often the trade's way was ahead after the horizon.
    Frequencies, not forecasts, and history cannot say which old moves had news.
 3. **The trade card** has the whole plan: entry, stop, two targets, shares sized to your risk per trade,
@@ -849,15 +863,23 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
   (`tests/test_review_fixes.py`; listed in `docs/IMPROVEMENTS.md`).
 - 2.11 (news search):
   - Google News search feeds and Brave results are read from their published shapes; a feed carrying a
-    DOCTYPE or ENTITY declaration is refused, and a link that is not http(s) is dropped;
-  - a result counts only when its headline or summary names the company (a one-word name capitalised) or
-    a ticker that is not an everyday word; old results are dropped;
-  - Brave is asked only when nothing else found news, never past its monthly or daily limit (counted
-    before each request), and its key never appears in an error;
-  - Google refusing a search (429, 503 or a page that is not a feed) pauses it for 15 minutes;
+    DOCTYPE or ENTITY declaration anywhere is refused, a feed that does not read is a failed check (never
+    "no news"), and a link that is not http(s) is dropped;
+  - 45 real headlines are matched or not as a reader would: brand names (Google, BofA, P&G, onsemi), SEC
+    names ("WELLS FARGO & COMPANY/MN"), and the traps (student visa, UK PM, King Charles, Harrison Ford,
+    GE Vernova for GE, the Amazon rainforest, Nvidia's RTX cards);
+  - Brave is asked only when nothing fresh was found, never past its limit in any 31 days or its daily
+    limit, even from two copies of the app at once, never follows a redirect with the key, and its key
+    never appears in an error; a limit reached is "not asked", not a failure;
+  - Google refusing a search (403, 429, 503 or a page that is not a feed) pauses it for 15 minutes for
+    every copy of the app, and searches wait their turn two seconds apart across copies;
+  - the Morning plan's check reads headlines it could not tie to the stock, a failed search, or a refused
+    one as not "no news";
   - on demo data the movers scan finds the stocks that moved, searches at most six a scan, feeds the news
-    found into Live news, lists the rest as no news found, and does not search them again within the hour;
-  - the same headline from two sources is kept once;
+    found into Live news, lists the rest as no news found, does not search them again within the hour,
+    asks Brave once a stock a day, and starts a fresh list each day;
+  - after 4 p.m. the day's move is measured from today's close, and a stock is traded on once a day;
+  - the same headline from two sources is kept once, but two filings with the same title are both kept;
   - in Chromium: the "Why is it moving?" panel lists movers with their news and the Analyze button.
 
   Not checked against the real services, which this build environment cannot reach: Google News's feed and

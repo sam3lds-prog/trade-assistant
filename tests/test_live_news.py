@@ -149,7 +149,8 @@ def test_the_stop_sits_beyond_the_pre_news_price_and_targets_beyond_one_risk():
 
 @pytest.fixture
 def feed(tmp_path):
-    s = Settings(data_mode="demo", db_path=tmp_path / "t.db")
+    # The movers scan (2.11) is tested in tests/test_search_news.py; off here so these signals are the tests' own.
+    s = Settings(data_mode="demo", db_path=tmp_path / "t.db", live_mover_sweep_minutes=0)
     svc = TradeAssistant(s, provider=DemoData(), db=Database(tmp_path / "t.db"))
     analyst = Analyst(svc)
     return L.LiveFeed(svc, Morning(svc, analyst, s.features), analyst)
@@ -407,7 +408,9 @@ def test_a_stop_then_start_never_runs_two_loops(feed, monkeypatch):
     with pytest.raises(RuntimeError, match="still finishing"):
         feed.start()
     release.set()
-    feed._thread.join(10)
+    for t in (feed._thread, feed._search_thread):
+        if t is not None:
+            t.join(10)
     feed.start()
     try:
         loops = [t for t in threading.enumerate() if t.name == "live-news" and t.is_alive()]

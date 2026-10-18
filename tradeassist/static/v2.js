@@ -1918,7 +1918,7 @@ function renderHealth(h, reload) {
         metric(n.finnhub ? "Finnhub" : n.demo_headlines ? "Demo headlines" : "none", "Headlines from"),
         metric(n.sec ? "on" : "off", "SEC filings"),
         metric(n.search && n.search.sources && n.search.sources.length ? n.search.sources.join(", ") : "off", "News search"),
-        n.search && n.search.brave_usage ? metric(`${n.search.brave_usage.month} of ${n.search.brave_usage.month_limit}`, `Brave searches this month (${n.search.brave_usage.day} of ${n.search.brave_usage.day_limit} today)`) : null),
+        n.search && n.search.brave_usage ? metric(`${n.search.brave_usage.month} of ${n.search.brave_usage.month_limit}`, `Brave searches in the last ${n.search.brave_usage.window_days || 31} days (${n.search.brave_usage.day} of ${n.search.brave_usage.day_limit} today)`) : null),
       n.search && n.search.last_error ? el("p", { class: "small error", text: `Last search error (${timeText(n.search.last_error.at)}, ${n.search.last_error.source}): ${n.search.last_error.error}` }) : null,
       a.last_error ? el("p", { class: "small error", text: `Last AI error (${timeText(a.last_error.at)}): ${a.last_error.error}` }) : null,
       n.last_error ? el("p", { class: "small error", text: `Last news error (${timeText(n.last_error.at)}, ${n.last_error.what}): ${n.last_error.error}` }) : null,
