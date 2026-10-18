@@ -956,3 +956,64 @@ opens; `_unit_cash()` reading the amount with its fees; the assignment and exerc
 estimate; and that no route places an order.
 
 Tests: 911 passed, 2 skipped; ruff is clean.
+
+## 2.10: the fair price and Live news
+
+**The defect that started it.** The user reported that the option prices the app suggests are above what
+Robinhood fills at. Two causes were found in `a80c8c7`.
+
+| # | Finding on `a80c8c7` | Fix | Test |
+| --- | --- | --- | --- |
+| P1 | The ladder anchored on the midpoint and two of its three prices sat above it by design: `balanced` at 65% and `fast` at 80% of the way to the ask, and the walk ran to `fast`. The ticket's "Most you will pay" defaulted to `fast` | the ladder centres on `fair_value`'s anchor (the median of the usable evidence, never above the midpoint for a buyer); the walk and the ticket's cap stop there; `fast` is 30% past it | `test_plan_example_twenty_cent_spread`, `test_the_buyers_walk_never_passes_the_fair_price_or_the_midpoint` |
+| P2 | Before the open the Morning card's limit started from the previous close's midpoint, made with the stock at its close. For a fade (puts after a gap up, calls after a gap down) that is well above the open | `entry_estimate` reprices the contract at the stock's price now (Black-76, its own volatility, forward moved with the stock) when it has moved 0.25% or more since the close | `test_before_the_open_a_gapped_stock_reprices_the_contract_instead_of_using_the_old_midpoint` |
+| P3 | Robinhood's clock says `pre`/`post`; the price watches checked only `open`/`premarket`, so with `DATA_MODE=robinhood` watches were not checked before the open, and freshness read those hours as unknown | both accept Robinhood's words | `test_before_the_open_a_gapped_stock_...` (the `pre` case) |
+| P4 | `test_a_dry_run_records_nothing_...` and `test_a_failed_plan_emails_...` failed on weekends: the email run skips weekends by the clock | the two tests fix their own weekday | both tests |
+
+**Live news** is new (`livenews.py`, migration 14). Its tests are in `tests/test_live_news.py` (sources'
+formats, `judge`, `levels_for`, the signal life cycle on demo data, holdings, email, the stream's control
+frames, the key's destinations, the API and settings) and the Chromium test
+`test_live_news_listens_shows_the_feed_and_turns_a_confirmed_move_into_a_card`.
+
+Not verified against the real services, which this build environment cannot reach:
+
+- **RTPR.** The stream, the archive and the article text are written to RTPR's published documentation.
+- **The SEC current-filings feed.** Written to its published Atom format.
+- **Robinhood's fill-likelihood fields.** Read only when the connection's option quotes carry them. The
+  option-quote reply has still not been captured from the real server.
+
+### The independent review of 2.10
+
+An independent reviewer read the change, fuzzed the pricer (100,000 on-grid quotes) and reported 15
+findings and 6 suspicions. Each finding was fixed, and those that can be tested are.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| V1 | A stop followed by a start could leave two loop threads running: the old one read the new stop event. That meant duplicate opportunities and emails | High | each start hands its own event to its threads; a start while the last loop is finishing is refused (409); check results are written only if the row is unchanged; each email is claimed on the row before sending | `test_a_stop_then_start_never_runs_two_loops`, `test_a_check_that_lost_a_race_writes_nothing`, `test_each_opportunity_is_emailed_once_whatever_calls_it` |
+| V2 | Pre-open repricing used the close only with a parity forward. A gap over about 10% (parity rejected) on Robinhood data (the chain's stock price is the pre-market trade) was not repriced: exactly the case 2.10 is for | High | outside regular hours the reference is the confirmed close of the session the quotes belong to, whatever the forward method; the volatility is re-implied from the contract's last midpoint against that close's forward | `test_a_big_gap_on_robinhood_data_is_still_repriced` |
+| V3 | With the clock unreadable during regular hours, or between 16:00 and 16:10, yesterday's close was taken as the reference and the day's move was counted twice | Medium | the close is used only when the saved history reaches the session the quotes belong to (`last_session_date`); otherwise, or with an unknown clock, nothing is repriced and the card says so (`unchecked`) | `test_without_a_confirmed_close_or_clock_nothing_is_repriced_and_it_says_so`, `test_the_session_whose_closing_quotes_are_shown` |
+| V4 | No bid and a one-step offer put every rung, and the "fair" price, at the ask | Medium | said plainly (the ask is the only price; `fair.limit` is None); the property test's escape clause is gone | `test_no_bid_and_a_one_step_offer_says_the_ask_is_the_only_price` |
+| V5 | An opportunity confirmed on the last news check was never checked again and stayed "active" for a week | Medium | opportunities are checked every 10 minutes for an hour from `opportunity_at` (migration 14 gains the column; it had not shipped), then end as done | `test_opportunities_have_their_own_hour_and_old_signals_end_by_age` |
+| V6 | Signals carried across a closed market and could judge an overnight gap as a reaction | Medium | `_expire` ends signals by age every pass, whatever the session | same test |
+| V7 | A short on a cheap stock could get a negative target | Low | a short's targets stay above a twentieth of the entry | `test_the_stop_sits_beyond_the_pre_news_price_and_targets_beyond_one_risk` |
+| V8 | Holdings alerts gave the planned size, not what is still held | Low | `open_quantity` | `test_a_stock_you_hold_gets_an_alert_when_the_news_goes_against_it` |
+| V9 | The card and the evaluator worked in pennies while the ladder used the chain's increments; `floor_tick` could give $2.04 in a nickel class | Low | the chain's tick rule is passed to `fair_value`, `limit_prices` and the evaluator | `test_limits_sit_on_the_chains_own_increments` |
+| V10 | Decide's "fair entry" ignored the clock and suggested an entry from last session's quotes before the open | Low | no fair entry outside regular hours | the Decide picks render it only when given |
+| V11 | Old items were pruned only when listening started | Low | pruned hourly in the loop | — |
+| V12 | RTPR headlines were read inside the loop, so a burst held up price checks for minutes | Low | read by a two-thread pool; the item is stored and priced at once | the Chromium Live news test |
+| V13 | The key would be sent over plain http to an `rtpr.io` address, and any address in a frame was read | Low | https on `rtpr.io` only | `test_the_rtpr_key_is_sent_only_to_rtpr_over_https` |
+| V14 | The screen and the docstring said more than the code (the universe's volume floor, "a close through the stop", "the card stands until the stop") | Low | reworded to what the code does; **Watch the stop** added to live cards | — |
+| V15 | Quotes off the class's increments could give a $0.00 rung | Low | the ask is the only price then | same as V4 |
+
+Suspicions handled:
+
+- **S2.** A failed refresh leaves the history short of the session. The session-date check stops that
+  from repricing silently.
+- **S3.** RTPR's stream and archive could store the same release twice under different ids. The release
+  address is now the id for both.
+- **S6.** The `websockets` debug lines carry the key. That logger is held at WARNING.
+
+Still open:
+
+- **S1.** Whether Tradier's quotes before the open carry pre-market trades. Noted in the README.
+- **S4.** A news halt: the open-session price has no age check.
+- **S5.** The loop's failed quotes count toward the source's pause.

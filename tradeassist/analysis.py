@@ -496,7 +496,8 @@ class Analyst:
                                  rate=self.svc.settings.risk_free_rate, contracts=int(req.get("contracts") or 1),
                                  budget=req.get("budget"), earnings=earnings, entry=req.get("entry_price"),
                                  only=[(str(c["option_type"]).lower(), float(c["strike"]), str(c["expiration"]))
-                                       for c in only] if only else None)
+                                       for c in only] if only else None,
+                                 quote_live=self.svc.market.clock().get("state") == "open")
         out["levels_source"] = {"target_1": "yours" if req.get("target_price") else "suggested",
                                 "invalidation": "yours" if req.get("invalidation_price") else "suggested",
                                 "notes": sug["notes"]}

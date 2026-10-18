@@ -49,11 +49,14 @@ def _card_lines(c: dict[str, Any]) -> list[str]:
         lines.append(f"Buy {opt['contracts']} {c['symbol']} {opt['expiration']} ${opt['strike']:g} {kind}{'s' if opt['contracts'] != 1 else ''} "
                      f"at {money(lm['suggested'])} (fair {money(lm['fair'])}; patient {money(lm['patient'])}; "
                      f"never above {money(lm['cap'])}, where target 1 only pays {lm['min_payoff']:g}× the risk).")
+        if lm.get("repriced"):
+            lines.append("The option price is an estimate at the pre-market stock price (option quotes are the last "
+                         "session's): price it live after 9:30 before you trust the limit.")
         lines.append(f"Stock plan: stop {money(c['stop'])}, target 1 {money(c['target_1'])} by {c['horizon_date']}. "
                      f"Cost {money(opt['cost'], 0)} (the most it can lose); at target 1 about {signed(opt['at_target_1'])}.")
     else:
         sh = c["shares"]
-        why = next((n for n in c.get("notes") or [] if "midpoint" in n or "No contract" in n or "no listed" in n.lower()), "")
+        why = next((n for n in c.get("notes") or [] if "midpoint" in n or "fair price" in n or "No contract" in n or "no listed" in n.lower()), "")
         lines.append(f"Shares: {sh['count'] or 1} at about {money(c['entry'])}, stop {money(c['stop'])}, "
                      f"target 1 {money(c['target_1'])} by {c['horizon_date']}."
                      + (f" ({why})" if why else ""))

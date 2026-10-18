@@ -26,7 +26,7 @@ from .journal import Journal
 from .market import CONFIRMED, PROVISIONAL, Market, complete_only, signal_status
 from .optionmath import NY, black76_price, days_to_expiry, years_to_expiry
 from .patterns import PATTERNS, detect_all, recent_events
-from .pricer import build_ladder, quote_age_seconds, tick_rule
+from .pricer import age_seconds, build_ladder, quote_age_seconds, tick_rule
 from .providers import make_provider
 from .providers.base import DataError, MarketData, display_symbol
 from .scorecard import _earnings_check, build_scorecard, trend_snapshot
@@ -123,8 +123,16 @@ class TradeAssistant:
         keys = ("symbol", "option_type", "strike", "expiration", "bid", "ask", "bidsize", "asksize", "mid",
                 "spread", "spread_pct", "last", "volume", "open_interest", "iv", "iv_source", "delta", "gamma",
                 "theta", "vega", "greeks_source", "model_value", "model_vol", "model_source", "moneyness_pct",
-                "intrinsic", "bid_time", "ask_time")
+                "intrinsic", "bid_time", "ask_time", "trade_time", "fill_prices")
         return {k: c.get(k) for k in keys}
+
+    def _fair_evidence(self, quote: dict[str, Any]) -> dict[str, Any]:
+        """2.10: what the ladder's fair price may use besides the bid, ask and model value: the quote sizes,
+        a recent trade (only while the market is open) and Robinhood's own fill estimates (shown, not used)."""
+        return {"bidsize": quote.get("bidsize"), "asksize": quote.get("asksize"), "last": quote.get("last"),
+                "last_age_seconds": age_seconds(quote.get("trade_time")),
+                "quote_live": self.market.clock().get("state") == "open",
+                "fill_prices": quote.get("fill_prices")}
 
     # --- pricing an option -------------------------------------------------
     def price(self, *, symbol: str, expiration: str, option_type: str, strike: float, side: str = "buy",
@@ -151,7 +159,8 @@ class TradeAssistant:
         rule = tick_rule(chain_quotes, row.get("min_ticks"))
         calibration = self.journal.calibration(side)
         ladder = build_ladder(row.get("bid"), row.get("ask"), rule, side=side,
-                              model_value=row.get("model_value"), contracts=contracts, calibration=calibration)
+                              model_value=row.get("model_value"), contracts=contracts, calibration=calibration,
+                              **self._fair_evidence(row))
         warnings = self._data_warnings(row)
         warnings += [{"level": "warn", "text": note} for note in analysis.notes]
         asksize = row.get("asksize") if side == "buy" else row.get("bidsize")
@@ -253,7 +262,8 @@ class TradeAssistant:
         if side not in entry["calibration"]:
             entry["calibration"][side] = self.journal.calibration(side)
         ladder = build_ladder(option.get("bid"), option.get("ask"), rule, side=side, model_value=model,
-                              contracts=contracts, calibration=entry["calibration"][side])
+                              contracts=contracts, calibration=entry["calibration"][side],
+                              **self._fair_evidence(option))
 
         stamps = []
         for key in ("bid_time", "ask_time"):

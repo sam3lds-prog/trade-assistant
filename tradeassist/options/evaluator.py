@@ -37,6 +37,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from ..optionmath import NY, days_to_expiry, prob_finish_beyond
+from ..pricer import age_seconds, fair_value, tick_rule, to_cents
 from ..simulate import WEIGHTS, Z, Leg, MULTIPLIER, eval_moment, expiry_moment, expiry_profile, \
     implied_expectation, market_odds, position_pnl, trading_days, years_between
 from ..versions import OPTIONS_EVALUATOR_VERSION
@@ -83,7 +84,8 @@ def _leg(row: dict[str, Any], analysis: Any, contracts: int) -> Leg:
 
 
 def value_contract(row: dict[str, Any], analysis: Any, thesis: dict[str, Any], now: datetime, rate: float,
-                   contracts: int, earnings: dict[str, Any] | None, budget: float | None) -> dict[str, Any]:
+                   contracts: int, earnings: dict[str, Any] | None, budget: float | None,
+                   quote_live: bool = True, rule: Any = None) -> dict[str, Any]:
     """Scenario values, ratios and problems for one contract."""
     exp = analysis.expiration
     out: dict[str, Any] = {"option_symbol": row.get("symbol"), "option_type": row["option_type"].upper(),
@@ -103,6 +105,18 @@ def value_contract(row: dict[str, Any], analysis: Any, thesis: dict[str, Any], n
     spread_cost = (row["ask"] - row["bid"]) * MULTIPLIER * contracts
     out["premium"] = premium
     out["spread_cost"] = spread_cost
+    # 2.10: the price to start a buy at, from the quote's evidence (never above the midpoint). The figures below
+    # stay at the midpoint so the contracts compare on one basis; Set the limit prices it live.
+    # Outside regular hours the quote is the last session's, so no entry is suggested from it (the Morning and
+    # Decide trade card reprices it at the stock's price now instead).
+    fair = fair_value(row.get("bid"), row.get("ask"), "buy", model_value=row.get("model_value"),
+                      bidsize=row.get("bidsize"), asksize=row.get("asksize"), last=row.get("last"),
+                      last_age_seconds=age_seconds(row.get("trade_time")), fill_prices=row.get("fill_prices"),
+                      quote_live=quote_live,
+                      tick_cents=rule.tick_at(to_cents(row["mid"])) if rule is not None else 1) if quote_live else None
+    out["fair_entry"] = fair["anchor"] if fair else None
+    out["fair_basis"] = fair["basis"] if fair else (None if quote_live else
+                                                     "Option quotes are the last session's; price it live after 9:30.")
     exp_day = date.fromisoformat(exp)
     h_day = min(thesis["horizon_date"], exp_day)
     half_day = date.fromordinal(now.astimezone(NY).date().toordinal() + max(1, (h_day.toordinal()
@@ -256,7 +270,8 @@ def stock_outlook(*, spot: float, direction: int, target_1: float, invalidation:
 def evaluate(*, symbol: str, direction: int, spot: float, analyses: list[Any], target_1: float, target_2: float,
              invalidation: float, horizon: int, rate: float, contracts: int = 1, budget: float | None = None,
              earnings: dict[str, Any] | None = None, now: datetime | None = None,
-             only: list[tuple[str, float, str]] | None = None, entry: float | None = None) -> dict[str, Any]:
+             only: list[tuple[str, float, str]] | None = None, entry: float | None = None,
+             quote_live: bool = True) -> dict[str, Any]:
     """Evaluate the calls (direction +1) or puts (-1) in `analyses` (ChainAnalysis per expiration)
     for the thesis. `only` restricts it to given (option_type, strike, expiration) contracts. `entry`, the
     stock price the share trade is planned at, only changes the chance the shares are ahead."""
@@ -282,6 +297,8 @@ def evaluate(*, symbol: str, direction: int, spot: float, analyses: list[Any], t
               "horizon_calendar_days": (h_day - today).days, "atm_iv": atm}
     rows: list[dict[str, Any]] = []
     for a in analyses:
+        rule = tick_rule([q for c in a.contracts for q in (c.get("bid"), c.get("ask"))],
+                         next((c.get("min_ticks") for c in a.contracts if c.get("min_ticks")), None))
         cands = [c for c in a.contracts if c["option_type"] == kind]
         if only is not None:
             cands = [c for c in cands if any(o[0] == kind and abs(o[1] - c["strike"]) < 1e-6 and o[2] == a.expiration
@@ -291,7 +308,7 @@ def evaluate(*, symbol: str, direction: int, spot: float, analyses: list[Any], t
             cands.sort(key=lambda c: abs(c["strike"] - spot))
             cands = cands[:MAX_CANDIDATES_PER_EXPIRY]
         for c in sorted(cands, key=lambda c: c["strike"]):
-            rows.append(value_contract(c, a, thesis, now, rate, contracts, earnings, budget))
+            rows.append(value_contract(c, a, thesis, now, rate, contracts, earnings, budget, quote_live, rule))
     if only is not None and len(rows) < len(only):
         found = {(r["option_type"].lower(), r["strike"], r["expiration"]) for r in rows}
         missing = [o for o in only if (o[0], o[1], o[2]) not in found]

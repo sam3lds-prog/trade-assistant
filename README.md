@@ -87,6 +87,28 @@ Every trade opens to the statement rows it was built from, so each figure can be
 against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
 orders and holdings through the Robinhood connection, read-only.
 
+Version 2.10 changes how the app prices an option you want to buy, and adds **Live news**.
+
+- **A fair price, not the midpoint.** The limit ladder used to start at the midpoint and walk up to 80%
+  of the way to the ask, which on a wide option spread paid more than Robinhood fills at. It now centres
+  on a fair price worked out from the evidence that is there: the midpoint, the model value from the
+  neighbouring strikes, the midpoint weighted by the size waiting on each side, and a trade in the last
+  15 minutes inside the quote. A buyer's fair price is never above the midpoint. The walk stops at it,
+  and "Most you will pay" defaults to it. If the Robinhood connection sends its own estimate of a
+  price likely to fill, it is shown beside the evidence for reference.
+- **Morning cards before the open.** Before 9:30 option quotes are the last session's, made when the
+  stock stood at its close. When the stock has gapped since, the card now reprices the contract at the
+  pre-market stock price instead of using the old midpoint. That old midpoint priced fades well above
+  where they open: puts after a gap up, calls after a gap down.
+- **Live news** (under Today) listens for stock-moving news and checks the price after each item: press
+  releases from RTPR (streamed within about a second, `RTPR_API_KEY`), 8-K filings from the SEC
+  (`SEC_USER_AGENT`) and Finnhub headlines (`FINNHUB_API_KEY`).
+  - When a stock's price confirms its news, the screen shows an opportunity with the Morning plan's trade
+    card: buy shares or calls when the news sends it up, short or buy puts when it sends it down.
+  - A stock you hold gets an alert when the news moves it against you, so you can consider selling or
+    covering.
+  - Optionally, opportunities and alerts arrive by browser notification or email.
+
 Version 2.8 adds the **Morning plan**, the new landing screen. Each morning it reads about 290 large US
 stocks plus your watchlist, finds the ones that jumped since the last close, and says which look worth
 riding (fresh news behind the move) and which look stretched enough to fade (no news found, already
@@ -122,6 +144,7 @@ What to put in `.env`:
 | `ACCOUNT_SIZE` and the limits | The sizing checks are percentages of this. The default is a placeholder of $10,000. |
 | `SEC_USER_AGENT` | Your name and email, which the SEC requires. Switches on filings and the earnings-date estimate. |
 | `FINNHUB_API_KEY` | Optional (free at finnhub.io). Company and market headlines on the Market & news and Analyze screens. |
+| `RTPR_API_KEY` | Optional (rtpr.io; the paid plan, about $139 a month, streams press releases within about a second, and the free plan is five minutes late). The fastest source for Live news. In RTPR's dashboard, create the "All articles" rule: the stream sends what your rules match. Never sent anywhere but rtpr.io, and never logged. |
 | `ANTHROPIC_API_KEY` | Optional. Lets Claude write market and stock briefs with web sources, read headline tone, and read trade descriptions. Billed by Anthropic to that API account; capped by `AI_DAILY_REQUESTS`. Never sent to the browser or logged. |
 | `SMTP_USER`, `SMTP_PASSWORD` | Optional. The 7:00 morning email and trigger alerts. With Gmail, an app password from myaccount.google.com/apppasswords (2-Step Verification must be on). Any SMTP provider works through `SMTP_HOST`/`SMTP_PORT`; `EMAIL_TO` if the destination differs. The password never leaves `.env` except to the verified mail server. |
 
@@ -138,7 +161,10 @@ cd ~/projects/trade-assistant
 ./update.sh
 ```
 
-It downloads the newest version, installs any new packages, and lists what changed.
+It downloads the newest version, installs any new packages, and lists what changed. If a review copy
+sits beside the app as a git worktree at `../trade-assistant-review` (for a read-only code review), the
+script then moves it to the same version, but only when it is clean, and says when it skipped. Quit any
+review session first.
 Your `.env` and `data` folder are not part of the repository, so updating never
 touches your settings, journal or Robinhood sign-in. If you have edited files in the
 folder yourself, it stops instead of overwriting them.
@@ -272,9 +298,9 @@ Other things to know:
 1. Open the option you are considering in Robinhood.
 2. In **Price an option**, pick the same ticker, expiration and strike. Check that the
    bid and ask match what Robinhood shows.
-3. Read the three suggested prices and the walk plan. Start at the patient price;
-   if it has not filled in about 25 seconds, edit the order to the next price; stop
-   at the cap.
+3. Read the fair price, the evidence behind it and the walk plan. Start at the patient
+   price; if it has not filled in about 25 seconds, edit the order to the next price;
+   stop at the fair price. The fast price, past it, buys speed, not value.
 4. Read the risk checks. Red flags are reasons to skip or fix the trade.
 5. Fill in the **trade ticket**: starting price, the most you will pay, exit rules and
    a one-line thesis. Save it to the journal.
@@ -285,11 +311,32 @@ Other things to know:
 
 **Price an option.** The limit-price ladder sits on valid price increments, which
 are worked out from the quotes in the chain (penny classes: $0.01 under $3 and $0.05
-above; other classes $0.05 and $0.10; a few ETFs $0.01 everywhere). A model value
-is computed from the volatility of neighbouring strikes, so a stale quote on one
-side shows up as a midpoint that disagrees with the model, and the patient price
-starts from the model instead. Nobody can tell you the chance that a price inside
-the spread fills; the app does not pretend to, and uses your logged attempts instead.
+above; other classes $0.05 and $0.10; a few ETFs $0.01 everywhere).
+
+Since 2.10 it centres on a **fair price**: the middle (median) of the evidence that is
+there. The box under the ruler lists each piece, used or not, and why.
+
+| Evidence | Used when |
+|---|---|
+| Midpoint | always |
+| Model value (the contract at the volatility of neighbouring strikes) | it sits inside the bid and ask |
+| Size-weighted midpoint | both quote sizes are given and the spread is wider than one price step |
+| Last trade | it printed inside the quote within 15 minutes, while the market is open |
+| Robinhood's own fill estimates | never: shown for reference, because how Robinhood works them out is not published |
+
+- **Which way the evidence can move it.** A buyer's fair price is never above the midpoint and a
+  seller's never below: the evidence can lower what you pay, never raise it.
+- **The three prices.**
+  - The **patient** price sits 40% of the way from the fair price back to your own side of the quote.
+  - The **fair** price is where the walk stops.
+  - The **fast** price, 30% of the way on toward the far side, is there for when a fill matters more
+    than the cents.
+- **What changed from 2.9.** The ladder used to run from the midpoint to 80% of the way to the ask.
+- **A stale quote** on one side shows up as a midpoint a quarter of the spread or more from the model.
+  Then the midpoint, and the size-weighted midpoint built from the same quote, are left out, and the
+  model value (with a recent trade) carries the fair price.
+- **No fill chances.** Nobody can tell you the chance that a price inside the spread fills; the app does
+  not pretend to, and uses your logged attempts instead.
 
 Under the form a line says which ticker, expiration and type the strike list
 belongs to and when it was loaded, and shows a spinner while a new one is being
@@ -409,6 +456,75 @@ and repeats; only the held-out quarters are reported.
 **Journal.** Planned, open and closed trades; limit attempts and fill rates by how
 far across the spread you bid; results by pattern present at entry; results with
 and without rule overrides.
+
+## Live news (2.10)
+
+Under Today. Press **Start listening**. The app then follows every news source that is set up, in the
+background, and keeps doing so while it runs. It remembers that it was on and resumes after a restart.
+
+**Sources.**
+
+| Source | What | How fast | Setting |
+|---|---|---|---|
+| RTPR | press releases from Business Wire, PR Newswire, GlobeNewswire and AccessWire | pushed over a WebSocket, about a second after the wire (paid plan) | `RTPR_API_KEY`, plus the "All articles" rule in RTPR's dashboard |
+| SEC EDGAR | 8-K filings: earnings releases, deals, guidance, executive changes | read once a minute; usually minutes behind the wire | `SEC_USER_AGENT` (free) |
+| Finnhub | headlines tagged with a ticker, general and for your watchlist | read once a minute | `FINNHUB_API_KEY` (free) |
+| Demo | made-up items whose made-up price moves let you learn the screen on any day | every 35 seconds | demo data only |
+
+**What happens to an item.** Each stock it names that is in the universe is quoted when the item arrives,
+then 1, 3, 5, 15, 30 and 60 minutes later. By default the universe is the ~330 large stocks the Morning
+plan reads, plus your watchlist and anything you hold; `LIVE_UNIVERSE=all` admits any ticker at $5 or more
+that trades at least $20 million a day. A second item on the same stock within 30 minutes joins the
+first. Outside regular hours a stock is priced only from a trade in the last 15 minutes. With the market
+closed, items are collected and the stocks are priced when trading resumes (pre-market included). An item
+over 18 hours old by then is listed, not traded.
+
+**When a move confirms.** One of two rules has to hold:
+
+- **The reaction.** Since the item, the stock has moved at least `LIVE_MIN_REACTION_PCT` (1%) and
+  `LIVE_MIN_REACTION_ATR` (0.3) of its own daily ranges, with the day's move the same way.
+- **The day's move, for news that arrived late.** When the item reached the app two minutes or more after
+  it was published, the day's move is at least `LIVE_MIN_DAY_ATR` (1.5) ranges and `LIVE_MIN_DAY_PCT`
+  (3%).
+
+The trade is the way the price went. Moves with news have tended to keep drifting, which is the Morning
+plan's "ride" setup run in real time. The headline's tone (RTPR's impact direction when it sends one,
+otherwise the word list) is shown, and a tone that disagrees with the price is flagged: the price is
+what is traded.
+
+**The opportunity** carries the Morning plan's trade card:
+
+- the entry at the current price;
+- the stop a quarter of a daily range beyond where the stock stood when the news arrived (back there,
+  the news has been undone), or the chart's level, kept within 2.5 ranges;
+- targets at the chart's levels at least one risk away, otherwise two and three times the risk;
+- shares sized to your risk per trade;
+- the best call (long) or put (short) the budget pays for, at its fair price, with the order to copy.
+
+**After it confirms.** The opportunity is checked against its stop every ten minutes for an hour. A price
+through the stop at one of those checks marks it **stopped**. After the hour nothing watches it: press
+**Watch the stop** on the card (a Morning plan price watch, emailed when crossed) or set your own stop
+order.
+
+**Ending by age.** A watched stock that has not moved enough within 90 minutes ends as **no reaction**,
+so nothing is ever judged across a closed market.
+
+**Stocks you hold** get an alert: **against** you (consider selling, covering or tightening the stop) or
+**with** you.
+
+**Being told.** **Notify me in this browser** shows a desktop notification for each new opportunity
+while the screen is open. `LIVE_NEWS_EMAIL=1` emails them, using the morning email's SMTP settings, at
+most 20 a day.
+
+**What it is not.** Large trading firms read the same wires with machines in microseconds, so the first
+move on a big release is usually over before anyone can click. What this gives you is the news and the
+price's answer to it within seconds, with the risk worked out:
+
+- for releases outside market hours;
+- for stocks that take longer to absorb news;
+- for news on stocks you hold.
+
+Nothing here places an order. Switch the screen off with `FEATURE_LIVE_NEWS=0`.
 
 ## Version 2
 
@@ -698,6 +814,34 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
 - 2.3.1: two independent reviewers checked 2.1.0 to 2.3.0 for accounting, data loss,
   look-ahead and security; the 27 findings were reproduced, fixed and given regression tests
   (`tests/test_review_fixes.py`; listed in `docs/IMPROVEMENTS.md`).
+- 2.10 (the fair price and Live news):
+  - every ladder price is a valid increment inside the quote, a buyer's fair price never passes the
+    midpoint (a seller's never falls under it), and the walk never passes the fair price, on 3,000 random
+    quotes with random evidence;
+  - the one exception, no bid and an offer one price step up, is said in so many words (the ask is the
+    only price) instead of being shown as a fair price;
+  - a quote stale on one side (its midpoint a quarter of the spread from the model value) leaves the
+    midpoint out;
+  - each piece of evidence is used only under its rule (a trade only when recent, inside the quote and
+    with the market open), and Robinhood's estimates are never used;
+  - a gapped stock's contract is repriced before the open, a flat one keeps its quote;
+  - the SEC feed, RTPR's REST items, alert and impact frames, and Finnhub rows are read from their
+    documented shapes, and odd entries are skipped;
+  - the stream answers RTPR's pings and stops on a refused key, and the key is sent only to rtpr.io;
+  - a demo news move becomes an opportunity with a card and is then stopped out, a quiet stock ends as no
+    reaction, items outside the universe or over 18 hours old are not traded, and a stock you hold is
+    flagged when the news goes against it;
+  - in Chromium: the Live news screen listens, shows the feed and turns a move into a card, and the
+    pricing screen shows the fair price.
+
+  - an independent review found 15 problems; all were fixed and have tests (`docs/IMPROVEMENTS.md`).
+
+  Not checked against the real services, which this build environment cannot reach:
+  - RTPR's stream and archive (written to its documentation);
+  - the SEC feed (written to its published format);
+  - Robinhood's fill estimates (read only when its replies carry them);
+  - whether Tradier's quotes before the open carry pre-market trades. If they do not, Live news prices
+    a stock only from 9:30 on Tradier data.
 - 2.8 (Morning plan):
   - the limit cap is checked against its closed form, against a strict payoff inequality, and on random
     cases (the independent reviewer re-verified it on 20,000);
@@ -828,6 +972,7 @@ tradeassist/
   robinhood_account.py     optional read of your orders and holdings through the connection (2.6)
   ideas.py                 trade ideas: the background scan of up to 200 stocks, graded and ranked (2.7)
   morning.py               the morning plan: movers, ride/fade setups, limit caps, past records, watches (2.8)
+  livenews.py              live news: RTPR stream, SEC 8-K and Finnhub polling, price reactions, signals (2.10)
   morning_email.py         the plan rendered as the 7:00 email, text and HTML (2.8)
   mailer.py                SMTP over verified STARTTLS; the password scrubbed from every error (2.8)
   background.py            the shared background-job slot used by Trade ideas and the Morning plan (2.8)
@@ -840,7 +985,8 @@ tradeassist/
   versions.py              version labels recorded with every result
   static/                  the web page: flow.js (2.5 pure helpers, tested under Node), app.js classic screens,
                            v2.js version 2 screens, lab.js 2.4 screens, decide.js Today and Decide (2.5),
-                           trades.js My trades (2.6), ideas.js Trade ideas (2.7), morning.js Morning plan (2.8)
+                           trades.js My trades (2.6), ideas.js Trade ideas (2.7), morning.js Morning plan (2.8),
+                           live.js Live news (2.10)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
 docs/IMPROVEMENTS.md       the 2.1.1 to 2.8 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade

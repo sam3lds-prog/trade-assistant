@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
-SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js")   # in the order index.html loads them
+SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js")   # in the order index.html loads them
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -410,4 +410,43 @@ def test_the_morning_plan_builds_cards_copies_an_order_and_watches_a_trigger(tmp
         page.goto(page.base + "#morning")
         page.wait_for_selector("text=Big movers since the last close", timeout=30000)
         assert page.request.get(page.base + "v2/morning?brief=true").json()["job"]["state"] in ("done", "idle")
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_live_news_listens_shows_the_feed_and_turns_a_confirmed_move_into_a_card(tmp_path, monkeypatch):
+    """2.10: Start listening, a (made-up) press release arrives, the price answers, and the opportunity carries
+    the Morning plan's trade card. Timings are shortened so the whole life of a signal takes seconds."""
+    import tradeassist.livenews as live_mod
+    import tradeassist.morning as morning_mod
+    monkeypatch.setattr(morning_mod, "movers_universe", lambda watchlist: ["AAPL", "MSFT", "NVDA"])
+    monkeypatch.setattr(live_mod, "DEMO_TEMPLATES", (("{s} raises full-year outlook", 0.05),))
+    monkeypatch.setattr(live_mod, "CHECK_DELAYS", (1, 1, 1, 1, 1, 1))
+    monkeypatch.setattr(live_mod, "DEMO_MOVE_SECONDS", 1.0)
+    monkeypatch.setattr(live_mod, "LOOP_SECONDS", 0.3)
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#live")
+        page.wait_for_selector("text=Press Start listening", timeout=20000)
+        page.click("button:text-is('Start listening')")
+        page.wait_for_selector("text=raises full-year outlook (made up)", timeout=30000)
+        page.wait_for_selector(".live-opp .m-card", timeout=60000)
+        opp = page.locator(".live-opp").first.inner_text()
+        assert "Buy " in opp and "since the news" in opp and "Order to copy into Robinhood" in opp
+        body = page.inner_text("section:not(.hidden)")
+        assert "Demo data" in body and "places an order" in body
+        page.click("button:text-is('Stop')")
+        page.wait_for_selector("button:text-is('Start listening'):visible", timeout=20000)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_price_an_option_shows_the_fair_price_and_its_evidence(tmp_path):
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#price")
+        page.wait_for_selector("button:text-is('Price it')", timeout=30000)
+        page.click("button:text-is('Price it')")
+        page.wait_for_selector(".fair-box", timeout=60000)
+        text = page.inner_text(".fair-box")
+        assert "Fair price" in text and "Midpoint of the bid and ask" in text
+        assert "Most you will pay" in page.inner_text("section:not(.hidden)")
     assert errors == []

@@ -4,17 +4,52 @@ Prices are worked in integer cents to avoid float drift. The suggestions are a l
 of valid prices inside the bid-ask spread plus a plan for walking the order up (or
 down, when selling). Nothing here predicts a fill: whether a price inside the spread
 fills depends on the market makers on the other side, which no quote shows.
+
+**The fair price (2.10).** Up to 2.9 the ladder started at the midpoint and walked up to 80% of
+the way to the ask. On a wide option spread market makers often fill below the midpoint, so that
+paid too much. The ladder now centres on a fair price worked out from the evidence that is there:
+
+    the midpoint                       always
+    the model value                    the contract priced at the volatility of its neighbouring
+                                       strikes, when it sits inside the bid and ask
+    the size-weighted midpoint         when both quote sizes are given: more contracts waiting to
+                                       buy than to sell pull it toward the ask, and the reverse
+    the last trade                     when it printed inside the bid and ask within 15 minutes,
+                                       while the market is open
+
+When the midpoint sits a quarter of the spread or more from a model value inside the quote, one side
+of the quote looks stale: the midpoint and the size-weighted midpoint (built from the same quote)
+are left out, and the model value (with a recent trade, if any) carries the fair price.
+
+The fair price is the middle (median) of the evidence used. A buyer's fair price is never above
+the midpoint and a seller's never below it: evidence may lower what you pay, never raise it.
+The patient price sits below the fair price, the walk stops at it, and the fast price, past it,
+is shown for when a fill matters more than the cents. Robinhood's own estimates of a price that
+is likely to fill, when its connection sends them, are shown beside the evidence for reference;
+they are not used, because how Robinhood works them out is not published.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from statistics import median
 from typing import Any, Iterable
 
 LOW_PRICE_LIMIT = 300  # cents: US option tick sizes change at $3.00
 
-RUNG_POSITIONS = {"patient": 0.50, "balanced": 0.65, "fast": 0.80}
+# Where the rungs sit (2.10): the patient price this share of the way from the fair price back to your own
+# side of the quote, the fast price this share of the way from the fair price to the far side.
+PATIENT_SHARE = 0.40
+FAST_SHARE = 0.30
+LAST_TRADE_MAX_AGE = 15 * 60       # seconds: an older trade says little about where the quote sits now
+
+FILL_PRICE_LABELS = {
+    "buy_likely": "Robinhood's buy price likely to fill",
+    "buy_less_likely": "Robinhood's buy price less likely to fill",
+    "sell_likely": "Robinhood's sell price likely to fill",
+    "sell_less_likely": "Robinhood's sell price less likely to fill",
+}
 
 
 @dataclass(frozen=True)
@@ -138,12 +173,148 @@ def quote_age_seconds(contract: dict[str, Any], now: datetime | None = None) -> 
     return max(ages) if ages else None
 
 
+def age_seconds(stamp: Any, now: datetime | None = None) -> float | None:
+    """Seconds since an ISO time; None when there is no readable time. A time without a zone is read as UTC."""
+    if not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (now - when).total_seconds()
+
+
+def _finite_positive(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) and out > 0 else None
+
+
+def fair_value(bid: float | None, ask: float | None, side: str = "buy", *, model_value: float | None = None,
+               bidsize: float | None = None, asksize: float | None = None, last: float | None = None,
+               last_age_seconds: float | None = None, quote_live: bool = True,
+               fill_prices: dict[str, Any] | None = None, tick_cents: int = 1) -> dict[str, Any] | None:
+    """The fair price to anchor a limit on, from the evidence that is there (see the module notes).
+
+    Returns None when there is no usable quote (no offer, or a crossed one). Otherwise `fair` is the median
+    of the evidence used, `anchor` is the price the ladder centres on (the fair price, but never above the
+    midpoint when buying nor below it when selling) and `evidence` lists every piece, used or not, with why."""
+    if side not in ("buy", "sell"):
+        raise ValueError("side must be buy or sell")
+    ask_v = _finite_positive(ask)
+    if ask_v is None:
+        return None
+    bid_v = _finite_positive(bid) or 0.0
+    bid_c, ask_c = to_cents(bid_v), to_cents(ask_v)
+    if bid_c > ask_c:
+        return None
+    mid_c = 0.5 * (bid_c + ask_c)
+    spread_c = ask_c - bid_c
+    evidence: list[dict[str, Any]] = [{"key": "midpoint", "label": "Midpoint of the bid and ask", "price": mid_c / 100,
+                                       "used": True, "note": "Halfway between the bid and the ask."}]
+    used = [mid_c]
+
+    model = _finite_positive(model_value)
+    if model is not None:
+        model_c = model * 100
+        inside = bid_c <= model_c <= ask_c
+        evidence.append({"key": "model", "label": "Model value", "price": model, "used": inside,
+                         "note": ("The contract priced at the volatility of its neighbouring strikes: what it is worth "
+                                  "if its quote matched the rest of the chain." if inside else
+                                  "Outside the bid and ask, so the model and the market disagree; not used.")})
+        if inside:
+            used.append(model_c)
+    # A quote whose midpoint sits a quarter of the spread or more from a model value inside it (and at least a
+    # price step away) has one side out of line with the rest of the chain, usually a stale bid or offer. Then
+    # the midpoint, and the size-weighted midpoint built from the same quote, are not evidence of value.
+    stale = (model is not None and spread_c > 0 and bid_c <= model * 100 <= ask_c
+             and abs(model * 100 - mid_c) >= max(tick_cents, 1) and abs(model * 100 - mid_c) >= 0.25 * spread_c)
+    if stale:
+        used.remove(mid_c)
+        evidence[0].update(used=False, note="A quarter of the spread or more from the model value: one side of the "
+                                            "quote looks stale, so the midpoint is not used.")
+
+    b_size, a_size = _finite_positive(bidsize), _finite_positive(asksize)
+    if b_size and a_size and bid_c > 0 and spread_c >= 2 * max(tick_cents, 1):
+        micro_c = (bid_c * a_size + ask_c * b_size) / (b_size + a_size)
+        evidence.append({"key": "size_weighted", "label": "Size-weighted midpoint", "price": micro_c / 100,
+                         "used": not stale,
+                         "note": (f"{b_size:,.0f} contracts bid against {a_size:,.0f} offered: more waiting to buy than "
+                                  "to sell pulls it toward the ask, and the reverse." if not stale else
+                                  "Built from the same quote as the midpoint, which looks stale; not used.")})
+        if not stale:
+            used.append(micro_c)
+
+    last_v = _finite_positive(last)
+    if last_v is not None:
+        last_c = last_v * 100
+        inside = bid_c <= last_c <= ask_c
+        fresh = quote_live and last_age_seconds is not None and 0 <= last_age_seconds <= LAST_TRADE_MAX_AGE
+        if fresh and inside:
+            note = f"Traded {_age_words(last_age_seconds)} ago, inside today's quote."
+        elif not quote_live:
+            note = "The market is closed, so the last trade says little about the next fill; not used."
+        elif last_age_seconds is None:
+            note = "The data source gave no time for the last trade, so its age is unknown; not used."
+        elif not fresh:
+            note = f"Traded {_age_words(last_age_seconds)} ago, too long ago to say where it fills now; not used."
+        else:
+            note = "Traded outside today's bid and ask; not used."
+        evidence.append({"key": "last_trade", "label": "Last trade", "price": last_v, "used": fresh and inside,
+                         "note": note})
+        if fresh and inside:
+            used.append(last_c)
+
+    for key, label in FILL_PRICE_LABELS.items():
+        value = _finite_positive((fill_prices or {}).get(key))
+        if value is not None and key.startswith(side):
+            evidence.append({"key": f"robinhood_{key}", "label": label, "price": value, "used": False,
+                             "note": "Robinhood's own estimate, shown for reference. Not used in the fair price: "
+                                     "how Robinhood works it out is not published."})
+
+    fair_c = float(median(used))
+    anchor_c = min(mid_c, fair_c) if side == "buy" else max(mid_c, fair_c)
+    names = [e["label"].lower() for e in evidence if e["used"]]
+    if names == ["midpoint of the bid and ask"]:
+        basis = "The midpoint: no other evidence was usable."
+    elif len(names) == 1:
+        basis = f"The {names[0]}: the quote looks stale on one side, so it is the only evidence used."
+    else:
+        basis = f"The middle of {len(names)} pieces of evidence: {', '.join(names)}."
+        if stale:
+            basis += " The quote looks stale on one side, so its midpoint is left out."
+    if anchor_c != fair_c:
+        basis += (" The evidence points above the midpoint, so a buyer starts from the midpoint instead."
+                  if side == "buy" else
+                  " The evidence points below the midpoint, so a seller starts from the midpoint instead.")
+    return {"side": side, "mid": mid_c / 100, "fair": fair_c / 100, "anchor": anchor_c / 100, "stale_quote": stale,
+            "below_mid": anchor_c < mid_c - 1e-9, "above_mid": anchor_c > mid_c + 1e-9,
+            "evidence": evidence, "used": len(names), "basis": basis}
+
+
+def _age_words(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f} seconds"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} minutes"
+    return f"{seconds / 3600:.1f} hours"
+
+
 def build_ladder(bid: float | None, ask: float | None, rule: TickRule, side: str = "buy",
                  model_value: float | None = None, contracts: int = 1,
-                 calibration: dict[str, Any] | None = None) -> dict[str, Any]:
+                 calibration: dict[str, Any] | None = None, *, bidsize: float | None = None,
+                 asksize: float | None = None, last: float | None = None, last_age_seconds: float | None = None,
+                 quote_live: bool = True, fill_prices: dict[str, Any] | None = None) -> dict[str, Any]:
     """Suggested limit prices for buying (or selling) one option contract.
 
-    Returns a dict with `ok`, `rungs`, `walk`, `flags` and the reference numbers.
+    Returns a dict with `ok`, `rungs`, `walk`, `flags`, `fair` and the reference numbers.
     `position` on each rung is how far across the spread the price sits, measured from
     the passive side: 0 = joining your own side of the quote, 1 = crossing the spread.
     """
@@ -180,13 +351,12 @@ def build_ladder(bid: float | None, ask: float | None, rule: TickRule, side: str
     mid_c = 0.5 * (bid_c + ask_c)
     grid = valid_prices(bid_c, ask_c, rule)
     if bid_c == 0:
-        grid = [p for p in grid if p > 0] or grid
-    if not grid:
+        grid = [p for p in grid if p > 0]
+    if not grid:                                   # a quote off the class's increments: only the ask is a price
         grid = [ask_c]
 
     model_c = model_value * 100 if model_value is not None and model_value > 0 else None
     skew = None
-    patient_target = mid_c
     if model_c is not None and spread_c > 0:
         skew = (model_c - mid_c) / spread_c
         inside = bid_c <= model_c <= ask_c
@@ -195,40 +365,36 @@ def build_ladder(bid: float | None, ask: float | None, rule: TickRule, side: str
         if not material or not inside:
             pass
         elif side == "buy" and skew <= -0.25:
-            patient_target = model_c
             flags.append({"level": "warn", "text": (
                 f"The midpoint (${mid_c / 100:.2f}) looks high against the model value (${model_c / 100:.2f}). "
-                "One side of the quote may be stale. The patient price starts at the model value instead.")})
+                "One side of the quote may be stale. The fair price leans toward the model value.")})
         elif side == "sell" and skew >= 0.25:
-            patient_target = model_c
             flags.append({"level": "warn", "text": (
                 f"The midpoint (${mid_c / 100:.2f}) looks low against the model value (${model_c / 100:.2f}). "
-                "One side of the quote may be stale. The patient price starts at the model value instead.")})
+                "One side of the quote may be stale. The fair price leans toward the model value.")})
         elif abs(skew) >= 0.25:
             direction = "above" if skew > 0 else "below"
             flags.append({"level": "info", "text": (
                 f"The model value (${model_c / 100:.2f}) is {direction} the midpoint (${mid_c / 100:.2f}). "
-                "A mid-price order may sit unfilled; expect to walk it.")})
+                "A fair-price order may sit unfilled; expect to wait, or to walk it.")})
         if not inside:
             flags.append({"level": "warn", "text": (
                 f"The model value (${model_c / 100:.2f}) is outside the bid-ask range (${bid_c / 100:.2f} to "
-                f"${ask_c / 100:.2f}), so the model and the market disagree. The suggestions below use the "
-                "quote alone; be wary of both.")})
+                f"${ask_c / 100:.2f}), so the model and the market disagree. The fair price below leaves the model "
+                "out; be wary of both.")})
 
-    def target_at(position: float) -> float:
-        # position 0.5 is the midpoint; further rungs move toward the far side of the spread.
-        base = patient_target
-        far = ask_c if side == "buy" else bid_c
-        if position <= 0.5:
-            return base
-        return base + (far - base) * (position - 0.5) / 0.5
-
+    fair = fair_value(bid_c / 100, ask_c / 100, side, model_value=model_value, bidsize=bidsize, asksize=asksize,
+                      last=last, last_age_seconds=last_age_seconds, quote_live=quote_live, fill_prices=fill_prices,
+                      tick_cents=rule.tick_at(int(mid_c)))
+    anchor_c = fair["anchor"] * 100 if fair else mid_c
     if side == "buy":
-        picks = {"patient": _floor(grid, target_at(0.50)), "balanced": _nearest(grid, target_at(0.65)),
-                 "fast": _ceil(grid, target_at(0.80))}
+        picks = {"patient": _floor(grid, anchor_c - PATIENT_SHARE * (anchor_c - bid_c)),
+                 "balanced": _floor(grid, anchor_c),
+                 "fast": _ceil(grid, anchor_c + FAST_SHARE * (ask_c - anchor_c))}
     else:
-        picks = {"patient": _ceil(grid, target_at(0.50)), "balanced": _nearest(grid, target_at(0.65)),
-                 "fast": _floor(grid, target_at(0.80))}
+        picks = {"patient": _ceil(grid, anchor_c + PATIENT_SHARE * (ask_c - anchor_c)),
+                 "balanced": _ceil(grid, anchor_c),
+                 "fast": _floor(grid, anchor_c - FAST_SHARE * (anchor_c - bid_c))}
     # Keep the ladder monotonic toward the far side.
     order = ["patient", "balanced", "fast"]
     for prev, cur in zip(order, order[1:]):
@@ -238,9 +404,11 @@ def build_ladder(bid: float | None, ask: float | None, rule: TickRule, side: str
             picks[cur] = min(picks[cur], picks[prev])
 
     descriptions = {
-        "patient": "Best price, least likely to fill quickly. Start here when you are not in a hurry.",
-        "balanced": "A middle course: gives up part of the spread for a better chance of a fill.",
-        "fast": "Close to crossing the spread. Use when getting filled matters more than the last few cents.",
+        "patient": "Below the fair price: the best price, least likely to fill quickly. Start here when you can wait.",
+        "balanced": ("The fair price (the evidence below). The walk stops here: never above the midpoint when buying."
+                     if side == "buy" else
+                     "The fair price (the evidence below). The walk stops here: never below the midpoint when selling."),
+        "fast": "Past the fair price, toward crossing the spread. Only when a fill now matters more than the cents.",
     }
     seen: dict[int, dict[str, Any]] = {}
     for name in order:
@@ -270,7 +438,18 @@ def build_ladder(bid: float | None, ask: float | None, rule: TickRule, side: str
     for rung in rungs:
         rung["name"] = " / ".join(rung.pop("names"))
 
-    start_c, cap_c = picks["patient"], picks["fast"]
+    if fair is not None:
+        fair["limit"] = picks["balanced"] / 100     # the valid price to type: the fair price, rounded your way
+        if side == "buy" and picks["balanced"] > anchor_c + 1e-9:
+            # No valid price at or below the fair price: with no bid and a one-step offer, the ask is the only
+            # price there is. Said plainly rather than shown as a "fair" price above the estimate.
+            fair["limit"] = None
+            flags.append({"level": "warn", "text": (
+                f"No valid price lies at or below the fair estimate (${anchor_c / 100:.3f}): the only price to pay is "
+                f"the ask, ${ask_c / 100:.2f}. A contract quoted like this is close to worthless; be sure you want it.")})
+    # The walk goes from the patient price to the fair price and stops there (2.10; it used to run on to 80%
+    # of the way across the spread). The fast price stays on the ladder for when a fill matters more.
+    start_c, cap_c = picks["patient"], picks["balanced"]
     lo, hi = min(start_c, cap_c), max(start_c, cap_c)
     steps = [p for p in grid if lo <= p <= hi]
     if side == "sell":
@@ -284,15 +463,15 @@ def build_ladder(bid: float | None, ask: float | None, rule: TickRule, side: str
         "wait_seconds": 25,
         "instructions": (
             "Enter the first price. If it has not filled after about 25 seconds, edit the order to the next "
-            "price. Stop at the cap: if it will not fill there, the market has moved or the contract is too "
-            "thin, and reassessing beats chasing."),
+            "price. Stop at the fair price: if it will not fill there, wait for the quote to come to you or "
+            "reassess. Paying the fast price buys speed, not value."),
     }
     result.update({
         "ok": True, "bid": bid_c / 100, "ask": ask_c / 100, "mid": mid_c / 100,
         "spread": spread_c / 100, "spread_pct": (100.0 * spread_c / mid_c) if mid_c > 0 else None,
         "spread_ticks": max(len(grid) - 1, 0), "model_value": model_c / 100 if model_c is not None else None,
         "model_skew": skew, "rungs": rungs, "grid": [p / 100 for p in grid] if len(grid) <= 60 else None,
-        "contracts": contracts,
+        "contracts": contracts, "fair": fair,
     })
     if spread_c > 0 and len(grid) == 2:
         if rule.assumed and spread_c > 1:

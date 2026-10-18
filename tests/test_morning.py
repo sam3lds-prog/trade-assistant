@@ -422,10 +422,23 @@ def test_the_morning_email_run_skips_weekends(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert code == 0 and "closed" in out and "no morning email" in out
 
+def _on_a_weekday(monkeypatch, run_mod):
+    """The email run skips weekends by the clock; these tests are about weekdays, whatever day they run on."""
+    from datetime import datetime as real
+
+    class Weekday(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real(2026, 10, 14, 8, 0, tzinfo=tz)              # a Wednesday
+
+    monkeypatch.setattr(run_mod, "datetime", Weekday)
+
+
 def test_a_dry_run_records_nothing_and_a_send_records_only_after_it_works(tmp_path, monkeypatch, capsys):
     """--morning-print must not count as picks; a failed send must not either (M: record after send)."""
     import run as run_mod
     from tradeassist import mailer
+    _on_a_weekday(monkeypatch, run_mod)
     s = Settings(data_mode="demo", db_path=tmp_path / "t.db",
                  smtp_user="me@example.com", smtp_password="pw")
     monkeypatch.setattr(morning_mod, "movers_universe",
@@ -498,6 +511,7 @@ def test_all_bars_failing_also_fails_the_plan_and_stops_the_grind(svc, monkeypat
 
 def test_a_failed_plan_emails_the_failure_instead_of_silence(tmp_path, monkeypatch, capsys):
     import run as run_mod
+    _on_a_weekday(monkeypatch, run_mod)
     s = Settings(data_mode="demo", db_path=tmp_path / "t.db",
                  smtp_user="me@example.com", smtp_password="pw")
     sent = []

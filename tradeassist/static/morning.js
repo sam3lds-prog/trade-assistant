@@ -93,9 +93,11 @@ function morningCard(card, actions) {
   if (viable) {
     right.append(el("div", { class: "m-limit" }, el("div", { class: "small muted", text: "Limit price to type" }),
       el("div", { class: "m-big", text: money(lm.suggested) }),
-      el("div", { class: "small" }, `Fair value ${money(lm.fair)}. Start at ${money(lm.patient)} if you can wait; never above `,
+      el("div", { class: "small" }, `Fair price ${money(lm.fair)}${isNum(lm.mid) && Math.abs(lm.mid - lm.fair) >= 0.005 ? ` (midpoint ${money(lm.mid)})` : ""}. Start at ${money(lm.patient)} if you can wait; never above `,
         el("strong", { text: money(lm.cap) }), ` — above that, reaching target 1 pays less than ${num(lm.min_payoff, 1)}× what the stop loses.`),
-      el("div", { class: "m-ladder" }, [["Bid", opt.bid], ["Patient", lm.patient], ["Fair", lm.fair], ["Ask", opt.ask], ["Most to pay", lm.cap]]
+      lm.fair_basis ? el("div", { class: "small muted", style: "margin-top:4px", text: lm.fair_basis }) : null,
+      el("div", { class: "m-ladder" }, [[lm.repriced ? "Last session's bid" : "Bid", opt.bid], ["Patient", lm.patient], ["Fair", lm.fair],
+        [lm.repriced ? "Last session's ask" : "Ask", opt.ask], ["Most to pay", lm.cap]]
         .filter(([, v]) => isNum(v)).map(([k, v]) => el("span", { text: `${k} ${money(v)}` }))),
       lm.below_bid ? el("div", { class: "small muted", style: "margin-top:6px",
         text: "This limit is below the current bid, so the order rests until the price comes down to it \u2014 it may not fill." }) : null,
