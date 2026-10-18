@@ -1017,3 +1017,91 @@ Still open:
 - **S1.** Whether Tradier's quotes before the open carry pre-market trades. Noted in the README.
 - **S4.** A news halt: the open-session price has no age check.
 - **S5.** The loop's failed quotes count toward the source's pause.
+
+## 2.11: news found by searching
+
+**The request.** The user asked for news pulled in through a free Google or Brave search, as an AI client
+would through a search MCP server, instead of a paid news feed.
+
+**What was built, and why it differs from the request.**
+
+- **No language model in the loop.** An MCP search server is a tool an AI model calls. Putting Claude in
+  the app's refresh loop would spend API tokens on every refresh, which defeats the point of a $0 source.
+  The app makes the same searches itself.
+- **Google.** Google's Custom Search JSON API is closed to new users and ends on 1 January 2027, so the
+  free Google route is the Google News search feed. It needs no key. It is unofficial, so the app spaces
+  its requests and pauses after a refusal.
+- **Brave.** Brave's free plan ended in February 2026. The $5 monthly credit (about 1,000 searches) needs
+  a card and is billed past it, so Brave is optional, asked only as a fallback, and capped below the
+  credit.
+- **Latency.** A search engine indexes a story minutes after publication. Search explains moves and
+  checks "no news"; it does not replace RTPR's stream for speed.
+
+| Part | Where | Tests |
+| --- | --- | --- |
+| Google News feed and Brave results read from their formats; DOCTYPE and ENTITY refused anywhere; a feed that does not read is a failure; non-http links dropped | `searchnews.parse_google_news`, `parse_brave`, `_safe_xml` | `test_google_news_feed_is_read_and_anything_odd_in_it_is_refused`, `test_brave_results_are_read_with_their_times` |
+| A headline counts only when it names the company the way news does | `NEWS_NAMES`, `clean_name`, `name_forms`, `name_patterns` | `test_a_headline_counts_for_a_stock_only_when_it_names_the_company` (45 cases), `test_google_results_count_only_when_recent_and_the_headline_names_the_stock` |
+| Brave only as a fallback, never past its caps (any 31 days, the day, two processes), no redirects, a cap is "not asked" | `SearchNews.search`, `_brave_claim`, `brave` | `test_brave_is_a_capped_fallback_and_a_cap_is_not_a_failure`, `test_a_reserve_keeps_part_of_braves_day_for_the_morning_plan`, `test_brave_never_passes_its_limit_from_two_copies_of_the_app_at_once` |
+| Google's pause and spacing shared through the database | `SearchNews.google`, `_google_turn`, `_google_refused` | `test_google_refusing_pauses_it_for_every_copy_and_an_unreadable_feed_is_a_failure`, `test_google_requests_wait_their_turn_and_a_turn_too_far_off_is_skipped` |
+| Analyze's news and the Morning plan's check search too; a doubt is never "no news" | `NewsClient.company`, `Morning._news_state` | `test_the_news_client_adds_search_and_only_fresh_items_keep_the_deep_check_from_brave`, `test_the_morning_news_check_never_reads_a_doubt_as_no_news` (5 cases) |
+| Live news: holdings first; the movers scan on its own thread; the day's close; one opportunity a day; duplicates | `LiveFeed._rotate`, `_search_run`, `_scan_movers`, `_day_close`, `_opportunity_today`, `_duplicate` | `test_google_news_reads_your_holdings_first_and_waits_out_a_pause_quietly`, `test_movers_get_a_search_and_news_found_becomes_a_signal`, `test_the_movers_list_is_todays_and_brave_is_asked_once_a_stock_a_day`, `test_after_the_close_the_day_is_measured_from_todays_close`, `test_one_move_is_traded_once_a_day`, `test_the_same_headline_from_two_sources_is_kept_once_but_never_two_filings`, `test_the_searches_run_on_their_own_thread` |
+| The "Why is it moving?" panel | `static/live.js` `moversPanel` | Chromium: `test_live_news_lists_movers_with_the_news_search_found` |
+| Settings | `config.py` | `test_settings_read_the_search_options` |
+
+Not verified against the real services, which this build environment cannot reach: Google News's search
+feed and Brave's news API are written to their published formats.
+
+### The independent review of 2.11
+
+An independent reviewer read the change before it was committed and ran reproductions for each finding
+(46 real headlines, two processes claiming Brave searches, a padded feed, an after-hours price path). It
+reported 15 findings. All were fixed.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| R1 | Demo quotes ("AAPL (demo)") left the ticker cached as the company name for 30 days, in a cache live data shares, so live AAPL was searched as "AAPL" and ON and ALL matched "On Tuesday" and "All eyes" | High | demo searches never look a name up; names are never cached on demo data; a name equal to the ticker or carrying "(demo)" is refused | `test_a_demo_quote_never_leaves_a_name_behind_for_live_data` |
+| R2 | After 4 p.m. a signal's day was measured from the quote's previous close, which is yesterday's, so a stock falling on after-hours news after a strong session read as a LONG day move; the movers scan listed the session's movers as after-hours movers | High | `_day_close`: the last finished session's close (the bars when they reach it, else the quote's close after 4 p.m., else its previous close before); unknown after 4 p.m. means the price at the news stands in | `test_after_the_close_the_day_is_measured_from_todays_close` |
+| R3 | Matching missed brand names (Disney, Google, Lilly, McDonald's, Citi, BofA, P&G, onsemi, BRK-B, eBay) and SEC names with "/MN" or "\DE\" suffixes, so a stock with news could read "no news" and be offered as a fade | High | `NEWS_NAMES` for the ~290 stocks followed; suffixes without a space; lower-case names in any case; ticker spellings; two-word short names; headlines that came back but did not match leave the Morning check *not ruled out* | the 45-case test; `test_the_morning_news_check_never_reads_a_doubt_as_no_news` |
+| R4 | Unrelated stories counted: two-letter tickers ("UK PM", "BA cancels", "HD TV"), word names (Southern California, "Dow jumps", "student visa"), first words alone (King Charles, J.P. Morgan for MS, Harrison Ford), and the publisher's name in Google's description | Medium | headline only; one- and two-letter tickers only as `$PM` or `(NYSE: PM)`; word names need a business word next to them; risky first words never count alone | the 45-case test; `test_google_results_count_only_...` (a publisher named like the company) |
+| R5 | An unreadable feed, or one with a DOCTYPE, counted as a search that found nothing, and was cached as "no news" | Medium | it is a failed search (an error, not `checked`) | `test_google_refusing_pauses_it_..._unreadable_feed_is_a_failure` |
+| R6 | Two processes (the server and the 07:00 email) could both pass the Brave cap: 410 granted against 300 in the reviewer's run; Google's pause and spacing were per process | Medium | the count is read and raised in one `BEGIN IMMEDIATE` transaction; Google's next turn and its pause live in the database | `test_brave_never_passes_its_limit_from_two_copies_of_the_app_at_once`, `test_google_requests_wait_their_turn_...` |
+| R7 | A Brave cap reached made Morning movers "unchecked" for the day, and the movers scan re-asked Brave hourly per mover, using up the day | Medium | a cap is "not asked" (`skipped`), not a failure; the scan asks Brave once a stock a day and leaves half the day for the Morning plan | `test_brave_is_a_capped_fallback_...`, `test_a_reserve_keeps_part_...`, `test_the_movers_list_is_todays_...` |
+| R8 | The Morning check counted 20-day-old filings as found, so Brave was not asked and the plan read "no news" | Medium | only items inside the 36 hours count (`fresh_hours`) | `test_the_news_client_adds_search_and_only_fresh_items_...` |
+| R9 | The movers scan and the Google rotation ran inside the Live news loop, holding up price checks and RTPR items (11 s per scan in the reviewer's run) | Medium | they run on their own thread and feed the inbox | `test_the_searches_run_on_their_own_thread` |
+| R10 | The duplicate check dropped separate filings with the same generated title (a second 6-K, the next day's 8-K) | Medium | only across sources, never for filings | `test_the_same_headline_from_two_sources_is_kept_once_but_never_two_filings` |
+| R11 | Yesterday's movers stayed listed and were reused (a found row never searched again); a failed search waited an hour | Low | the list is the New York day's; a failed search is retried after 15 minutes | `test_the_movers_list_is_todays_...` |
+| R12 | Each later story on the same move could open a new day-move opportunity and email hours after the move | Low | one opportunity a stock a day; the later story is listed as skipped | `test_one_move_is_traded_once_a_day` |
+| R13 | The DOCTYPE check read only the first 4,096 characters | Low | the whole feed | `test_google_news_feed_is_read_and_anything_odd_in_it_is_refused` |
+| R14 | The Brave key would follow a redirect to another host (requests drops Authorization, not custom headers) | Low | `allow_redirects=False` | `test_brave_is_a_capped_fallback_...` |
+| R15 | Pacing gaps: a waiting request still went after another's 429; the 30 s sleep cap let requests jump the queue; the rotation ran all night; each paused name logged two warnings | Low | the pause is re-checked after waiting; a turn too far off is skipped instead; 30 minutes between rotations while closed; a paused rotation stops quietly | `test_google_requests_wait_their_turn_...`, `test_google_news_reads_your_holdings_first_and_waits_out_a_pause_quietly` |
+
+The docs were corrected where they claimed more than the code (R16 in the report), and its suspicions
+were handled as follows:
+
+- **Brave's billing month.** It may not be the calendar month, so the limit counts any 31 days.
+- **Google's refusals.** A 403 now pauses it like a 429.
+- **Hour windows.** Google's window is in hours up to a day and in days beyond it.
+- **Movers changing while being read.** The movers are copied before they are returned.
+
+#### The second look
+
+The reviewer re-ran its reproductions on the fixes. Twelve findings were fixed and three only partly
+(R3, R4, R7). It also found seven new problems. All were fixed.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| N1 | The movers panel said "No news found" when headlines came back that could not be tied to the stock (two real Oracle headlines), and asked Brave anyway | Medium | such a row is *news not ruled out*, with a link to read them on Google News; the scan skips Brave then (`brave_if_unmatched=False`) | `test_a_mover_whose_headlines_cannot_be_tied_to_it_is_not_ruled_out`; Chromium `test_live_news_lists_movers_...` |
+| N2 | The name list matched 24 headlines it should not have: "$3M seed round", "Jets fire GM", "the best buy in tech", "nuclear waste management", Paris Hilton, Klaus Schwab, Citi Field, Capital One Arena, Chevron deference, Merck KGaA, intelligence chiefs, meta-analysis, the Amazon Rainforest, "FANG stocks", "Dow stock futures", research notes from Goldman, Moody's and S&P Global, and Title Case headlines | Medium | each word's capital; `EXCLUDE` for other meanings and research notes; `=GM+`; FANG and other word tickers in `COMMON_WORDS`; in Title Case only a business noun counts; commas end the context; possessives with a business noun count (the misses from R3) | the 74-case test; on the reviewer's 69 headlines: 30 of 32 matched (the two misses only say the stock moved) and 36 of 37 rejected (the one left, "Dollar General" for DG, is the company's own name, listed by mistake) |
+| N3 | Any result not tied to the stock left the Morning check unchecked, which with Google on would rarely leave a fade | Medium | only a headline that names the stock in some form but does not match counts (`maybe`); a roundup that Google matched on its body counts as nothing. Headlines that only say the stock moved count as `move` | `test_google_results_count_only_...`, `test_a_headline_that_only_says_the_stock_moved_...` |
+| N4 | `_brave_claim` and `_google_turn` took this object's lock and then the database's; a caller inside a transaction takes them the other way round, and the two threads hung | Low | the database transaction alone orders them | `test_a_claim_from_inside_a_transaction_never_deadlocks` |
+| N5 | Robinhood's quote carries no close, so after 4 p.m. the day could not be measured until the bars caught up | Low | its last regular-hours trade, made that day, is the close (`regular_last`, `regular_trade_time`) | `test_after_the_close_the_day_is_measured_from_todays_close` |
+| N6 | On early-close days, 1 p.m. to 4 p.m. used the previous session's close | Low | `_session_day`: from 1 p.m. on a weekday with the market no longer open, today's session has closed | same test (the day after Thanksgiving) |
+| N7 | A stock that left the movers list and came back lost its row, and Brave was asked again | Low-Medium | `_mover_memory` keeps the day's searches | `test_the_movers_list_is_todays_and_brave_is_asked_once_a_stock_a_day` |
+
+The name cache moved to `search:name:<SYM>`, so a name cached by the first draft of 2.11 is not read.
+
+Still open:
+
+- whether Brave's `page_age` is UTC (it is read as UTC);
+- whether Tradier's after-hours quotes carry the day's `close` (if not, a stock is measured from the bars,
+  or left out until they reach the session).

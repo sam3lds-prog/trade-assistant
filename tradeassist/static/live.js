@@ -7,7 +7,7 @@
 const LIVE_POLL_MS = 4000;
 const LIVE_STATE_WORDS = { waiting: "Waiting for a price", watching: "Watching", opportunity: "Opportunity",
   no_reaction: "No reaction", stopped: "Stopped out", done: "Checked", skipped: "Not traded" };
-const LIVE_SOURCE_WORDS = { streaming: "streaming", polling: "checking each minute", connecting: "connecting",
+const LIVE_SOURCE_WORDS = { streaming: "streaming", polling: "checking", on_demand: "on demand", connecting: "connecting",
   reconnecting: "reconnecting", failed: "failed", off: "off" };
 MORNING_SETUP_WORDS.news = "Ride the news (live)";
 
@@ -40,7 +40,7 @@ function toneTag(item) {
 
 function headlineLink(item) {
   const text = item.headline || "(no headline)";
-  return item.url ? el("a", { href: item.url, target: "_blank", rel: "noopener noreferrer", text }) : el("span", { text });
+  return item.url && /^https?:\/\//i.test(item.url) ? el("a", { href: item.url, target: "_blank", rel: "noopener noreferrer", text }) : el("span", { text });
 }
 
 function signalMove(sig) {
@@ -73,6 +73,45 @@ async function liveWatchStop(card, button) {
   } catch (e) { button.textContent = `Not watched: ${e.message}`; }
 }
 
+/* 2.11: why is it moving? Stocks that moved a lot since the last close, and what a news search found. */
+function moversPanel(d) {
+  const rows = d.movers || [];
+  const t = d.thresholds || {};
+  const intro = d.mover_scan_minutes > 0
+    ? `Every ${num(d.mover_scan_minutes, 0)} minutes while trading (pre-market and after hours included), the stocks Live news follows are scanned for moves of ${num(t.late_day_pct, 0)}% and ${num(t.late_day_ranges, 1)} daily ranges since the last close, and the news is searched for those with nothing in the feed. Search finds a story minutes after it is published, so it explains a move rather than coming before it.`
+    : "The movers scan is off (LIVE_MOVER_SWEEP_MINUTES=0).";
+  const newsCell = m => {
+    if (m.found) return el("div", { class: "small" }, headlineLink({ headline: m.headline || "News found", url: m.url }),
+      el("span", { class: "muted", text: m.via ? ` (${m.via})` : "" }));
+    if (m.unclear) {
+      const n = m.unclear, only = m.move_only === n;
+      const text = only ? ` The only headline${n === 1 ? "" : "s"} found ${n === 1 ? "says" : "say"} that it moved, not why.`
+        : ` ${n} headline${n === 1 ? "" : "s"} came back that may be about it but could not be tied to it.`;
+      return el("div", { class: "small" }, el("strong", { text: "News not ruled out." }), el("span", { class: "muted", text }),
+        m.search_url && /^https:\/\/news\.google\.com\//.test(m.search_url) ? el("span", {}, " ", el("a", { href: m.search_url, target: "_blank", rel: "noopener noreferrer", text: "Read them on Google News" })) : "");
+    }
+    if (m.found === false) return el("div", { class: "small" }, el("strong", { text: "No news found" }),
+      el("span", { class: "muted", text: ` in ${(m.checked || []).join(", ") || "the search"}. A big move with no news found can snap back; check it before riding it.` }));
+    if ((m.errors || []).length) return el("span", { class: "small error", text: `Search failed: ${m.errors[0]}` });
+    return el("span", { class: "small muted", text: "Not searched yet" });
+  };
+  const analyze = m => {
+    if (!state.openDecide || !featureOn("trend_engine_v2")) return "";
+    const b = el("button", { class: "plain small-btn", text: "Analyze" });
+    b.addEventListener("click", () => state.openDecide(m.symbol, m.found ? (m.move_pct > 0 ? "LONG" : "SHORT") : null));
+    return b;
+  };
+  return el("div", { class: "panel" }, el("h3", { text: `Why is it moving? (${rows.length})` }),
+    el("p", { class: "small muted", text: intro }),
+    rows.length ? table([
+      { label: "Stock", cell: m => el("div", {}, el("strong", { text: m.symbol }), el("div", { class: "small muted", text: money(m.price) })) },
+      { label: "Since the close", num: true, cell: m => el("span", { class: m.move_pct >= 0 ? "pos-text" : "neg-text", text: signedPct(m.move_pct, 1) }) },
+      { label: "Daily ranges", num: true, cell: m => num(m.ranges, 1) },
+      { label: "News", cell: newsCell },
+      { label: "", cell: analyze }], rows)
+      : el("p", { class: "small muted", text: !d.running ? "The scan runs while listening." : d.session === "closed" ? "The market is closed; the scan runs while trading (pre-market and after hours included)." : d.mover_scan_minutes > 0 && !(d.search && (d.search.sources || []).length) ? "No news search is on (GOOGLE_NEWS=0 and no BRAVE_API_KEY), so the scan does not run." : "No stock has moved that much yet." }));
+}
+
 function opportunityPanel(sig) {
   const news = (sig.news || [])[0] || {};
   const verb = sig.direction === "LONG" ? "Buy" : "Short";
@@ -100,7 +139,7 @@ function buildLive() {
   const statusLine = el("div", { class: "small muted" });
   const sourcesBox = el("div", { class: "live-sources" });
   const notesBox = el("div");
-  const oppBox = el("div"), heldBox = el("div"), watchBox = el("div"), feedBox = el("div");
+  const oppBox = el("div"), heldBox = el("div"), moverBox = el("div"), watchBox = el("div"), feedBox = el("div");
   const seenOpp = new Set();
   let timer = null, failures = 0, firstPaint = true, lastKey = "";
 
@@ -126,12 +165,15 @@ function buildLive() {
     sourcesBox.replaceChildren(...(d.sources || []).map(s => el("span", { class: `live-source live-${s.state}`,
       title: [s.note, s.last_error ? `Last error ${clockTime(s.last_error.at).slice(0, 8)}: ${s.last_error.error}` : null].filter(Boolean).join("\n") || null },
       el("strong", { text: s.name }), ` ${LIVE_SOURCE_WORDS[s.state] || s.state}`,
-      s.items ? el("span", { class: "muted", text: ` · ${s.items} item${s.items === 1 ? "" : "s"}` }) : "")));
+      s.items ? el("span", { class: "muted", text: ` · ${s.items} item${s.items === 1 ? "" : "s"}` }) : "",
+      s.name === "Brave" && d.search && d.search.brave_usage ? el("span", { class: "muted",
+        text: ` · ${d.search.brave_usage.month} of ${d.search.brave_usage.month_limit} in ${d.search.brave_usage.window_days || 31} days` }) : "")));
     if (!(d.sources || []).length) sourcesBox.replaceChildren(el("span", { class: "small muted", text: "No news source is set up yet." }));
     const notes = [];
     if (d.mode === "demo") notes.push(banner("warn", "Demo data: the news items and the price moves after them are made up, so you can learn the screen on any day."));
     if (d.session === "closed") notes.push(banner("info", "The market is closed: news is collected now, and each stock is priced when trading resumes (pre-market included)."));
     for (const s of d.sources || []) if (s.state === "failed" && s.note) notes.push(banner("fail", s.note));
+    if (d.search && d.search.google_paused_until) notes.push(banner("warn", `Google News refused a search, so it is paused until ${clockTime(d.search.google_paused_until).slice(0, 5)} New York time; it resumes by itself.`));
     for (const n of d.setup_notes || []) notes.push(el("p", { class: "small muted", text: n }));
     notesBox.replaceChildren(...notes);
     const t = d.thresholds || {};
@@ -148,7 +190,8 @@ function buildLive() {
     renderSources(d);
     const sigs = d.signals || [];
     const opps = sigs.filter(s => ["opportunity", "stopped", "done"].includes(s.state) && s.direction);
-    const key = JSON.stringify([sigs.map(s => [s.id, s.state, s.last_price, s.checks]), d.last_id, allBox.checked]);
+    const key = JSON.stringify([sigs.map(s => [s.id, s.state, s.last_price, s.checks]), d.last_id, allBox.checked,
+      (d.movers || []).map(m => [m.symbol, m.updated_at, m.found])]);
     if (key === lastKey) return;
     lastKey = key;
     for (const s of opps) {
@@ -164,6 +207,7 @@ function buildLive() {
       ...held.map(s => el("div", { class: "live-row" }, el("strong", { text: s.symbol }), " ", headlineLink((s.news || [])[0] || {}),
         el("div", {}, signalMove(s)), holdingsBanner(s))))] : []));
 
+    moverBox.replaceChildren(moversPanel(d));
     const watching = sigs.filter(s => ["waiting", "watching"].includes(s.state));
     const quiet = sigs.filter(s => ["no_reaction", "skipped"].includes(s.state)).slice(0, 25);
     watchBox.replaceChildren(el("div", { class: "panel" }, el("h3", { text: `Watching the price after the news (${watching.length})` }),
@@ -215,7 +259,7 @@ function buildLive() {
   const view = el("section", {}, el("h2", { text: "Live news" }),
     el("p", { class: "lede", text: "Press releases, 8-K filings and headlines as they arrive, the price's answer in the minutes after, and a trade card when the move confirms: shares or calls when the news sends a stock up, a short or puts when it sends it down. A news move is usually fastest in its first seconds; this shows you the news and the price together, with the risk worked out. Nothing here places an order." }),
     el("div", { class: "panel" }, el("div", { class: "row" }, startBtn, stopBtn, notifyBtn), err, sourcesBox, statusLine, notesBox),
-    oppBox, heldBox, watchBox, feedBox);
+    oppBox, heldBox, moverBox, watchBox, feedBox);
   view.onShow = () => poll();
   return view;
 }

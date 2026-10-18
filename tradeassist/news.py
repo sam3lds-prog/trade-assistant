@@ -124,11 +124,13 @@ def _when(ts: Any) -> str | None:
 
 
 class NewsClient:
-    def __init__(self, settings: Any, db: Any, sec: Any = None, session: requests.Session | None = None):
+    def __init__(self, settings: Any, db: Any, sec: Any = None, session: requests.Session | None = None,
+                 search: Any = None):
         self.settings = settings
         self.db = db
         self.sec = sec
         self.session = session or requests.Session()
+        self.search = search                  # 2.11: searchnews.SearchNews (Google News, Brave), or None
         self._last_error: dict[str, Any] | None = None
 
     @property
@@ -136,12 +138,18 @@ class NewsClient:
         return bool(self.settings.finnhub_api_key)
 
     @property
+    def searchable(self) -> bool:
+        """Whether news can be searched (Google News or Brave) besides Finnhub and the SEC (2.11)."""
+        return bool(self.search is not None and not self.demo and (self.search.google_on or self.search.brave_on))
+
+    @property
     def demo(self) -> bool:
         return not self.configured and self.settings.resolved_mode == "demo"
 
     def status(self) -> dict[str, Any]:
         return {"finnhub": self.configured, "sec": bool(self.sec and self.sec.enabled), "demo_headlines": self.demo,
-                "last_error": self._last_error}
+                "last_error": self._last_error,
+                "search": self.search.status() if self.search is not None else None}
 
     def _finnhub(self, path: str, params: dict[str, Any]) -> Any:
         try:
@@ -216,14 +224,21 @@ class NewsClient:
             out.append(it)
         return out
 
-    def company(self, symbol: str, days: int = 7) -> dict[str, Any]:
+    def company(self, symbol: str, days: int = 7, deep: bool = False, fresh_hours: int | None = None) -> dict[str, Any]:
+        """Headlines and filings for one stock. With search on (2.11), Google News is searched too (over
+        `fresh_hours`, else up to three days); with `deep` (the Morning plan's ride-or-fade check), Brave is also
+        asked when nothing inside `fresh_hours` was found by the other sources.
+
+        Adds "unmatched" (search results inside the window that could not be tied to the stock) and "skipped"
+        (searches a limit did not allow), so a caller can tell "nothing came back" from "not sure"."""
         symbol = symbol.upper()
         days = min(DAY_CHOICES, key=lambda d: (abs(d - int(days)), d))   # a few windows, so the cache stays small
-        key = f"news:company:{symbol}:{days}:{self.configured}:{self.demo}"
+        key = (f"news:company:{symbol}:{days}:{self.configured}:{self.demo}:{self.searchable}:{bool(deep)}:"
+               f"{fresh_hours or ''}")
         hit = self.db.cache_get(key, CACHE_SECONDS)
         if hit is not None:
             return {**hit, "cached": True}
-        items, errors, sources = [], [], []
+        items, errors, sources, skipped, unmatched, moves = [], [], [], [], 0, 0
         today = datetime.now(NY)
         if self.configured:
             try:
@@ -245,9 +260,32 @@ class NewsClient:
         except Exception as exc:                         # noqa: BLE001 - filings are a bonus; their failure is reported
             if "ticker list" not in str(exc):            # funds and some foreign companies do not file: not a failure
                 errors.append(self._failed("SEC filings", exc))
+        if self.searchable:
+            hours = int(fresh_hours or min(days * 24, 72))
+            since = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+            def fresh(it: dict[str, Any]) -> bool:
+                try:
+                    when = datetime.fromisoformat(str(it.get("published")).replace("Z", "+00:00"))
+                    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)) >= since
+                except ValueError:
+                    return False
+            try:
+                got = self.search.search(symbol, hours=hours, brave="fallback" if deep else "never",
+                                         have=sum(1 for it in items if fresh(it)))
+                items += got["items"]
+                sources += [c for c in got["checked"] if c not in sources]
+                errors += got["errors"]
+                skipped += got.get("skipped") or []
+                unmatched += int(got.get("unmatched") or 0)
+                moves += int(got.get("move_only") or 0)
+            except Exception as exc:                     # noqa: BLE001 - search is a bonus; its failure is reported
+                errors.append(self._failed("news search", exc))
         items = self._dedupe(items)[:MAX_ITEMS]
         out = {"symbol": symbol, "days": days, "items": items, "tone": summarize_tone(items), "sources": sources,
-               "errors": errors, "finnhub": self.configured, "demo": self.demo,
+               "errors": errors, "skipped": skipped, "unmatched": unmatched, "move_only": moves,
+               "finnhub": self.configured,
+               "demo": self.demo,
                "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "notes": self._notes()}
         if not errors:
             self.db.cache_put(key, out)
@@ -279,9 +317,12 @@ class NewsClient:
                  "tone of headlines, not a forecast."]
         if self.demo:
             notes.insert(0, "Demo headlines: made up. Set FINNHUB_API_KEY in .env for real ones.")
-        elif not self.configured:
+        elif not self.configured and not self.searchable:
             notes.insert(0, "No news source is set: add FINNHUB_API_KEY to .env (a free key from finnhub.io) for "
-                            "headlines. SEC filings still appear when SEC_USER_AGENT is set.")
+                            "headlines, or leave GOOGLE_NEWS on. SEC filings still appear when SEC_USER_AGENT is set.")
+        if self.searchable:
+            notes.append("Google News results are matched to the stock by its name or ticker in the headline; a search "
+                         "engine indexes news minutes after it is published.")
         return notes
 
     @staticmethod

@@ -1916,7 +1916,10 @@ function renderHealth(h, reload) {
         metric(`${u.requests || 0} of ${a.daily_limit || 0}`, `AI requests today${u.failed ? ` (${u.failed} failed)` : ""}`),
         metric(`${num((u.input_tokens || 0) + (u.output_tokens || 0), 0)}`, `Tokens today${u.web_searches ? `, ${u.web_searches} web searches` : ""}`),
         metric(n.finnhub ? "Finnhub" : n.demo_headlines ? "Demo headlines" : "none", "Headlines from"),
-        metric(n.sec ? "on" : "off", "SEC filings")),
+        metric(n.sec ? "on" : "off", "SEC filings"),
+        metric(n.search && n.search.sources && n.search.sources.length ? n.search.sources.join(", ") : "off", "News search"),
+        n.search && n.search.brave_usage ? metric(`${n.search.brave_usage.month} of ${n.search.brave_usage.month_limit}`, `Brave searches in the last ${n.search.brave_usage.window_days || 31} days (${n.search.brave_usage.day} of ${n.search.brave_usage.day_limit} today)`) : null),
+      n.search && n.search.last_error ? el("p", { class: "small error", text: `Last search error (${timeText(n.search.last_error.at)}, ${n.search.last_error.source}): ${n.search.last_error.error}` }) : null,
       a.last_error ? el("p", { class: "small error", text: `Last AI error (${timeText(a.last_error.at)}): ${a.last_error.error}` }) : null,
       n.last_error ? el("p", { class: "small error", text: `Last news error (${timeText(n.last_error.at)}, ${n.last_error.what}): ${n.last_error.error}` }) : null,
       el("p", { class: "small muted", text: "Keys are read from .env and never shown or logged. AI requests are billed by Anthropic to the key's account; the daily limit is AI_DAILY_REQUESTS." })));

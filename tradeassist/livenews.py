@@ -73,7 +73,13 @@ SEC_CURRENT = ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=
 FINNHUB = "https://finnhub.io/api/v1"
 
 LOOP_SECONDS = 2.0
-POLL_SECONDS = {"SEC EDGAR": 60.0, "Finnhub": 60.0, "RTPR": 300.0, "Demo": 35.0}
+POLL_SECONDS = {"SEC EDGAR": 60.0, "Finnhub": 60.0, "RTPR": 300.0, "Demo": 35.0, "Google News": 300.0}
+GOOGLE_NAMES_PER_POLL = 4        # holdings, then the watchlist, searched in turn: each held stock about every 5 min
+MOVER_LOOKUPS_PER_SCAN = 6       # "why is it moving?" searches in one scan of the movers
+MOVER_RECHECK_MINUTES = 60       # a mover with no news found is searched again after this long
+MOVER_RETRY_MINUTES = 15         # ... and one whose search failed, after this long
+ROTATION_CLOSED_SECONDS = 1800.0 # Google News for holdings and the watchlist while the market is closed
+MOVERS_KEPT = 40                 # movers listed on the screen
 CHECK_DELAYS = (60, 120, 120, 600, 900, 1800)   # seconds between price checks: at 1, 3, 5, 15, 30, 60 minutes
 MERGE_MINUTES = 30               # a later item on a stock within this long joins the open signal
 STALE_HOURS = 18                 # an item this old when its stock can first be priced is listed, not traded
@@ -496,6 +502,21 @@ def levels_for(direction: str, entry: float, ref: float, atr: float, suggested: 
     return stop, t1, t2, why
 
 
+def _news_search_url(term: str) -> str:
+    """Google News's own page for a stock's last day of news, for reading what the search could not tie to it."""
+    from urllib.parse import quote_plus
+    query = quote_plus('"' + term + '" when:1d')
+    return f"https://news.google.com/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+
+
+def _bar_date(value: Any) -> Any:
+    """A daily bar's date as a date (bars carry a date, a timestamp or an ISO string)."""
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except ValueError:
+        return None
+
+
 # --- the feed ------------------------------------------------------------------------------------------------
 
 class LiveFeed:
@@ -524,6 +545,13 @@ class LiveFeed:
         self._bars: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self._demo_runs: dict[int, tuple[float, float]] = {}   # demo only: signal id -> (start, made-up move)
         self._headlines: Any = None                    # a small pool reading RTPR headlines, made when first needed
+        self._google_cursor = 0
+        self._next_scan = 0.0
+        self._movers: dict[str, dict[str, Any]] = {}
+        self._movers_day: str | None = None
+        self._mover_memory: dict[str, dict[str, Any]] = {}    # today's searches, kept when a stock leaves the list
+        self._movers_lock = threading.Lock()
+        self._search_thread: threading.Thread | None = None
         self._headline_jobs = 0
         self.started_at: str | None = None
         self.sources: dict[str, dict[str, Any]] = {name: {"name": name, "state": "off", "note": None,
@@ -540,9 +568,19 @@ class LiveFeed:
             names.append("SEC EDGAR")
         if self.settings.finnhub_api_key:
             names.append("Finnhub")
+        search = self.search
+        if search.google_on:
+            names.append("Google News")
+        if search.brave_on:
+            names.append("Brave")
         if self.svc.market.info.mode == "demo":
             names.append("Demo")
         return names
+
+    @property
+    def search(self) -> Any:
+        from .searchnews import for_service
+        return for_service(self.svc)
 
     def setup_notes(self) -> list[str]:
         notes = []
@@ -554,6 +592,12 @@ class LiveFeed:
             notes.append("SEC 8-K filings are off: set SEC_USER_AGENT in .env (your name and email; free).")
         if not self.settings.finnhub_api_key:
             notes.append("Finnhub headlines are off: set FINNHUB_API_KEY in .env (a free key from finnhub.io).")
+        if not getattr(self.settings, "google_news", True):
+            notes.append("Google News search is off (GOOGLE_NEWS=0): it is free and needs no key.")
+        if not getattr(self.settings, "brave_api_key", ""):
+            notes.append("Brave search is optional (BRAVE_API_KEY): a key comes with $5 of credit a month, about 1,000 "
+                         "searches, and a card that is charged past it. The app stops at BRAVE_MONTHLY_LIMIT (900) so "
+                         "the credit is never exceeded.")
         return notes
 
     def _source(self, name: str, state: str | None = None, note: str | None = None, error: str | None = None,
@@ -576,7 +620,7 @@ class LiveFeed:
     # thread still finishing its last pass after a stop can never be woken again by the next start. A start
     # while that thread is still alive is refused until it has ended, so two loops never run at once.
     def _alive(self) -> bool:
-        return any(t is not None and t.is_alive() for t in (self._thread, self._ws_thread))
+        return any(t is not None and t.is_alive() for t in (self._thread, self._ws_thread, self._search_thread))
 
     @property
     def running(self) -> bool:
@@ -598,9 +642,14 @@ class LiveFeed:
                 self._thread = threading.Thread(target=self._run, args=(stop,), name="live-news", daemon=True)
                 self._ws_thread = (threading.Thread(target=self._stream, args=(stop,), name="live-news-rtpr",
                                                    daemon=True) if self._rtpr else None)
+                self._search_thread = (threading.Thread(target=self._search_run, args=(stop,),
+                                                        name="live-news-search", daemon=True)
+                                       if self.search.available else None)
                 self._thread.start()
                 if self._ws_thread:
                     self._ws_thread.start()
+                if self._search_thread:
+                    self._search_thread.start()
             if remember:
                 self._remember(True)
         return self.status()
@@ -608,7 +657,7 @@ class LiveFeed:
     def stop(self, remember: bool = True, wait: float = 2.0) -> dict[str, Any]:
         with self._life:
             self._stop.set()
-            for t in (self._thread, self._ws_thread):
+            for t in (self._thread, self._ws_thread, self._search_thread):
                 if t is not None:
                     t.join(timeout=wait)
             with self._lock:
@@ -659,7 +708,9 @@ class LiveFeed:
 
     def _run(self, stop: threading.Event) -> None:
         for name in self.source_names():
-            if name != "RTPR":
+            if name == "Brave":
+                self._source(name, "on_demand", "Asked only when a mover has no news from the free sources.")
+            elif name != "RTPR":
                 self._source(name, "polling", None)
         if self._rtpr:
             self._source("RTPR", "connecting", None)
@@ -684,6 +735,8 @@ class LiveFeed:
         for name in self.source_names():
             if name == "RTPR" and "RTPR" not in self._next_poll:
                 continue                              # streaming: the archive is read only as a fallback
+            if name in ("Brave", "Google News"):
+                continue                              # searched on the search thread (_search_run)
             if self._next_poll.get(name, 0.0) > now:
                 continue
             self._next_poll[name] = now + POLL_SECONDS[name]
@@ -724,6 +777,258 @@ class LiveFeed:
         if name == "Demo":
             return [demo_item(sorted(self.universe())[:60] or ["AAPL"], now_utc())]
         return []
+
+    # --- the searches, on their own thread -----------------------------------------------------------------
+    def _search_run(self, stop: threading.Event) -> None:
+        """Google News for holdings and the watchlist, and the movers scan, on a thread of their own: a search
+        waits its turn and can take seconds, and that must never hold up the price checks or RTPR's items.
+        What the searches find goes through the inbox like any other source."""
+        next_rotation = 0.0
+        while not stop.is_set():
+            try:
+                if self.search.google_on and time.time() >= next_rotation:
+                    closed = self.session() == "closed"
+                    next_rotation = time.time() + (ROTATION_CLOSED_SECONDS if closed else POLL_SECONDS["Google News"])
+                    self._rotate(stop)
+                if not stop.is_set() and self._scan_due():
+                    self._scan_movers(stop)
+            except Exception:                         # noqa: BLE001 - the thread must survive anything
+                log.exception("Live news: a search pass failed")
+            stop.wait(LOOP_SECONDS)
+
+    def _rotate(self, stop: threading.Event | None = None) -> None:
+        if self.search.google_paused:
+            self._source("Google News", note="Paused after Google refused a request; it resumes by itself.")
+            return
+        try:
+            items = self._google_rotation(stop)
+        except Exception as exc:                      # noqa: BLE001 - reported on the source
+            self._source("Google News", error=redact(str(exc)) or exc.__class__.__name__)
+            return
+        self._source("Google News", note="", ok=True)
+        for it in items:
+            try:
+                self._inbox.put_nowait(it)
+            except queue.Full:
+                break
+
+    def _google_rotation(self, stop: threading.Event | None = None) -> list[dict[str, Any]]:
+        """The next few of your holdings, then your watchlist, searched on Google News (the last six hours)."""
+        held = [h for h in self._held_symbols()]
+        names = list(dict.fromkeys([*held, *(s.upper() for s in self.settings.watchlist)]))
+        if not names:
+            return []
+        out, errors = [], []
+        for _ in range(min(GOOGLE_NAMES_PER_POLL, len(names))):
+            if (stop is not None and stop.is_set()) or self.search.google_paused:
+                break
+            sym = names[self._google_cursor % len(names)]
+            self._google_cursor += 1
+            got = self.search.search(sym, hours=6, brave="never")
+            errors += got["errors"]
+            out += [self._search_item(sym, it) for it in got["items"]]
+        if errors and not out:
+            raise RuntimeError(errors[-1])
+        return out
+
+    def _held_symbols(self) -> list[str]:
+        try:
+            return [r["symbol"] for r in self.db.query(
+                "SELECT DISTINCT symbol FROM positions WHERE status IN ('OPEN', 'PARTIALLY_CLOSED') ORDER BY symbol")]
+        except Exception:                             # noqa: BLE001 - no positions table yet
+            return []
+
+    @staticmethod
+    def _search_item(symbol: str, it: dict[str, Any]) -> dict[str, Any]:
+        source = "Brave" if it.get("via") == "Brave" else "Demo" if it.get("via") == "Demo search" else "Google News"
+        return make_item(source, it["id"], [symbol], it["headline"], url=it.get("url"),
+                         published=parse_time(it.get("published")), summary=it.get("summary") or "",
+                         extra={"publisher": it.get("source"), "found_by": "search"})
+
+    # --- the close a day's move is measured from -----------------------------------------------------------
+    def _session_day(self) -> Any:
+        """The date of the last regular session that has closed: today from 4 p.m. on a weekday, or from 1 p.m.
+        when the market is no longer open then (an early close), otherwise the weekday before. Market holidays
+        are covered by the quote's previous close (see _day_close)."""
+        from .morning import last_session_date
+        now = datetime.now(NY)
+        day = last_session_date(now)
+        if day != now.date() and now.weekday() < 5 and (now.hour, now.minute) >= (13, 0) and self.session() != "open":
+            return now.date()
+        return day
+
+    def _after_close(self) -> bool:
+        return self._session_day() == datetime.now(NY).date()
+
+    @staticmethod
+    def _num(v: Any) -> float | None:
+        return float(v) if isinstance(v, (int, float)) and math.isfinite(v) and v > 0 else None
+
+    def _closing_quote(self, q: dict[str, Any], day: Any) -> float | None:
+        """The session's close as a quote gives it: Tradier's `close`, or Robinhood's last regular-hours trade
+        when it was made that day (from noon on, so an early close counts)."""
+        close = self._num(q.get("close"))
+        if close:
+            return close
+        last, when = self._num(q.get("regular_last")), parse_time(q.get("regular_trade_time"))
+        if last and when is not None:
+            local = when.astimezone(NY)
+            if local.date() == day and local.hour >= 12:
+                return last
+        return None
+
+    def _quote_close(self, q: dict[str, Any]) -> float | None:
+        """The last finished close as the quote alone gives it, for a first look across many stocks: after the
+        session its own close when it has one, else its previous close."""
+        if self.svc.market.info.mode != "demo" and self._after_close():
+            close = self._closing_quote(q, datetime.now(NY).date())
+            if close:
+                return close
+        return self._num(q.get("prevclose"))
+
+    def _day_close(self, q: dict[str, Any], daily: dict[str, Any] | None) -> float | None:
+        """The close of the last finished session, which a day's move is measured from: today's once today's
+        session has closed, otherwise the one before. From the saved daily bars when they reach that session,
+        else from the quote; None when neither can say (after the close, before today's close is known), so
+        yesterday's close is never taken for today's."""
+        prev = self._num(q.get("prevclose"))
+        if self.svc.market.info.mode == "demo":     # demo bars include a made-up today; the quote says which
+            return prev or (daily or {}).get("prev_close")
+        session_day = self._session_day()
+        if daily and daily.get("last_date") == session_day:
+            return daily["prev_close"]
+        if session_day == datetime.now(NY).date():
+            return self._closing_quote(q, session_day)
+        return prev or (daily or {}).get("prev_close")
+
+    # --- why is it moving? ---------------------------------------------------------------------------------
+    def _scan_due(self) -> bool:
+        minutes = float(getattr(self.settings, "live_mover_sweep_minutes", 0) or 0)
+        if minutes <= 0 or not self.search.available or time.time() < self._next_scan:
+            return False
+        if self.session() == "closed":
+            return False
+        self._next_scan = time.time() + minutes * 60
+        return True
+
+    def _has_news(self, symbol: str, hours: float) -> dict[str, Any] | None:
+        row = self.db.one("SELECT id, headline, url, source FROM live_news WHERE received_at >= ? AND symbols LIKE ? "
+                          "ORDER BY id DESC LIMIT 1", (iso(now_utc() - timedelta(hours=hours)), f'%"{symbol}"%'))
+        return dict(row) if row else None
+
+    def _scan_movers(self, stop: threading.Event | None = None) -> None:
+        """Quote the universe, find the stocks that moved at least LIVE_MIN_DAY_PCT percent and LIVE_MIN_DAY_ATR of
+        their daily ranges since the last finished close, and search the news for those the feed has nothing on.
+        News found goes into the feed (and is judged like any late item); none found is listed as such. The list
+        is today's: it starts empty each New York day."""
+        session = self.session()
+        today = datetime.now(NY).date().isoformat()
+        with self._movers_lock:
+            if self._movers_day != today:
+                self._movers, self._mover_memory, self._movers_day = {}, {}, today
+            old = {k: dict(v) for k, v in self._movers.items()}
+            memory = {k: dict(v) for k, v in self._mover_memory.items()}
+        names = sorted(self.universe())
+        quotes: dict[str, Any] = {}
+        for i in range(0, len(names), 50):
+            if stop is not None and stop.is_set():
+                return
+            chunk = names[i:i + 50]
+            try:
+                quotes.update(self.svc.market._call("live movers", lambda c=chunk: self.svc.market.provider.quotes(c)))
+            except DataError as exc:
+                log.info("Live news: movers quotes failed: %s", exc)
+        pct_min, atr_min = self.settings.live_min_day_pct, self.settings.live_min_day_atr
+        candidates: list[tuple[str, float, float, dict[str, Any]]] = []
+        for sym, q in quotes.items():
+            price, _ = self._price(q, session)
+            ref = self._quote_close(q)
+            if price and ref and abs(100 * (price / ref - 1)) >= pct_min:
+                candidates.append((sym, price, 100 * (price / ref - 1), q))
+        candidates.sort(key=lambda r: -abs(r[2]))
+        now = now_utc()
+        lookups = 0
+        reserve = max(0, int(getattr(self.settings, "brave_daily_limit", 0) or 0) // 2)   # half the day: Morning plan
+        rows: dict[str, dict[str, Any]] = {}
+        for sym, price, _, q in candidates[:MOVERS_KEPT]:
+            if stop is not None and stop.is_set():
+                break
+            daily = self._daily(sym)
+            prev = self._day_close(q, daily) if daily and daily.get("atr") else None
+            if not prev:
+                continue
+            pct, ranges = 100 * (price / prev - 1), (price - prev) / daily["atr"]
+            if abs(pct) < pct_min or abs(ranges) < atr_min:
+                continue
+            # A stock that dropped off the list and came back keeps what was learned about it today.
+            row = old.get(sym) or memory.get(sym) or {"symbol": sym, "first_seen": iso(now), "checked_at": None,
+                                                      "found": None, "checked": [], "errors": []}
+            row.update(price=price, prev_close=prev, move_pct=pct, ranges=ranges, updated_at=iso(now),
+                       name=q.get("description") or None)
+            have = self._has_news(sym, STALE_HOURS)
+            if have:
+                row.update(found=True, unclear=0, headline=have["headline"], url=have["url"], via=have["source"])
+            elif not row.get("found"):
+                last = parse_time(row.get("checked_at"))
+                wait = MOVER_RECHECK_MINUTES if row.get("found") is False or row.get("unclear") else MOVER_RETRY_MINUTES
+                due = last is None or now - last >= timedelta(minutes=wait)
+                if due and lookups < MOVER_LOOKUPS_PER_SCAN and self.search.available:
+                    lookups += 1
+                    brave = "never" if row.get("brave_day") == today else "fallback"   # Brave once a stock a day
+                    try:
+                        got = self.search.search(sym, hours=STALE_HOURS, name_hint=q.get("description"),
+                                                 brave=brave, brave_reserve=reserve, brave_if_unmatched=False)
+                    except Exception as exc:          # noqa: BLE001 - one search failing never stops the scan
+                        got = {"items": [], "checked": [], "errors": [redact(str(exc)) or exc.__class__.__name__]}
+                    if "Brave" in got["checked"]:
+                        row["brave_day"] = today
+                    # Headlines that might be about it but could not be tied to it, or only say it moved: not
+                    # news found, and not "no news" either.
+                    unclear = 0 if got["items"] else int(got.get("unmatched") or 0)
+                    row.update(checked_at=iso(now), checked=got["checked"], errors=got["errors"][:2],
+                               unclear=unclear, move_only=int(got.get("move_only") or 0),
+                               found=bool(got["items"]) if got["checked"] and not unclear else None,
+                               search_url=_news_search_url(got.get("name") or sym))
+                    for it in got["items"][:5]:
+                        try:
+                            self._inbox.put_nowait(self._search_item(sym, it))
+                        except queue.Full:
+                            break
+                    if got["items"]:
+                        top = got["items"][0]
+                        row.update(headline=top["headline"], url=top.get("url"), via=top.get("via"))
+            rows[sym] = row
+        for sym, row in old.items():                  # a stock whose quote failed this time keeps its row
+            if sym not in quotes and sym not in rows:
+                rows[sym] = row
+        kept = dict(sorted(rows.items(), key=lambda kv: -abs(kv[1]["move_pct"]))[:MOVERS_KEPT])
+        with self._movers_lock:
+            for sym, row in {**old, **rows}.items():
+                if row.get("checked_at") or row.get("brave_day"):
+                    self._mover_memory[sym] = row
+            self._movers, self._movers_day = kept, today
+        try:
+            self.db.cache_put(self._movers_key(), {"day": today, "rows": kept})
+        except Exception:                             # noqa: BLE001 - kept in memory regardless
+            log.info("Live news: movers not saved")
+
+    def _movers_key(self) -> str:
+        return f"live:movers:{self.svc.market.info.mode}"
+
+    def movers(self) -> list[dict[str, Any]]:
+        """Today's movers (copies, so a scan running meanwhile cannot change them under the caller)."""
+        today = datetime.now(NY).date().isoformat()
+        with self._movers_lock:
+            if self._movers_day != today:
+                self._movers, self._movers_day = {}, today
+                try:
+                    saved = self.db.cache_get(self._movers_key()) or {}
+                    if saved.get("day") == today:
+                        self._movers = saved.get("rows") or {}
+                except Exception:                     # noqa: BLE001
+                    pass
+            rows = [dict(r) for r in self._movers.values()]
+        return sorted(rows, key=lambda r: -abs(r.get("move_pct") or 0))
 
     def _finnhub(self) -> list[dict[str, Any]]:
         key = self.settings.finnhub_api_key
@@ -781,6 +1086,8 @@ class LiveFeed:
                      and (relevant or self.settings.live_universe == "all"))
         if item.get("needs_headline") and (not item["headline"] or item["headline"] == "(no headline)"):
             item["headline"] = f"Press release: {', '.join(item['symbols'])}"
+        elif self._duplicate(item):
+            return None                               # the same story already came in from another source
         news_id = store_item(self.db, item)
         if news_id is None:
             return None
@@ -797,6 +1104,17 @@ class LiveFeed:
         for sym in relevant[:5]:
             self._open_signal(sym, news_id, item)
         return news_id
+
+    def _duplicate(self, item: dict[str, Any]) -> bool:
+        """Whether the same story on one of the same stocks arrived in the last two days from another source
+        (Finnhub and Google News often carry the same headline). Within one source each item has its own id,
+        and filings are never matched by headline, since theirs are made from the form and the company."""
+        if not item["symbols"] or item.get("kind") == "filing":
+            return False
+        rows = self.db.query("SELECT symbols FROM live_news WHERE received_at >= ? AND lower(headline) = lower(?) "
+                             "AND source != ? AND kind != 'filing'",
+                             (iso(now_utc() - timedelta(days=2)), item["headline"], item["source"]))
+        return any(set(json.loads(r["symbols"] or "[]")) & set(item["symbols"]) for r in rows)
 
     def _fetch_headline(self, news_id: int, item: dict[str, Any]) -> None:
         with self._lock:
@@ -907,7 +1225,8 @@ class LiveFeed:
             atr = float(atr_series(df["high"], df["low"], df["close"]).iloc[-1])
             tail = df.tail(20)
             out = {"prev_close": float(df["close"].iloc[-1]), "atr": atr if math.isfinite(atr) and atr > 0 else None,
-                   "dollar_volume": float((tail["close"] * tail["volume"]).mean()), "bars": len(df)}
+                   "dollar_volume": float((tail["close"] * tail["volume"]).mean()), "bars": len(df),
+                   "last_date": _bar_date(df["date"].iloc[-1])}
         self._bars[symbol] = (time.time(), out)
         return out
 
@@ -1003,8 +1322,12 @@ class LiveFeed:
                 return
             if self.svc.market.info.mode == "demo" and "demo_move" in (item.get("extra") or {}):
                 self._demo_runs[sig["id"]] = (time.time(), float(item["extra"]["demo_move"]))
+            # The day is measured from the last finished session's close (today's from 4 p.m.). When that is not
+            # known yet, from the price at the news: the day's move is then the move since the news, which only
+            # makes the late rule harder to meet.
+            prev = self._day_close(quote, daily) or price
             self._update(sig["id"], same, state="watching", ref_price=price, ref_at=iso(now),
-                         prev_close=daily["prev_close"], atr=daily["atr"], last_price=price, last_at=iso(now),
+                         prev_close=prev, atr=daily["atr"], last_price=price, last_at=iso(now),
                          next_check_at=iso(now + timedelta(seconds=CHECK_DELAYS[0])),
                          reason="Watching how the price answers the news.",
                          holdings_json=json.dumps(self.holdings(sym)))
@@ -1026,7 +1349,11 @@ class LiveFeed:
         fields: dict[str, Any] = {"last_price": price, "last_at": iso(now), "checks": n,
                                   "checks_json": json.dumps(checks[-12:]), "next_check_at": next_at}
         if sig["state"] == "watching":
-            if verdict["direction"]:
+            if verdict["direction"] and verdict["path"] == "day_move" and self._opportunity_today(sym, sig["id"]):
+                fields.update(state="skipped", next_check_at=None, reason=(
+                    f"{sym} already had an opportunity today. This later story arrived after the move ({verdict['day_pct']:+.1f}% "
+                    "on the day), so it is listed, not traded a second time."))
+            elif verdict["direction"]:
                 fields.update(self._opportunity(sig, item, verdict, price))
                 # An opportunity has its own schedule: checked against its stop every ten minutes for an hour,
                 # whichever of the news checks it confirmed on (the last of them included).
@@ -1058,6 +1385,11 @@ class LiveFeed:
         written = self._update(sig["id"], same, **fields)
         if written and fields.get("state") == "opportunity":
             self._notify(sig["id"])
+
+    def _opportunity_today(self, symbol: str, signal_id: int) -> bool:
+        start = datetime.now(NY).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        return self.db.one("SELECT 1 FROM live_signals WHERE symbol = ? AND id != ? AND opportunity_at >= ? LIMIT 1",
+                           (symbol, signal_id, iso(start))) is not None
 
     def _opportunity(self, sig: dict[str, Any], item: dict[str, Any], verdict: dict[str, Any],
                      price: float) -> dict[str, Any]:
@@ -1171,6 +1503,8 @@ class LiveFeed:
                 "sources": sources, "setup_notes": self.setup_notes(), "session": self.session(),
                 "universe": self.settings.live_universe, "universe_size": len(self.universe()),
                 "email": bool(self.settings.live_news_email), "mode": self.svc.market.info.mode,
+                "search": self.search.status(),
+                "mover_scan_minutes": float(getattr(self.settings, "live_mover_sweep_minutes", 0) or 0),
                 "thresholds": {"reaction_pct": self.settings.live_min_reaction_pct,
                                "reaction_ranges": self.settings.live_min_reaction_atr,
                                "late_day_ranges": self.settings.live_min_day_atr,
@@ -1197,8 +1531,8 @@ class LiveFeed:
         for s in signals:
             s["news"] = [heads[i] for i in s["news_ids"] if i in heads]
         last = self.db.one("SELECT MAX(id) AS m FROM live_news")
-        return {**self.status(), "items": items, "signals": signals, "last_id": (last["m"] if last else 0) or 0,
-                "checked_at": iso(now_utc())}
+        return {**self.status(), "items": items, "signals": signals, "movers": self.movers(),
+                "last_id": (last["m"] if last else 0) or 0, "checked_at": iso(now_utc())}
 
 
 def _clean(value: Any) -> Any:
