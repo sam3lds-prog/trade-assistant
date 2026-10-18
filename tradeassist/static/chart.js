@@ -341,7 +341,7 @@ function interactiveChart(symbol) {
     chartBox.classList.add("refetching");
     try {
       const d = await api(`/v2/chart/${encodeURIComponent(symbol)}?${query()}`);
-      if (mine !== state_.request) return;
+      if (mine !== state_.request || !panel.isConnected) return;    // superseded, or the screen was replaced meanwhile
       state_.data = d; state_.sim = null; state_.selection = null; state_.userWindow = false; state_.view = null;
       state_.group = d.group.key;
       groupSel.replaceChildren(...CHART_GROUPS.filter(([v]) => d.range.groups.includes(v)).map(([v, t]) => el("option", { value: v, text: t, selected: v === d.group.key })));
@@ -442,7 +442,7 @@ function interactiveChart(symbol) {
         el("div", { class: "lw-scenario-pct" }, el("strong", { text: `${r.pct.toFixed(0)}%` }), el("span", { class: "muted small", text: ` (${r.low.toFixed(0)}–${r.high.toFixed(0)}%, ${r.cases} of ${r.of})` }))))));
     }
     const lean = o.lean || {};
-    kids.push(el("p", {}, el("strong", { text: lean.direction === "no lean" ? "No lean" : `Leaning ${lean.direction}` }), el("span", { class: "muted", text: lean.of ? ` · ${lean.for} of ${lean.of} readings with enough cases${lean.why && lean.why.length ? `: ${lean.why.join(", ")}` : ""}.` : " · no reading has enough cases to count." })));
+    kids.push(el("p", {}, el("strong", { text: lean.direction === "no lean" ? "No lean" : `Leaning ${lean.direction}` }), el("span", { class: "muted", text: lean.of ? ` · ${lean.for} of the ${lean.of} reading${lean.of === 1 ? "" : "s"} that count${lean.why && lean.why.length ? `: ${lean.why.join(", ")}` : ""}.` : " · no reading has ten cases and a way that followed at least 55% of the time." })));
     kids.push(el("ul", { class: "plain small lw-readings" }, (o.readings || []).map(r => el("li", {},
       el("strong", { text: `${r.label}: ` }),
       isNum(r.frequency) ? el("span", { class: r.direction > 0 ? "pos-text" : r.direction < 0 ? "neg-text" : "", text: `${(100 * r.frequency).toFixed(0)}%` }) : "",

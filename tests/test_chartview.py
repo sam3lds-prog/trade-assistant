@@ -255,6 +255,8 @@ def test_the_bar_is_lowered_a_step_at_a_time_when_nothing_matches_and_the_result
     r3 = S.search(strict, 40, 59, "1d", min_corr=0.99)
     assert r3["matches"] == [] and "closest was" in r3["note"] and r3["lowered_from"] is None
     assert "at least 8 bars" in S.search(df, 595, 599, "1d")["note"]
+    short = S.search(df.iloc[:70].reset_index(drop=True), 30, 69, "1d", min_corr=0.5)   # 40 bars, 20 after: no room
+    assert short["matches"] == [] and short["eligible_windows"] == 0 and "hold no stretch" in short["note"]
     flat = pd.DataFrame({"close": [100.0] * 50, "high": [100.0] * 50, "low": [100.0] * 50})
     assert "flat" in S.search(flat, 30, 49, "1d")["note"]
 

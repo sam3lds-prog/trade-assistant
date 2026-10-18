@@ -574,6 +574,14 @@ def intraday_tables(cur: sqlite3.Cursor) -> None:
         first_t    INTEGER,
         last_t     INTEGER,
         fetched_at REAL NOT NULL,
-        asked_from REAL,                        -- the start of the span last asked of the source (UTC seconds)
         PRIMARY KEY (symbol, interval)
     )""")
+
+
+@migration(16, "the span last asked of the source for bars within the day")
+def intraday_asked_from(cur: sqlite3.Cursor) -> None:
+    """2.12: freshness of the bars within the day is judged by the span last asked of the source, not by the
+    first bar held (which sits at 9:30 of a trading day, so a span's first calendar day often has none)."""
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(intraday_meta)").fetchall()}
+    if "asked_from" not in columns:
+        cur.execute("ALTER TABLE intraday_meta ADD COLUMN asked_from REAL")

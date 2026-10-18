@@ -1178,3 +1178,5 @@ An independent reviewer read the change and ran reproductions. It reported 16 fi
 | C14 | The distance was presented as a second measure though it is a function of the correlation | Low | reported, not used; the docs say so | — |
 | C15 | Tests that asserted tautologies | Low | rewritten to assert the readings, the markers, the vote rule and the lowered bar | `tests/test_chartview.py` |
 | C16 | A swing-size change left the structure panel on the old size; unused range config; a searched window stuck for later presses | Low | both reload; the config is gone; each press reads the screen afresh unless a window was selected | — |
+
+Its second look confirmed all sixteen and found two more, both fixed: the `asked_from` column had been added to migration 15 after that migration could have run (now migration 16), and a series too short for the window plus its after-bars said "lower the bar" when no window was eligible at all (it now says the history is too short, and `eligible_windows` is reported).

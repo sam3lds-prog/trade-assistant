@@ -48,7 +48,7 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
   sit on the bars they came in on; Live news items too.
 
 The fixed chart is still there with `FEATURE_ANALYZE_INTERACTIVE=0`. New setting:
-`FEATURE_ANALYZE_INTERACTIVE`. Migration 15 adds two tables for bars within the day; nothing else changes.
+`FEATURE_ANALYZE_INTERACTIVE`. Migrations 15 and 16 add two tables for bars within the day; nothing else changes.
 
 ## 2.11.0
 

@@ -138,8 +138,16 @@ def search(series: pd.DataFrame, start: int, end: int, group: str, *, atr: float
     max_h = horizons[-1][0]
     corr, dist = score_windows(closes, shape)
     starts = pick_matches(corr, dist, n, (start, end), min_corr, limit, guard=max_h)
-    outside = np.array([c for i, c in enumerate(corr) if np.isfinite(c) and (i + n - 1 < start or i > end)])
-    out["best_correlation"] = float(outside.max()) if len(outside) else None
+    # The windows the search may use: not overlapping the window on the screen, and with their bars after not
+    # reaching into it either.
+    eligible = np.array([c for i, c in enumerate(corr) if np.isfinite(c) and (i + n - 1 + max_h < start or i > end)])
+    out["best_correlation"] = float(eligible.max()) if len(eligible) else None
+    out["eligible_windows"] = int(len(eligible))
+    if not len(eligible):
+        out["note"] = (f"This stock's {len(closes)} bars at this grouping hold no stretch of {n + max_h} bars before the "
+                       f"window to compare with (the window, then {max_h} bars after it). Select a shorter window, or "
+                       "group the bars more finely.")
+        return out
     asked = min_corr
     while not starts and min_corr - 0.1 >= FLOOR_CORRELATION - 1e-9:
         # Nothing that alike: the bar is lowered a step at a time, down to the floor, and the result says so.
