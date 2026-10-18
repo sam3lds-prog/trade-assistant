@@ -549,3 +549,39 @@ def live_news_tables(cur: sqlite3.Cursor) -> None:
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_live_signals_symbol ON live_signals (symbol, opened_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_live_signals_due ON live_signals (state, next_check_at)")
+
+
+@migration(15, "bars within the day for the interactive chart")
+def intraday_tables(cur: sqlite3.Cursor) -> None:
+    """2.12: bars within the day as the data source gives them (1- or 5-minute), kept about 45 days
+    (intraday.HOLD_DAYS). Finer and coarser chart bars are built from them on demand. Records only."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS intraday_bars (
+        symbol   TEXT NOT NULL,
+        interval TEXT NOT NULL,                 -- 1m or 5m: the source's own bar size
+        t        INTEGER NOT NULL,              -- the bar's start, UTC seconds
+        open     REAL NOT NULL,
+        high     REAL NOT NULL,
+        low      REAL NOT NULL,
+        close    REAL NOT NULL,
+        volume   REAL NOT NULL DEFAULT 0,
+        vwap     REAL,
+        PRIMARY KEY (symbol, interval, t)
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS intraday_meta (
+        symbol     TEXT NOT NULL,
+        interval   TEXT NOT NULL,
+        source     TEXT NOT NULL,               -- live, sandbox, robinhood or demo
+        first_t    INTEGER,
+        last_t     INTEGER,
+        fetched_at REAL NOT NULL,
+        PRIMARY KEY (symbol, interval)
+    )""")
+
+
+@migration(16, "the span last asked of the source for bars within the day")
+def intraday_asked_from(cur: sqlite3.Cursor) -> None:
+    """2.12: freshness of the bars within the day is judged by the span last asked of the source, not by the
+    first bar held (which sits at 9:30 of a trading day, so a span's first calendar day often has none)."""
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(intraday_meta)").fetchall()}
+    if "asked_from" not in columns:
+        cur.execute("ALTER TABLE intraday_meta ADD COLUMN asked_from REAL")

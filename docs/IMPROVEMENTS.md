@@ -1105,3 +1105,78 @@ Still open:
 - whether Brave's `page_age` is UTC (it is read as UTC);
 - whether Tradier's after-hours quotes carry the day's `close` (if not, a stock is measured from the bars,
   or left out until they reach the session).
+
+## 2.12: the interactive chart
+
+**The request.** Intraday analysis and news on Analyze a stock; possible outcomes with the percentage of each
+happening; similar patterns found and overlaid on the current range; the time range and grouping (hours, days,
+weeks, months, quarters) under the user's control; the chart itself manipulable, with indicators added and
+removed; and whether a top or bottom is forming.
+
+**What was built.** `intraday.py` (bars within the day from Tradier, Robinhood and demo, kept in SQLite,
+grouped on the session's grid; weekly, monthly and quarterly bars from daily ones), `similar.py` (the
+normalised-shape search in the stock's own past, with what followed each match), `chartview.py` (the chart,
+similar and outlook calls), `static/chart.js` on TradingView's Lightweight Charts (vendored, Apache-2.0), three
+`/v2/chart` routes, migration 15 and the `analyze_interactive` flag.
+
+**Decisions.**
+
+- *Percentages are frequencies with intervals.* Each reading says how often the same thing on this stock was
+  followed by a rise, with a 95% Wilson interval and its count, and a reading with fewer than ten cases carries
+  no vote. The lean is a count of readings, never a blended number.
+- *Patterns from this stock's own past only* (the user's choice): more honest for bars within the day, where
+  that is all the history there is, and simpler.
+- *The library over the hand-drawn SVG* (the user's choice): zoom, pan and a draggable time scale are the
+  library's; the overlay, the window selection and the readout are the app's.
+- *Whole series to the page.* The chart loads the series held (up to 6,000 bars) with the range marked, so
+  panning and zooming past the range need no request.
+
+| Part | Where | Tests (`tests/test_chartview.py` unless said) |
+| --- | --- | --- |
+| Demo bars within the day pinned to each day's open, high, low and close | `intraday.demo_intraday` | `test_demo_bars_within_the_day_follow_each_days_open_high_low_and_close` |
+| Grouping on the session's grid; weekly, monthly, quarterly | `group_intraday`, `group_daily` | `test_bars_are_grouped_on_the_sessions_grid_and_never_across_a_day`, `test_daily_bars_group_by_week_month_and_quarter_dated_on_their_first_day` |
+| Kept in SQLite, refreshed sparingly, a failed refresh kept and reported | `Intraday.bars` | `test_bars_within_the_day_are_kept_and_refreshed_sparingly` |
+| Tradier timesales and Robinhood 5-minute bars read from their shapes | `providers.tradier.intraday`, `providers.robinhood.find_intraday_bars` | `test_tradier_timesales_are_read_from_their_documented_shape`, `test_robinhood_bars_within_the_day_keep_their_times_and_skip_daily_ones` |
+| The pattern search: planted shapes found, no overlap, the bar lowered and said | `similar.search` | `test_a_planted_shape_is_found_in_the_past_but_never_in_itself`, `test_the_bar_is_lowered_a_step_at_a_time_...` |
+| The chart, custom ranges, news on the bars, future times, the outlook | `chartview.ChartView` | `test_the_chart_covers_the_range_...`, `test_custom_ranges_are_checked_and_honoured`, `test_the_news_sits_on_the_bars_of_the_range`, `test_similar_takes_the_window_on_the_screen_...`, `test_the_outlook_reads_patterns_a_top_or_bottom_...` |
+| The routes and the flag | `api_v2.py`, `features.py` | `test_the_chart_routes_answer_and_check_their_arguments`, `test_settings_know_the_chart_feature` |
+| The page's helpers; the screen in Chromium | `static/chart.js` | `test_the_pages_helpers_clamp_windows_build_overlays_and_lay_out_scenarios`; `tests/test_static_assets.py::test_analyze_has_an_interactive_chart_with_patterns_and_outcomes` |
+
+**Found while building.**
+
+- The library's production build does not check that a series' times are unique and ascending; a repeated
+  time at the junction of a match and its continuation mis-indexed the whole time scale. The overlay keeps
+  one point per time.
+- The library lays its panes out with a `<table>`, and the app's table styles (`td:first-child { min-width }`,
+  cell padding) pushed the canvases right of where the library measured them, so coordinates from its API did
+  not match the picture. `app.css` keeps those styles off the chart.
+- A visible range set on a chart already drawn is laid out a frame late and measured against the old data
+  edge; any change of view redraws the chart with the range set in the same tick.
+
+Not verified against the real services, which this build environment cannot reach: Tradier's timesales and
+Robinhood's bars within the day are written to their published formats.
+
+### The independent review of 2.12
+
+An independent reviewer read the change and ran reproductions. It reported 16 findings; all were fixed.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| C1 | "Top or bottom forming" never worked: the series kept only the indicator columns, the reversal engine needed the pattern columns, and the failure was swallowed | High | the enriched frame is kept whole and the engine's result cached with it; a failure is logged | `test_the_chart_covers_the_range_...` asserts the reading and its markers |
+| C2 | On live sources every call refetched the whole span: freshness was judged by the first bar held, which sits at 9:30 of a trading day, so a span's first calendar day often had none | High | `asked_from` (the span last asked) is kept in `intraday_meta` and judged instead; the lock is per symbol and interval and not held across the fetch | `test_a_live_source_is_asked_once_for_the_span_then_only_for_the_last_day` |
+| C3 | Readings said "enough" at ten cases but voted by their sources' thirty, so only the pattern reading could vote | Medium | one rule for every reading: ten cases, and its way at least 55% of the time; each reading's `frequency` is now the frequency of its own way | `test_the_outlook_reads_patterns_...` recomputes the lean from the readings |
+| C4 | A match ending just before the window had the window's own bars as "what followed" | Medium | neither a match nor the bars read after it may reach into the window | `test_a_planted_shape_is_found_...` (a shape repeated back to back) |
+| C5 | The default horizon fell through to the shortest | Medium | the third horizon (a week on daily bars) | same test as C3 |
+| C6 | Each Analyze left the last chart and its theme listener alive | Medium | one live instance: a new one disposes the last | — (page) |
+| C7 | The series cache grew without bound and keyed daily series by the range's days | Medium | keyed by the years fetched for daily and coarser bars; entries older than a minute evicted | — |
+| C8 | Two searches per press, and the horizon select ran both again | Low | the outlook carries the search; one request | — (page) |
+| C9 | Scenario labels said "daily range" on five-minute bars | Low | the unit follows the grouping | — |
+| C10 | A pre-market headline sat on the day before's bar | Low | a headline before the open goes on that day's first bar | `test_the_news_sits_on_the_bars_of_the_range` |
+| C11 | A weekend custom range or a holiday answered 502 | Low | a 400 that says to pick trading days; 1D is the last day that has bars | `test_custom_ranges_are_checked_and_honoured` |
+| C12 | Demo bars for the rest of today were already there | Low | nothing after the present moment is fetched or returned | — |
+| C13 | The outlook's headline links were not scheme-checked | Low | http(s) only, as on the chart | same test as C3 |
+| C14 | The distance was presented as a second measure though it is a function of the correlation | Low | reported, not used; the docs say so | — |
+| C15 | Tests that asserted tautologies | Low | rewritten to assert the readings, the markers, the vote rule and the lowered bar | `tests/test_chartview.py` |
+| C16 | A swing-size change left the structure panel on the old size; unused range config; a searched window stuck for later presses | Low | both reload; the config is gone; each press reads the screen afresh unless a window was selected | — |
+
+Its second look confirmed all sixteen and found two more, both fixed: the `asked_from` column had been added to migration 15 after that migration could have run (now migration 16), and a series too short for the window plus its after-bars said "lower the bar" when no window was eligible at all (it now says the history is too short, and `eligible_windows` is reported).

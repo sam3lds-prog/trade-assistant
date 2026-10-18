@@ -10,13 +10,15 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 import requests
 
+from ..optionmath import NY
 from .base import (DataError, ProviderInfo, api_symbol, as_list, bars_frame, dicts, display_symbol,
-                   normalize_contract, normalize_quote)
+                   normalize_contract, normalize_quote, num)
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +128,40 @@ class TradierData:
                                               "start": start, "end": end})
         history = body.get("history") or {}
         return bars_frame(dicts(history.get("day")) if isinstance(history, dict) else [])
+
+    # --- bars within the day (2.12) --------------------------------------
+    def intraday_reach(self) -> dict[str, Any]:
+        """How many days back each bar size reaches on Tradier's timesales: about 20 days of 1-minute bars
+        and 40 of 5-minute ones (from Tradier's documentation)."""
+        return {"1m": 20, "5m": 40, "note": "Tradier keeps about 20 days of 1-minute bars and 40 days of 5-minute "
+                                            "bars."}
+
+    def intraday(self, symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
+        """Regular-session bars of `interval` (1m or 5m) between two moments, from /markets/timesales. Tradier
+        gives each bar's start as a UTC timestamp and its volume-weighted average price."""
+        word = {"1m": "1min", "5m": "5min", "15m": "15min"}.get(interval)
+        if word is None:
+            raise DataError(f"Tradier does not offer {interval} bars")
+        fmt = "%Y-%m-%d %H:%M"
+        body = self._get("/markets/timesales", {"symbol": api_symbol(symbol), "interval": word,
+                                                "start": start.astimezone(NY).strftime(fmt),
+                                                "end": end.astimezone(NY).strftime(fmt), "session_filter": "open"})
+        series = body.get("series") or {}
+        rows = []
+        for raw in dicts(series.get("data") if isinstance(series, dict) else None):
+            stamp = num(raw.get("timestamp"))
+            if stamp is None and raw.get("time"):
+                try:
+                    stamp = datetime.fromisoformat(str(raw["time"])).replace(tzinfo=NY).timestamp()
+                except ValueError:
+                    stamp = None
+            if stamp is None:
+                continue
+            rows.append({"t": int(stamp), "open": num(raw.get("open")), "high": num(raw.get("high")),
+                         "low": num(raw.get("low")), "close": num(raw.get("close")), "volume": num(raw.get("volume")),
+                         "vwap": num(raw.get("vwap"))})
+        from ..intraday import intraday_frame
+        return intraday_frame(rows)
 
     def expirations(self, symbol: str) -> list[str]:
         body = self._get("/markets/options/expirations", {"symbol": api_symbol(symbol),

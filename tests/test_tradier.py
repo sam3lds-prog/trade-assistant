@@ -144,7 +144,8 @@ def test_client_only_reads_market_data():
     c.chain("AAPL", "2021-04-16")
     assert all("/markets/" in url for url, _ in session.calls)
     public = [name for name in dir(TradierData) if not name.startswith("_")]
-    assert sorted(public) == ["chain", "clock", "expirations", "history", "quotes"]
+    # 2.12 adds two reads of /markets/timesales (bars within the day). Still no order, account or write method.
+    assert sorted(public) == ["chain", "clock", "expirations", "history", "intraday", "intraday_reach", "quotes"]
 
 
 def test_normalize_contract_handles_seconds_timestamps():

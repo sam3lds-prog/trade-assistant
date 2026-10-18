@@ -495,3 +495,25 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .live-opp { border-color: var(--accent); }
 .live-opp.live-stopped { border-color: var(--line); opacity: 0.85; }
 .live-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
+
+/* 2.12: the interactive chart */
+.lw-chart { position: relative; height: 460px; width: 100%; }
+/* The library lays its panes out with a table: keep the app's table styles off it. */
+.lw-chart table { border-collapse: collapse; border-spacing: 0; width: auto; margin: 0; }
+.lw-chart table, .lw-chart tr, .lw-chart td, .lw-chart th { padding: 0; border: 0; min-width: 0; background: transparent; text-align: left; line-height: 0; }
+.lw-chart td:first-child { min-width: 0; }
+.lw-chart.refetching { opacity: 0.6; }
+.lw-selection { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: 0.12; pointer-events: none; z-index: 2; }
+.lw-readout { min-height: 1.4em; margin-top: 6px; }
+.lw-info { min-height: 1.2em; margin: 4px 0; }
+.lw-find { align-items: center; gap: 10px; margin-top: 8px; }
+.lw-find input[type="range"] { width: 120px; vertical-align: middle; }
+.lw-custom input[type="date"] { width: auto; }
+.lw-scenarios { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(120px, 2fr) minmax(170px, 1fr); gap: 6px 12px; align-items: center; margin: 8px 0; }
+.lw-scenario { display: contents; }
+.lw-bar { height: 10px; background: var(--sunk); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.lw-bar i { display: block; height: 100%; background: var(--accent); }
+.lw-turn { margin: 6px 0; }
+.lw-readings li { margin: 6px 0; }
+.lw-hit { padding: 6px 0; }
+@media (max-width: 820px) { .lw-chart { height: 360px; } .lw-scenarios { grid-template-columns: 1fr; } }

@@ -18,6 +18,38 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.12.0
+
+**Analyze a stock, interactive.** The chart at the foot of Analyze a stock is new.
+
+- **Drawn with TradingView's Lightweight Charts** (Apache-2.0, served by the app itself, nothing loaded
+  from the internet): drag to pan, scroll or pinch to zoom, drag the time axis, hover for every figure of a
+  bar, click a swing, a headline or a top-or-bottom marker to read it.
+- **Any range, any grouping.** 1D to 10Y or custom dates; bars of 1, 5 or 15 minutes, an hour, a day, a
+  week, a month or a quarter. Bars within the day come from Tradier's timesales (about 40 days of 5-minute
+  bars, 20 of 1-minute) or Robinhood (a week of 5-minute bars; with a Tradier token, Tradier's reach), and
+  are made up from each day's open, high, low and close on demo data. They are kept in the database
+  (migration 15) and refreshed each minute while the market trades.
+- **Indicators on and off:** candles or a line, volume, 20-bar EMA, 50- and 200-bar averages, Bollinger
+  bands, VWAP, support and resistance, swings, trendlines, MACD and RSI panes, news markers, tops and
+  bottoms forming.
+- **Similar patterns.** The last 40 bars on screen, or a window selected with two clicks, matched against
+  every window of the same length in this stock's own history at that grouping (correlation of the
+  normalised shapes, 75% or better, lowered a step at a time when nothing matches). Each match is overlaid
+  on the window at its scale, with what followed it drawn past the last bar; the median path and its middle
+  half are drawn with them. Go there pans to the match.
+- **Possible outcomes.** For a chosen horizon: how often the matches went on more than one daily range
+  higher, stayed within one, or fell more than one, and how often they were higher at all, each with a 95%
+  Wilson interval and its count. Beside them, each with its own count: a top or bottom forming on the
+  daily bars and that reading's past on this stock, the recent signals' record, and today's move with its
+  news and how moves this size on this stock went on. A lean counts the readings with ten cases or more.
+  Nothing here is a forecast.
+- **News on the bars.** Headlines and filings of the range (up to 30 days, as far as the sources keep)
+  sit on the bars they came in on; Live news items too.
+
+The fixed chart is still there with `FEATURE_ANALYZE_INTERACTIVE=0`. New setting:
+`FEATURE_ANALYZE_INTERACTIVE`. Migrations 15 and 16 add two tables for bars within the day; nothing else changes.
+
 ## 2.11.0
 
 **News found by searching, at no cost.**

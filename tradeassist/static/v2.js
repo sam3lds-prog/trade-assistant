@@ -599,8 +599,10 @@ function renderAnalysis(d) {
   const dq = d.data_quality;
   if (dq) frag.append(el("div", { class: "panel" }, el("h3", {}, "Data checks ", dq.bars_freshness ? el("span", { class: "small muted", text: `daily bars through ${dq.bars_freshness.last_finished_bar || "n/a"} ` }) : "", dq.bars_freshness ? freshTag(dq.bars_freshness, true) : ""),
     el("ul", { class: "plain small" }, dq.checks.map(c => el("li", {}, statusTag(c.level, c.level === "info" ? "Note" : c.level === "warn" ? "Caution" : "Problem"), ` ${c.text}`)))));
-  const tech = techPanel(d.symbol);
-  frag.append(tech.panel, tech.structure);
+  // 2.12: the interactive chart when its feature is on (and its library loaded), else the fixed chart.
+  const tech = featureOn("analyze_interactive") && typeof interactiveChart === "function" && window.LightweightCharts
+    ? interactiveChart(d.symbol) : techPanel(d.symbol);
+  frag.append(tech.panel, ...(tech.extras || []), tech.structure);
   return frag;
 }
 
