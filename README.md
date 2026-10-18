@@ -87,6 +87,25 @@ Every trade opens to the statement rows it was built from, so each figure can be
 against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
 orders and holdings through the Robinhood connection, read-only.
 
+Version 2.12 makes **Analyze a stock** interactive.
+
+- **The chart** is drawn with TradingView's Lightweight Charts (Apache-2.0, served by the app, no CDN):
+  drag to pan, scroll or pinch to zoom, hover for every figure of a bar, click a swing, a news marker or a
+  top-or-bottom marker to read it.
+- **Any range and grouping.** 1D, 5D, 1M, 3M, 6M, 1Y, 2Y, 5Y, 10Y or custom dates; bars of 1, 5 or 15
+  minutes, an hour, a day, a week, a month or a quarter. Bars within the day come from Tradier (about 40 days
+  of 5-minute bars, 20 of 1-minute) or Robinhood (a week of 5-minute bars), made up on demo data.
+- **Indicators on and off:** candles or a line, volume, 20-bar EMA, 50- and 200-bar averages, Bollinger
+  bands, VWAP, support and resistance, swings, trendlines, MACD and RSI panes, news markers, tops and
+  bottoms forming.
+- **Similar patterns.** Select a window on the chart (or use what is on screen) and the app finds where the
+  same shape appeared in this stock's own history, overlays each match on the window at its scale, draws what
+  followed each past the last bar, and gives the median path with its middle half.
+- **Possible outcomes.** For each horizon, how often the matches went on higher, stayed within one daily
+  range, or fell more than one, each with a 95% interval and the count behind it. Beside them: whether a
+  top or bottom is forming and how that reading went before on this stock, recent signals' past record,
+  and today's move with its news. A lean counts the readings with enough cases; nothing is a forecast.
+
 Version 2.11 finds news by searching, at no cost, so the news checks no longer depend on a paid feed.
 
 - **Google News search** (free, no key, on by default) is searched for each stock by the names news uses
@@ -751,6 +770,40 @@ trend chart then runs on to the horizon date with the targets, the invalidation,
 option prices imply by then and where the contract breaks even. **Set the limit** on any
 contract opens Price an option on it with the limit ladder ready.
 
+**The interactive chart (2.12).** At the foot of Analyze a stock, with `FEATURE_ANALYZE_INTERACTIVE=1`
+(the default).
+
+1. **Range and grouping.** Press 1D to 10Y, or Custom and type two dates. The grouping follows the range
+   (five-minute bars for a day, daily bars for six months, weekly for five years) and can be changed to
+   any the data allows: 1, 5 or 15 minutes, an hour, a day, a week, a month or a quarter. Bars within the
+   day reach back about 40 days on Tradier and a week on Robinhood; the chart says what it loaded and how
+   much more it can pan through.
+2. **Move about.** Drag to pan, scroll or pinch to zoom, drag the time axis to stretch it. **Fit range**
+   returns to the range; **Latest** jumps to the newest bar. Hover and the bar's open, high, low, close,
+   volume and indicators read out underneath.
+3. **Indicators.** Tick what to draw: candles or a close line, volume, 20-bar EMA, 50- and 200-bar
+   averages, Bollinger bands, VWAP (within the day), support and resistance (with the number of touches),
+   swings, trendlines, MACD and RSI panes, news and tops or bottoms forming. The chart redraws at once.
+4. **Click a marker** to read it: a swing's price and when it was confirmed, a headline with its source
+   and tone (and the link), or where a top or bottom began to form.
+5. **Find similar patterns.** The last 40 bars on screen, or a window you select with two clicks, are
+   matched against every window of the same length in this stock's own past at this grouping. Each match
+   is drawn over the window at the window's scale, and what followed it past the last bar; the thick line
+   is the median of what followed, the dashed lines the middle half. The table lists each match with its
+   likeness and what came one, three and five bars later; **Go there** pans to it. The likeness bar
+   (correlation) starts at 75% and is lowered a step at a time when nothing matches, which the note says.
+6. **Possible outcomes.** For the horizon you pick (one bar to twenty, in that grouping's time): how often
+   the matches went on to rise more than one daily range, stay within one, or fall more than one, and how
+   often they were simply higher, each with a 95% interval and the count. Then the other readings, each
+   with its own count: a top or bottom forming on the daily bars and how that reading went before on this
+   stock; the signals of the last ten bars and their record; today's move with the news behind it, and how
+   moves this size on this stock went on. **Lean** counts the readings with ten cases or more; with fewer
+   than ten, a reading is shown but does not count.
+
+What this is not. A shape that looked the same before had other news and another market behind it, and
+eight matches say little: with 8 cases the interval runs from about 15% to 85%. These are frequencies on
+one stock's own past, never forecasts, and nothing places an order.
+
 **Trend reversals (2.1).** On the Analyze screen, a section reads both sides at once: is a
 fall ending in a bottom, or a rise in a top? Exhaustion (a long move, RSI at an extreme, a
 stretch from the 20-day average, divergences, a climax day, reversal candles) and
@@ -865,6 +918,24 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
 - 2.3.1: two independent reviewers checked 2.1.0 to 2.3.0 for accounting, data loss,
   look-ahead and security; the 27 findings were reproduced, fixed and given regression tests
   (`tests/test_review_fixes.py`; listed in `docs/IMPROVEMENTS.md`).
+- 2.12 (the interactive chart):
+  - made-up bars within the day follow each day's open, high, low and close and are the same every time;
+    bars group on the session's grid (9:30, 10:30, ...) and never across a day; daily bars group by week,
+    month and quarter, dated on their first day, with unfinished periods marked;
+  - bars within the day are kept in the database and refetched sparingly; a failed refresh keeps what is
+    held and is reported;
+  - Tradier's timesales and Robinhood's 5-minute historicals are read from their documented shapes;
+  - a planted shape is found three times in 3,000 bars of noise and never in itself or in another match;
+    the likeness bar is lowered a step at a time when nothing matches, and the result says so;
+  - the chart covers the range in the grouping asked for, loads the history around it, checks custom
+    dates, and puts the news on the bars of the range;
+  - the outlook's readings each carry a count and an interval, only readings with 10 cases vote, and the
+    API refuses bad ranges and swing sizes;
+  - the page's helpers are tested under Node, and in Chromium the chart draws, the grouping and range change
+    the bars, a window is selected by two clicks, and the patterns and outcomes render.
+
+  Not checked against the real services, which this build environment cannot reach: Tradier's timesales and
+  Robinhood's bars within the day are written to their published formats.
 - 2.11 (news search):
   - Google News search feeds and Brave results are read from their published shapes; a feed carrying a
     DOCTYPE or ENTITY declaration anywhere is refused, a feed that does not read is a failed check (never
@@ -1051,6 +1122,9 @@ tradeassist/
   livenews.py              live news: RTPR stream, SEC 8-K and Finnhub polling, price reactions, signals (2.10);
                            the "why is it moving?" movers scan (2.11)
   searchnews.py            news found by searching: Google News search feeds and capped Brave news search (2.11)
+  intraday.py              bars within the day (Tradier, Robinhood, demo), kept in SQLite, grouped by hour/week/month (2.12)
+  similar.py               similar patterns in the stock's own past, and what followed them (2.12)
+  chartview.py             the interactive chart: bars, structure, tops and bottoms, news, similar, outlook (2.12)
   morning_email.py         the plan rendered as the 7:00 email, text and HTML (2.8)
   mailer.py                SMTP over verified STARTTLS; the password scrubbed from every error (2.8)
   background.py            the shared background-job slot used by Trade ideas and the Morning plan (2.8)
@@ -1064,9 +1138,10 @@ tradeassist/
   static/                  the web page: flow.js (2.5 pure helpers, tested under Node), app.js classic screens,
                            v2.js version 2 screens, lab.js 2.4 screens, decide.js Today and Decide (2.5),
                            trades.js My trades (2.6), ideas.js Trade ideas (2.7), morning.js Morning plan (2.8),
-                           live.js Live news (2.10)
+                           live.js Live news (2.10), chart.js the interactive chart (2.12), lwcharts.js
+                           TradingView Lightweight Charts 5.2.1 (Apache-2.0; LICENSE-lightweight-charts.txt)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
-docs/IMPROVEMENTS.md       the 2.1.1 to 2.11 engineering record: defects found, tests, reports
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.12 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```

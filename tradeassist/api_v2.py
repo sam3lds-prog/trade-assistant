@@ -585,6 +585,44 @@ def build_router(svc: Any) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # --- the interactive chart (2.12) ---------------------------------------------------------------------
+    from .chartview import ChartView
+    from .chartview import RequestError as ChartRequestError
+    chart_view = svc.chart_view if getattr(svc, "chart_view", None) else ChartView(svc, analyst)
+    svc.chart_view = chart_view
+
+    def chart_call(fn):
+        need("analyze_interactive")
+        try:
+            return clean(fn())
+        except (ChartRequestError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/chart/{symbol}")
+    def chart(symbol: str, range: str = "6m", group: str | None = None, start: str | None = None,
+              end: str | None = None, swing_atr: float = 2.0):
+        """The bars for a range and grouping with indicators, swings, levels, trendlines, where a top or bottom
+        may be forming, and the news on the bars."""
+        if swing_atr not in (1.5, 2.0, 3.0):
+            raise HTTPException(status_code=400, detail="swing_atr must be 1.5, 2 or 3")
+        return chart_call(lambda: chart_view.chart(symbol, range, group, start, end, swing_atr))
+
+    @router.get("/chart/{symbol}/similar")
+    def chart_similar(symbol: str, range: str = "6m", group: str | None = None, start: str | None = None,
+                      end: str | None = None, window_start: int | None = None, window_end: int | None = None,
+                      min_correlation: float = 0.75):
+        """Where the shape of the window appeared before in this stock's own history, and what followed."""
+        return chart_call(lambda: chart_view.similar(symbol, range, group, start, end, window_start, window_end,
+                                                     min_correlation))
+
+    @router.get("/chart/{symbol}/outlook")
+    def chart_outlook(symbol: str, range: str = "6m", group: str | None = None, start: str | None = None,
+                      end: str | None = None, window_start: int | None = None, window_end: int | None = None,
+                      horizon: int | None = None, min_correlation: float = 0.75):
+        """The possible outcomes over a horizon and how often each happened before on this stock."""
+        return chart_call(lambda: chart_view.outlook(symbol, range, group, start, end, window_start, window_end,
+                                                     horizon, min_correlation))
+
     @router.post("/reversal/options")
     def reversal_options(req: ReversalOptions):
         need("reversal_analysis")

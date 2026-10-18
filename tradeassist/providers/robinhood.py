@@ -703,6 +703,54 @@ class RobinhoodData:
                 return frame.reset_index(drop=True)
         raise last_error or DataError("Robinhood returned no price bars this app could read")
 
+    # --- bars within the day (2.12) ---------------------------------------
+    def intraday_reach(self) -> dict[str, Any]:
+        """How far back Robinhood's bars within the day go: about a week of 5-minute bars (its hourly bars go
+        three months, but the chart builds hours from 5-minute bars, so a week is the reach). With a Tradier
+        token the longer Tradier reach applies instead."""
+        fallback = getattr(self.history_fallback, "intraday_reach", None)
+        if callable(fallback):
+            return fallback()
+        return {"1m": 0, "5m": 7, "note": "Robinhood gives about a week of 5-minute bars; add a Tradier token to "
+                                          ".env for 40 days."}
+
+    def intraday(self, symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
+        """5-minute bars of the last week from Robinhood's price history, with their times kept; Tradier's
+        timesales instead when a token is set, since they reach further back."""
+        fallback = getattr(self.history_fallback, "intraday", None)
+        if callable(fallback):
+            return fallback(symbol, interval, start, end)
+        if interval != "5m":
+            raise DataError(f"Robinhood does not offer {interval} bars within the day (5-minute bars only)")
+        symbol = display_symbol(symbol)
+        with self._lock:
+            tool = self._tool("price history")
+            props = properties(tool)
+            args: dict[str, Any] = {}
+            sym_arg = choose(props, "symbols", "symbol", "ticker", "tickers")
+            if sym_arg is None:
+                raise DataError(f"Robinhood's {tool.name} does not take a symbol argument this app recognises")
+            args[sym_arg] = many(props[sym_arg], [symbol]) if sym_arg.endswith("s") else symbol
+            if "interval" in props:
+                offered = enum_of(props["interval"])
+                wanted = ("5minute", "5min", "5m", "five_minute")
+                if offered and not any(o.lower() in wanted for o in offered):
+                    raise DataError(f"Robinhood's {tool.name} does not offer 5-minute bars (it offers "
+                                    f"{', '.join(offered)})")
+                args["interval"] = from_enum(props["interval"], wanted, "5minute")
+            if "bounds" in props:
+                args["bounds"] = from_enum(props["bounds"], ("regular",), "regular")
+            if "span" in props:
+                args["span"] = from_enum(props["span"], ("week", "1w", "7d"), "week")
+            payload = self._call(tool, args)
+        from ..intraday import intraday_frame
+        rows = find_intraday_bars(unwrap(payload))
+        frame = intraday_frame(rows)
+        if frame.empty:
+            raise DataError("Robinhood returned no bars within the day this app could read")
+        lo, hi = int(start.timestamp()), int(end.timestamp())
+        return frame[(frame["t"] >= lo) & (frame["t"] <= hi)].reset_index(drop=True)
+
     def earnings_raw(self, symbol: str) -> Any:
         """Robinhood's earnings reply for one stock, exactly as sent. Only the check command reads this,
         so that the reply's layout is known before the app starts relying on it."""
@@ -781,6 +829,50 @@ def find_bars(data: Any, depth: int = 0) -> list[dict[str, Any]]:
         for value in data.values():
             if isinstance(value, (list, dict)):
                 nested = find_bars(value, depth + 1)
+                if nested:
+                    return nested
+    return []
+
+
+def find_intraday_bars(data: Any, depth: int = 0) -> list[dict[str, Any]]:
+    """Bars within the day from a history reply, wherever they are nested, with each bar's start kept as UTC
+    seconds (`t`). A bar stamped at midnight UTC is a daily bar, not one within the day, and is skipped."""
+    if depth > 5:
+        return []
+    if isinstance(data, list):
+        rows = [x for x in data if isinstance(x, dict)]
+        bars = []
+        for raw in rows:
+            if raw.get("interpolated") is True:
+                continue
+            when = pick(raw, "begins_at", "timestamp", "time", "start_time", "begin_time", "open_time", "start",
+                        "datetime", "ts", "t", "date")
+            close = num(pick(raw, "close_price", "close", "c"))
+            stamp = iso_time(when) if when is not None else None
+            if stamp is None or close is None:
+                continue
+            moment = datetime.fromisoformat(stamp)
+            if (moment.hour, moment.minute, moment.second) == (0, 0, 0):
+                continue
+            bars.append({"t": int(moment.timestamp()), "open": num(pick(raw, "open_price", "open", "o")),
+                         "high": num(pick(raw, "high_price", "high", "h")), "low": num(pick(raw, "low_price", "low", "l")),
+                         "close": close, "volume": num(pick(raw, "volume", "v")) or 0.0, "vwap": None})
+        if bars:
+            return bars
+        for raw in rows:
+            nested = find_intraday_bars(raw, depth + 1)
+            if nested:
+                return nested
+        return []
+    if isinstance(data, dict):
+        for key in ("historicals", "bars", "candles", "results", "data", "items"):
+            if key in data:
+                nested = find_intraday_bars(data[key], depth + 1)
+                if nested:
+                    return nested
+        for value in data.values():
+            if isinstance(value, (list, dict)):
+                nested = find_intraday_bars(value, depth + 1)
                 if nested:
                     return nested
     return []

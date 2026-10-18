@@ -21,7 +21,8 @@ from pathlib import Path
 import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
-SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js")   # in the order index.html loads them
+SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js",
+           "lwcharts.js", "chart.js")   # in the order index.html loads them; lwcharts.js is the vendored chart library
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -470,6 +471,65 @@ def test_live_news_lists_movers_with_the_news_search_found(tmp_path, monkeypatch
         assert panel.locator("a", has_text="Amazon wins a cloud contract").get_attribute("href") == "https://example.com/a"
         panel.locator("tr", has_text="AMZN").locator("button:text-is('Analyze')").click()
         page.wait_for_function("location.hash === '#analyze'", timeout=20000)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_analyze_has_an_interactive_chart_with_patterns_and_outcomes(tmp_path):
+    """2.12: the chart draws, the range and grouping change the bars, indicators switch off and on, a window
+    is selected on the chart, similar patterns are found and overlaid, and the outcomes are read."""
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#analyze")
+        page.wait_for_selector("button:text-is('Analyze')", timeout=30000)
+        page.click("button:text-is('Analyze')")
+        page.wait_for_selector(".lw-chart canvas", timeout=60000)
+        page.wait_for_selector("text=loaded to pan through", timeout=60000)
+        assert "6 months, 1 day bars: 130 in the range" in page.inner_text(".lw-panel")
+        # Hovering reads the bar out.
+        page.locator(".lw-chart").scroll_into_view_if_needed()
+        box = page.locator(".lw-chart").bounding_box()
+        page.mouse.move(box["x"] + box["width"] * 0.4, box["y"] + 150)
+        page.mouse.move(box["x"] + box["width"] * 0.5, box["y"] + 160)
+        page.wait_for_function("document.querySelector('.lw-readout').textContent.includes('O $')", timeout=10000)
+        # Indicators off and on.
+        page.locator("label[data-toggle='macd'] input").click()
+        page.wait_for_function("document.querySelectorAll('.lw-chart td canvas').length > 0", timeout=10000)
+        # A finer grouping within the range.
+        page.select_option(".lw-panel select[aria-label='Group bars by']", "1w")
+        page.wait_for_selector("text=1 week bars", timeout=30000)
+        # Bars within the day.
+        page.click("label:has-text('1D') input", force=True)
+        page.wait_for_selector("text=5 minutes bars: 78 in the range", timeout=30000)
+        assert page.locator(".lw-panel select[aria-label='Group bars by']").input_value() == "5m"
+        # A custom range.
+        page.click("label:has-text('Custom') input", force=True)
+        page.fill("input[aria-label='Custom range start']", "2026-03-02")
+        page.fill("input[aria-label='Custom range end']", "2026-06-30")
+        page.click(".lw-custom button")
+        page.wait_for_selector("text=Mar 2, 2026 to Jun 30, 2026", timeout=30000)
+        # Back to six months, select a window by clicking two bars, and search.
+        page.click("label:has-text('6M') input", force=True)
+        page.wait_for_selector("text=6 months, 1 day bars", timeout=30000)
+        page.click("button:text-is('Select a window on the chart')")
+        page.locator(".lw-chart").scroll_into_view_if_needed()
+        box = page.locator(".lw-chart").bounding_box()
+        page.mouse.click(box["x"] + box["width"] * 0.45, box["y"] + 150)
+        page.wait_for_selector("text=Now click the last bar", timeout=10000)
+        page.wait_for_timeout(600)                                  # two quick clicks would be a double-click
+        page.mouse.click(box["x"] + box["width"] * 0.75, box["y"] + 150)
+        page.wait_for_selector("text=Window selected:", timeout=10000)
+        page.fill("input[aria-label='Minimum correlation']", "0.6")
+        page.click("button:text-is('Find similar patterns')")
+        page.wait_for_selector("text=Similar patterns (", timeout=60000)
+        text = page.inner_text(".lw-outlook")
+        assert "Possible outcomes" in text and "matches; last" in text and "no order is placed" in text
+        assert "Horizon" in text
+        assert "Top or bottom forming?" in page.inner_text(".lw-turns")
+        patterns = page.inner_text(".lw-patterns")
+        assert "own history" in patterns or "No window" in patterns
+        if "Go there" in patterns:
+            page.locator(".lw-patterns button:text-is('Go there')").first.click()
+            page.wait_for_timeout(500)
     assert errors == []
 
 
