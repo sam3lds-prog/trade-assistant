@@ -479,10 +479,15 @@ class Morning:
         if not fresh and got.get("unmatched"):
             # 2.11: a search returned recent headlines that could not be tied to this stock (a name that is also
             # a word, a brand the name list does not know). That is not "no news", so the fade does not apply.
-            n = int(got["unmatched"])
-            return {"state": "unchecked", "items": [],
-                    "label": f"News not ruled out: the search found {n} recent headline{'s' if n != 1 else ''} that "
-                             f"may be about {symbol} but could not be matched to it; read them before fading"}
+            n, moves = int(got["unmatched"]), int(got.get("move_only") or 0)
+            if moves == n:
+                label = (f"News not ruled out: the only recent headline{'s' if n != 1 else ''} about {symbol} "
+                         f"{'say' if n != 1 else 'says'} that it moved, not why; read {'them' if n != 1 else 'it'} "
+                         "before fading")
+            else:
+                label = (f"News not ruled out: the search found {n} recent headline{'s' if n != 1 else ''} that may "
+                         f"be about {symbol} but could not be tied to it; read them before fading")
+            return {"state": "unchecked", "items": [], "label": label}
         if not fresh:
             return {"state": "no_news", "label": f"No news found (last {NEWS_HOURS}h: "
                                                  f"{', '.join(got.get('sources') or []) or 'nothing checked'})",

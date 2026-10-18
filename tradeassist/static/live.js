@@ -83,6 +83,13 @@ function moversPanel(d) {
   const newsCell = m => {
     if (m.found) return el("div", { class: "small" }, headlineLink({ headline: m.headline || "News found", url: m.url }),
       el("span", { class: "muted", text: m.via ? ` (${m.via})` : "" }));
+    if (m.unclear) {
+      const n = m.unclear, only = m.move_only === n;
+      const text = only ? ` The only headline${n === 1 ? "" : "s"} found ${n === 1 ? "says" : "say"} that it moved, not why.`
+        : ` ${n} headline${n === 1 ? "" : "s"} came back that may be about it but could not be tied to it.`;
+      return el("div", { class: "small" }, el("strong", { text: "News not ruled out." }), el("span", { class: "muted", text }),
+        m.search_url && /^https:\/\/news\.google\.com\//.test(m.search_url) ? el("span", {}, " ", el("a", { href: m.search_url, target: "_blank", rel: "noopener noreferrer", text: "Read them on Google News" })) : "");
+    }
     if (m.found === false) return el("div", { class: "small" }, el("strong", { text: "No news found" }),
       el("span", { class: "muted", text: ` in ${(m.checked || []).join(", ") || "the search"}. A big move with no news found can snap back; check it before riding it.` }));
     if ((m.errors || []).length) return el("span", { class: "small error", text: `Search failed: ${m.errors[0]}` });

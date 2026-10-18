@@ -92,7 +92,8 @@ Version 2.11 finds news by searching, at no cost, so the news checks no longer d
 - **Google News search** (free, no key, on by default) is searched for each stock by the names news uses
   for it (Google for Alphabet, BofA for Bank of America) and its ticker. A result counts only when its
   headline names the company, so a student-visa story is not Visa news and "UK PM" is not Philip Morris.
-  It feeds the news on Analyze, the Morning plan's ride-or-fade check and Live news.
+  A headline that only says the stock moved ("Why Oracle stock is soaring today") is not counted as news
+  behind the move. It feeds the news on Analyze, the Morning plan's ride-or-fade check and Live news.
 - **Brave news search** (optional, `BRAVE_API_KEY`) is asked only when nothing else found news. Brave no
   longer has a free plan: its $5 monthly credit buys about 1,000 searches. The app counts each search in
   its database before sending it and stops at 900 in any 31 days (`BRAVE_MONTHLY_LIMIT`), so no billing
@@ -541,6 +542,8 @@ searches the news, six stocks a scan, and a stock where nothing was found is sea
   the day's-move rule above can turn it into an opportunity.
 - **No news found.** Said in so many words. A big move with no news found can snap back (the Morning
   plan's fade), so check it before riding it.
+- **News not ruled out.** Headlines came back that may be about the stock but could not be tied to it, or
+  that only say it moved. A link opens them on Google News to read.
 - **Brave** is asked at most once a stock a day here, and half of `BRAVE_DAILY_LIMIT` is kept for the
   Morning plan.
 - **Analyze** opens the stock in Decide, leaning the way it moved.
@@ -551,8 +554,9 @@ searches the news, six stocks a scan, and a stock where nothing was found is sea
 later story about the same move: search results and late headlines keep arriving for hours after a big
 move, and each would otherwise read as news behind it. The later story is listed, not traded.
 
-**After the close.** From 4 p.m. the day's move is measured from today's close, not yesterday's, so after-
-hours news is judged by what the stock did after the session.
+**After the close.** Once the session has closed (4 p.m., or 1 p.m. on an early-close day), the day's move
+is measured from today's close, not yesterday's, so after-hours news is judged by what the stock did after
+the session.
 
 **Stocks you hold** get an alert: **against** you (consider selling, covering or tightening the stop) or
 **with** you.
@@ -581,8 +585,8 @@ Nothing here places an order. Switch the screen off with `FEATURE_LIVE_NEWS=0`.
 2. **Ride or fade.** A mover with fresh news (headlines or SEC filings within 36 hours) is read to keep
    going; a mover with no news found that was already overextended before the move is read to snap back.
    Since 2.11 the check also searches Google News, and Brave when it is set up and nothing else found news
-   in the 36 hours. Headlines that came back but could not be tied to the stock leave the news *not ruled
-   out*, so the fade does not apply. News that could not be checked says *not checked* — it is never treated as "no news". Each setup shows
+   in the 36 hours. Headlines that came back but could not be tied to the stock, or that only say it moved,
+   leave the news *not ruled out*, so the fade does not apply. News that could not be checked says *not checked* — it is never treated as "no news". Each setup shows
    its five-year past record on these stocks: how often the trade's way was ahead after the horizon.
    Frequencies, not forecasts, and history cannot say which old moves had news.
 3. **The trade card** has the whole plan: entry, stop, two targets, shares sized to your risk per trade,
@@ -865,9 +869,11 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
   - Google News search feeds and Brave results are read from their published shapes; a feed carrying a
     DOCTYPE or ENTITY declaration anywhere is refused, a feed that does not read is a failed check (never
     "no news"), and a link that is not http(s) is dropped;
-  - 45 real headlines are matched or not as a reader would: brand names (Google, BofA, P&G, onsemi), SEC
-    names ("WELLS FARGO & COMPANY/MN"), and the traps (student visa, UK PM, King Charles, Harrison Ford,
-    GE Vernova for GE, the Amazon rainforest, Nvidia's RTX cards);
+  - 74 real-style headlines are matched or not as a reader would: brand names (Google, BofA, P&G,
+    onsemi), possessives ("Lilly's obesity pill"), SEC names ("WELLS FARGO & COMPANY/MN"), and the traps
+    (student visa, UK PM, King Charles, Harrison Ford, Paris Hilton, Citi Field, "Moody's downgrades US",
+    "Goldman Sachs raises its S&P 500 target", Title Case headlines, GE Vernova for GE, the Amazon
+    rainforest, Nvidia's RTX cards); headlines that only say the stock moved are told apart;
   - Brave is asked only when nothing fresh was found, never past its limit in any 31 days or its daily
     limit, even from two copies of the app at once, never follows a redirect with the key, and its key
     never appears in an error; a limit reached is "not asked", not a failure;

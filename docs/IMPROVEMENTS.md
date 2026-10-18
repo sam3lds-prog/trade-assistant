@@ -1083,6 +1083,23 @@ were handled as follows:
 - **Hour windows.** Google's window is in hours up to a day and in days beyond it.
 - **Movers changing while being read.** The movers are copied before they are returned.
 
+#### The second look
+
+The reviewer re-ran its reproductions on the fixes. Twelve findings were fixed and three only partly
+(R3, R4, R7). It also found seven new problems. All were fixed.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| N1 | The movers panel said "No news found" when headlines came back that could not be tied to the stock (two real Oracle headlines), and asked Brave anyway | Medium | such a row is *news not ruled out*, with a link to read them on Google News; the scan skips Brave then (`brave_if_unmatched=False`) | `test_a_mover_whose_headlines_cannot_be_tied_to_it_is_not_ruled_out`; Chromium `test_live_news_lists_movers_...` |
+| N2 | The name list matched 24 headlines it should not have: "$3M seed round", "Jets fire GM", "the best buy in tech", "nuclear waste management", Paris Hilton, Klaus Schwab, Citi Field, Capital One Arena, Chevron deference, Merck KGaA, intelligence chiefs, meta-analysis, the Amazon Rainforest, "FANG stocks", "Dow stock futures", research notes from Goldman, Moody's and S&P Global, and Title Case headlines | Medium | each word's capital; `EXCLUDE` for other meanings and research notes; `=GM+`; FANG and other word tickers in `COMMON_WORDS`; in Title Case only a business noun counts; commas end the context; possessives with a business noun count (the misses from R3) | the 74-case test; on the reviewer's 69 headlines: 30 of 32 matched (the two misses only say the stock moved) and 36 of 37 rejected (the one left, "Dollar General" for DG, is the company's own name, listed by mistake) |
+| N3 | Any result not tied to the stock left the Morning check unchecked, which with Google on would rarely leave a fade | Medium | only a headline that names the stock in some form but does not match counts (`maybe`); a roundup that Google matched on its body counts as nothing. Headlines that only say the stock moved count as `move` | `test_google_results_count_only_...`, `test_a_headline_that_only_says_the_stock_moved_...` |
+| N4 | `_brave_claim` and `_google_turn` took this object's lock and then the database's; a caller inside a transaction takes them the other way round, and the two threads hung | Low | the database transaction alone orders them | `test_a_claim_from_inside_a_transaction_never_deadlocks` |
+| N5 | Robinhood's quote carries no close, so after 4 p.m. the day could not be measured until the bars caught up | Low | its last regular-hours trade, made that day, is the close (`regular_last`, `regular_trade_time`) | `test_after_the_close_the_day_is_measured_from_todays_close` |
+| N6 | On early-close days, 1 p.m. to 4 p.m. used the previous session's close | Low | `_session_day`: from 1 p.m. on a weekday with the market no longer open, today's session has closed | same test (the day after Thanksgiving) |
+| N7 | A stock that left the movers list and came back lost its row, and Brave was asked again | Low-Medium | `_mover_memory` keeps the day's searches | `test_the_movers_list_is_todays_and_brave_is_asked_once_a_stock_a_day` |
+
+The name cache moved to `search:name:<SYM>`, so a name cached by the first draft of 2.11 is not read.
+
 Still open:
 
 - whether Brave's `page_age` is UTC (it is read as UTC);

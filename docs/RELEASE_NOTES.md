@@ -25,8 +25,10 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 - **Google News search** (free, no key, on unless `GOOGLE_NEWS=0`). Each stock is searched by the names
   news uses for it (Google for Alphabet, BofA for Bank of America, P&G, onsemi) and its ticker. A result
   counts only when its headline names the company: a name that is also a word (Target, Visa, Ford) counts
-  only next to a business word ("Target shares", "Visa Inc"), and a one- or two-letter ticker only as
-  "$PM" or "(NYSE: PM)". The searches wait their turn, two seconds apart, and if Google refuses one they
+  only next to a business word ("Target shares", "Visa Inc", "Lilly's obesity pill"), and a one- or
+  two-letter ticker only as "$PM" or "(NYSE: PM)". People, places and research notes are left out (Paris
+  Hilton, Citi Field, "Goldman Sachs raises its S&P 500 target"). A headline that only says the stock moved
+  ("Why Oracle stock is soaring today") is not news behind the move. The searches wait their turn, two seconds apart, and if Google refuses one they
   pause for 15 minutes.
 - **Brave news search** (optional, `BRAVE_API_KEY`). Asked only when nothing else found news. Brave ended
   its free plan in February 2026: an account now needs a card and gets $5 of searches a month (about
@@ -36,14 +38,15 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 - **Where it is used.**
   - Analyze: Google News results join the Finnhub headlines and SEC filings.
   - The Morning plan's ride-or-fade check: Google News, and Brave when nothing was found in the 36 hours.
-    Headlines that came back but could not be tied to the stock leave the news *not ruled out*, so the
-    fade does not apply on a doubt.
+    Headlines that came back but could not be tied to the stock, or only say it moved, leave the news *not
+    ruled out*, so the fade does not apply on a doubt.
   - Live news: your holdings, then your watchlist, four stocks every five minutes (every 30 minutes while
     the market is closed).
 - **"Why is it moving?"** (new panel on Live news). Every five minutes the app lists the stocks that moved
   3% and 1.5 daily ranges since the close, and searches the news for those with nothing in the feed. News
   found joins the feed and can become an opportunity. A big move with no news found is flagged: check it
-  before riding it. Brave is asked at most once a stock a day there, and half its day is kept for the
+  before riding it. Headlines that could not be tied to the stock are shown as *not ruled out*, with a
+  link to read them on Google News. Brave is asked at most once a stock a day there, and half its day is kept for the
   Morning plan.
 - **No AI in the loop.** The searches are plain requests from the app, so they use no Anthropic tokens.
 - **What search cannot do.** A search engine indexes a story minutes after it is published. Search
@@ -51,8 +54,9 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 **Live news changes.**
 
-- After 4 p.m. a stock's day is measured from today's close, not yesterday's, so after-hours news is
-  judged by what the stock did after the session.
+- Once the session has closed (4 p.m., or 1 p.m. on an early-close day), a stock's day is measured from
+  today's close, not yesterday's, so after-hours news is judged by what the stock did after the session.
+  With Robinhood data, today's close is its last regular-hours trade.
 - A stock that already had an opportunity today gets no second one from a later story about the same move.
 - The same headline from two sources is kept once (two filings with the same title are both kept).
 - The searches run on their own thread, so a slow search never delays the price checks.

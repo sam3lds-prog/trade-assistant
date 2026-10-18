@@ -502,6 +502,13 @@ def levels_for(direction: str, entry: float, ref: float, atr: float, suggested: 
     return stop, t1, t2, why
 
 
+def _news_search_url(term: str) -> str:
+    """Google News's own page for a stock's last day of news, for reading what the search could not tie to it."""
+    from urllib.parse import quote_plus
+    query = quote_plus('"' + term + '" when:1d')
+    return f"https://news.google.com/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+
+
 def _bar_date(value: Any) -> Any:
     """A daily bar's date as a date (bars carry a date, a timestamp or an ISO string)."""
     try:
@@ -542,6 +549,7 @@ class LiveFeed:
         self._next_scan = 0.0
         self._movers: dict[str, dict[str, Any]] = {}
         self._movers_day: str | None = None
+        self._mover_memory: dict[str, dict[str, Any]] = {}    # today's searches, kept when a stock leaves the list
         self._movers_lock = threading.Lock()
         self._search_thread: threading.Thread | None = None
         self._headline_jobs = 0
@@ -838,38 +846,59 @@ class LiveFeed:
                          extra={"publisher": it.get("source"), "found_by": "search"})
 
     # --- the close a day's move is measured from -----------------------------------------------------------
-    def _after_close(self) -> bool:
+    def _session_day(self) -> Any:
+        """The date of the last regular session that has closed: today from 4 p.m. on a weekday, or from 1 p.m.
+        when the market is no longer open then (an early close), otherwise the weekday before. Market holidays
+        are covered by the quote's previous close (see _day_close)."""
         from .morning import last_session_date
-        return last_session_date(datetime.now(NY)) == datetime.now(NY).date()
+        now = datetime.now(NY)
+        day = last_session_date(now)
+        if day != now.date() and now.weekday() < 5 and (now.hour, now.minute) >= (13, 0) and self.session() != "open":
+            return now.date()
+        return day
+
+    def _after_close(self) -> bool:
+        return self._session_day() == datetime.now(NY).date()
 
     @staticmethod
     def _num(v: Any) -> float | None:
         return float(v) if isinstance(v, (int, float)) and math.isfinite(v) and v > 0 else None
 
+    def _closing_quote(self, q: dict[str, Any], day: Any) -> float | None:
+        """The session's close as a quote gives it: Tradier's `close`, or Robinhood's last regular-hours trade
+        when it was made that day (from noon on, so an early close counts)."""
+        close = self._num(q.get("close"))
+        if close:
+            return close
+        last, when = self._num(q.get("regular_last")), parse_time(q.get("regular_trade_time"))
+        if last and when is not None:
+            local = when.astimezone(NY)
+            if local.date() == day and local.hour >= 12:
+                return last
+        return None
+
     def _quote_close(self, q: dict[str, Any]) -> float | None:
-        """The last finished close as the quote alone gives it, for a first look across many stocks: from 4 p.m.
-        on a weekday the quote's own close (Tradier's close, Robinhood's official close) when it has one, else
-        its previous close."""
+        """The last finished close as the quote alone gives it, for a first look across many stocks: after the
+        session its own close when it has one, else its previous close."""
         if self.svc.market.info.mode != "demo" and self._after_close():
-            close = self._num(q.get("close")) or self._num(q.get("official_close"))
+            close = self._closing_quote(q, datetime.now(NY).date())
             if close:
                 return close
         return self._num(q.get("prevclose"))
 
     def _day_close(self, q: dict[str, Any], daily: dict[str, Any] | None) -> float | None:
-        """The close of the last finished session, which a day's move is measured from: today's close from 4
-        p.m. on a weekday, otherwise the weekday before's. From the saved daily bars when they reach that
-        session, else from the quote; None when neither can say (after 4 p.m. before today's close is known),
-        so yesterday's close is never taken for today's."""
+        """The close of the last finished session, which a day's move is measured from: today's once today's
+        session has closed, otherwise the one before. From the saved daily bars when they reach that session,
+        else from the quote; None when neither can say (after the close, before today's close is known), so
+        yesterday's close is never taken for today's."""
         prev = self._num(q.get("prevclose"))
         if self.svc.market.info.mode == "demo":     # demo bars include a made-up today; the quote says which
             return prev or (daily or {}).get("prev_close")
-        from .morning import last_session_date
-        session_day = last_session_date(datetime.now(NY))
+        session_day = self._session_day()
         if daily and daily.get("last_date") == session_day:
             return daily["prev_close"]
         if session_day == datetime.now(NY).date():
-            return self._num(q.get("close")) or self._num(q.get("official_close"))
+            return self._closing_quote(q, session_day)
         return prev or (daily or {}).get("prev_close")
 
     # --- why is it moving? ---------------------------------------------------------------------------------
@@ -895,7 +924,10 @@ class LiveFeed:
         session = self.session()
         today = datetime.now(NY).date().isoformat()
         with self._movers_lock:
-            old = {k: dict(v) for k, v in self._movers.items()} if self._movers_day == today else {}
+            if self._movers_day != today:
+                self._movers, self._mover_memory, self._movers_day = {}, {}, today
+            old = {k: dict(v) for k, v in self._movers.items()}
+            memory = {k: dict(v) for k, v in self._mover_memory.items()}
         names = sorted(self.universe())
         quotes: dict[str, Any] = {}
         for i in range(0, len(names), 50):
@@ -928,29 +960,35 @@ class LiveFeed:
             pct, ranges = 100 * (price / prev - 1), (price - prev) / daily["atr"]
             if abs(pct) < pct_min or abs(ranges) < atr_min:
                 continue
-            row = old.get(sym) or {"symbol": sym, "first_seen": iso(now), "checked_at": None, "found": None,
-                                   "checked": [], "errors": []}
+            # A stock that dropped off the list and came back keeps what was learned about it today.
+            row = old.get(sym) or memory.get(sym) or {"symbol": sym, "first_seen": iso(now), "checked_at": None,
+                                                      "found": None, "checked": [], "errors": []}
             row.update(price=price, prev_close=prev, move_pct=pct, ranges=ranges, updated_at=iso(now),
                        name=q.get("description") or None)
             have = self._has_news(sym, STALE_HOURS)
             if have:
-                row.update(found=True, headline=have["headline"], url=have["url"], via=have["source"])
+                row.update(found=True, unclear=0, headline=have["headline"], url=have["url"], via=have["source"])
             elif not row.get("found"):
                 last = parse_time(row.get("checked_at"))
-                wait = MOVER_RECHECK_MINUTES if row.get("found") is False else MOVER_RETRY_MINUTES
+                wait = MOVER_RECHECK_MINUTES if row.get("found") is False or row.get("unclear") else MOVER_RETRY_MINUTES
                 due = last is None or now - last >= timedelta(minutes=wait)
                 if due and lookups < MOVER_LOOKUPS_PER_SCAN and self.search.available:
                     lookups += 1
                     brave = "never" if row.get("brave_day") == today else "fallback"   # Brave once a stock a day
                     try:
                         got = self.search.search(sym, hours=STALE_HOURS, name_hint=q.get("description"),
-                                                 brave=brave, brave_reserve=reserve)
+                                                 brave=brave, brave_reserve=reserve, brave_if_unmatched=False)
                     except Exception as exc:          # noqa: BLE001 - one search failing never stops the scan
                         got = {"items": [], "checked": [], "errors": [redact(str(exc)) or exc.__class__.__name__]}
                     if "Brave" in got["checked"]:
                         row["brave_day"] = today
+                    # Headlines that might be about it but could not be tied to it, or only say it moved: not
+                    # news found, and not "no news" either.
+                    unclear = 0 if got["items"] else int(got.get("unmatched") or 0)
                     row.update(checked_at=iso(now), checked=got["checked"], errors=got["errors"][:2],
-                               found=bool(got["items"]) if got["checked"] else None)
+                               unclear=unclear, move_only=int(got.get("move_only") or 0),
+                               found=bool(got["items"]) if got["checked"] and not unclear else None,
+                               search_url=_news_search_url(got.get("name") or sym))
                     for it in got["items"][:5]:
                         try:
                             self._inbox.put_nowait(self._search_item(sym, it))
@@ -965,6 +1003,9 @@ class LiveFeed:
                 rows[sym] = row
         kept = dict(sorted(rows.items(), key=lambda kv: -abs(kv[1]["move_pct"]))[:MOVERS_KEPT])
         with self._movers_lock:
+            for sym, row in {**old, **rows}.items():
+                if row.get("checked_at") or row.get("brave_day"):
+                    self._mover_memory[sym] = row
             self._movers, self._movers_day = kept, today
         try:
             self.db.cache_put(self._movers_key(), {"day": today, "rows": kept})

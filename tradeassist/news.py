@@ -238,7 +238,7 @@ class NewsClient:
         hit = self.db.cache_get(key, CACHE_SECONDS)
         if hit is not None:
             return {**hit, "cached": True}
-        items, errors, sources, skipped, unmatched = [], [], [], [], 0
+        items, errors, sources, skipped, unmatched, moves = [], [], [], [], 0, 0
         today = datetime.now(NY)
         if self.configured:
             try:
@@ -278,11 +278,13 @@ class NewsClient:
                 errors += got["errors"]
                 skipped += got.get("skipped") or []
                 unmatched += int(got.get("unmatched") or 0)
+                moves += int(got.get("move_only") or 0)
             except Exception as exc:                     # noqa: BLE001 - search is a bonus; its failure is reported
                 errors.append(self._failed("news search", exc))
         items = self._dedupe(items)[:MAX_ITEMS]
         out = {"symbol": symbol, "days": days, "items": items, "tone": summarize_tone(items), "sources": sources,
-               "errors": errors, "skipped": skipped, "unmatched": unmatched, "finnhub": self.configured,
+               "errors": errors, "skipped": skipped, "unmatched": unmatched, "move_only": moves,
+               "finnhub": self.configured,
                "demo": self.demo,
                "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "notes": self._notes()}
         if not errors:

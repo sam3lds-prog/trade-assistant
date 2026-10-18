@@ -365,6 +365,10 @@ class RobinhoodData:
                     "volume": num(pick(raw, "volume")), "average_volume": None,
                     "week_52_high": None, "week_52_low": None,
                     "bid_time": bid_time, "ask_time": ask_time, "trade_time": trade_time or bid_time,
+                    # The last regular-hours trade and its time, kept apart from after-hours trades: after the
+                    # close it is the session's closing price (Live news measures the day from it).
+                    "regular_last": num(pick(raw, "last_trade_price")),
+                    "regular_trade_time": iso_time(pick(raw, "venue_last_trade_time", "last_trade_time")),
                 }
                 if last is None and quote["bid"] is None and quote["ask"] is None:
                     continue

@@ -62,7 +62,8 @@ USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) TradeAssistant/2.11 (
 COMMON_WORDS = {"ALL", "AMT", "APP", "ARE", "BIG", "CAN", "CAR", "CAT", "COP", "CRM", "DAY", "DOW", "EAT", "FAST",
                 "FOR", "FUN", "GIS", "GOOD", "HAS", "HOLD", "HOME", "ICE", "KEY", "LOW", "MAN", "MET", "NET", "NEW",
                 "NOW", "OPEN", "OUT", "PAY", "PEG", "PLAY", "PSA", "RTX", "RUN", "SAVE", "SEE", "SNAP", "TEAM", "TECH",
-                "TRUE", "TWO", "USB", "VERY", "WELL", "YOU", "ONE", "AI"}
+                "TRUE", "TWO", "USB", "VERY", "WELL", "YOU", "ONE", "AI", "FANG", "COST", "SHOP", "SNOW", "SPOT",
+                "HOOD", "PINS", "DASH", "DECK", "KEYS", "COIN", "HUM", "MAR", "PEP", "HAL", "AXON", "MAG"}
 NAME_SUFFIXES = re.compile(
     r"(,?\s+(inc\.?|incorporated|corp\.?|corporation|co\.?|cos\.?|company|companies|ltd\.?|limited|plc|n\.?v\.?|"
     r"s\.?a\.?|ag|se|holdings?|group|class [a-c]|cl [a-c]|common stock|ordinary shares|shares|adr|the|"
@@ -99,7 +100,7 @@ NEWS_NAMES: dict[str, tuple[str, ...]] = {
     "ADP": ("Automatic Data Processing",), "ADSK": ("Autodesk",), "AEP": ("American Electric Power",),
     "AIG": ("American International Group",), "AJG": ("Arthur J. Gallagher", "Gallagher+"), "ALB": ("Albemarle",),
     "ALL": ("Allstate",), "AMAT": ("Applied Materials",), "AMD": ("Advanced Micro Devices",), "AMGN": ("Amgen",),
-    "AMT": ("American Tower",), "AMZN": ("q:Amazon", r"re:\bAmazon(?![ -](?:rainforest|River|river|basin|jungle))\b", "Amazon.com"),
+    "AMT": ("American Tower",), "AMZN": ("Amazon", "Amazon.com"),
     "ANET": ("Arista Networks", "Arista+"), "AON": ("Aon+",), "APD": ("Air Products",), "APH": ("Amphenol",),
     "APO": ("Apollo Global", "Apollo+"), "APP": ("AppLovin",), "AVB": ("AvalonBay",), "AVGO": ("Broadcom",),
     "AXON": ("Axon Enterprise", "Axon+"), "AXP": ("American Express", "Amex"), "AZO": ("AutoZone",),
@@ -117,14 +118,13 @@ NEWS_NAMES: dict[str, tuple[str, ...]] = {
     "DAL": ("Delta Air Lines", "Delta Air", "Delta+"), "DASH": ("DoorDash",), "DD": ("DuPont",), "DDOG": ("Datadog",),
     "DE": ("Deere",), "DECK": ("Deckers",), "DELL": ("Dell",), "DG": ("Dollar General",), "DHI": ("D.R. Horton", "DR Horton"),
     "DHR": ("Danaher",), "DIS": ("Disney",), "DLR": ("Digital Realty",), "DLTR": ("Dollar Tree",), "DOW": ("Dow Inc", "Dow+"),
-    "DUK": ("Duke Energy",), "DVN": ("Devon Energy",), "EA": ("Electronic Arts", "=EA"), "EBAY": ("eBay",),
+    "DUK": ("Duke Energy",), "DVN": ("Devon Energy",), "EA": ("Electronic Arts", "=EA+"), "EBAY": ("eBay",),
     "ECL": ("Ecolab",), "ED": ("Con Edison", "Consolidated Edison", "ConEd"), "EL": ("Estee Lauder", "Estée Lauder"),
     "ELV": ("Elevance",), "EMR": ("Emerson Electric", "Emerson+"), "EOG": ("EOG Resources",), "EQIX": ("Equinix",),
     "EQR": ("Equity Residential",), "ETN": ("Eaton",), "EXC": ("Exelon",), "F": ("Ford Motor", "Ford+"),
     "FANG": ("Diamondback Energy", "Diamondback+"), "FCX": ("Freeport-McMoRan", "Freeport McMoRan"), "FDX": ("FedEx",),
-    "FTNT": ("Fortinet",), "GD": ("General Dynamics",), "GE": ("GE Aerospace", "General Electric", "q:GE",
-                                                                r"re:\bGE\b(?! ?(?:Vernova|HealthCare|Healthcare|Appliances))"),
-    "GEV": ("GE Vernova",), "GILD": ("Gilead",), "GIS": ("General Mills",), "GLW": ("Corning+",), "GM": ("General Motors", "=GM"),
+    "FTNT": ("Fortinet",), "GD": ("General Dynamics",), "GE": ("GE Aerospace", "General Electric", "=GE"),
+    "GEV": ("GE Vernova",), "GILD": ("Gilead",), "GIS": ("General Mills",), "GLW": ("Corning+",), "GM": ("General Motors", "=GM+"),
     "GOOG": ("Alphabet", "Google"), "GOOGL": ("Alphabet", "Google"), "GS": ("Goldman Sachs", "Goldman"), "HAL": ("Halliburton",),
     "HCA": ("HCA Healthcare",), "HD": ("Home Depot",), "HES": ("Hess Corp", "Hess+"), "HLT": ("Hilton",), "HON": ("Honeywell",),
     "HOOD": ("Robinhood",), "HPE": ("Hewlett Packard Enterprise",), "HPQ": ("HP Inc", "q:HP", r"re:\bHP\b(?= Inc|'s|’s| shares| stock| earnings)"),
@@ -139,7 +139,7 @@ NEWS_NAMES: dict[str, tuple[str, ...]] = {
     "MA": ("Mastercard",), "MAR": ("Marriott",), "MCD": ("McDonald's", "McDonald’s", "McDonalds"),
     "MCHP": ("Microchip Technology", "Microchip+"), "MCK": ("McKesson",), "MCO": ("Moody's", "Moody’s"), "MDB": ("MongoDB",),
     "MDLZ": ("Mondelez",), "MDT": ("Medtronic",), "MET": ("MetLife",), "META": ("Meta Platforms", "Meta"),
-    "MLM": ("Martin Marietta",), "MMC": ("Marsh McLennan", "Marsh & McLennan"), "MMM": ("3M",),
+    "MLM": ("Martin Marietta",), "MMC": ("Marsh McLennan", "Marsh & McLennan"), "MMM": ("=3M",),
     "MNST": ("Monster Beverage", "Monster+"), "MO": ("Altria",), "MOS": ("Mosaic+",), "MPC": ("Marathon Petroleum",),
     "MRK": ("Merck",), "MRNA": ("Moderna",), "MRVL": ("Marvell",), "MS": ("Morgan Stanley",), "MSFT": ("Microsoft",),
     "MSI": ("Motorola Solutions", "Motorola+"), "MU": ("Micron",), "NEE": ("NextEra",), "NEM": ("Newmont",),
@@ -170,15 +170,78 @@ NEWS_NAMES: dict[str, tuple[str, ...]] = {
     "XOM": ("Exxon", "ExxonMobil"), "YUM": ("Yum Brands", "Yum! Brands"), "ZS": ("Zscaler",), "ZTS": ("Zoetis",),
 }
 
-# A word that makes an ambiguous name a company: right after it ("Target shares", "Gap Inc", "Visa (V)")...
-_AFTER = (r"(?=,?\s*(?:\((?:NYSE|NASDAQ|Nasdaq|NYSEARCA|AMEX)?:?\s*[A-Z.]{1,6}\)|(?i:Inc\b|Corp\b|Co\b|Cos\b|"
-          r"Group\b|Holdings\b|shares?\b|stock\b|earnings\b|profits?\b|revenue\b|sales\b|quarter|Q[1-4]\b|beats?\b|"
-          r"tops?\b|miss(?:es)?\b|reports?\b|raises?\b|cuts?\b|lifts?\b|lowers?\b|CEO\b|CFO\b|chief\b|to (?:buy|"
-          r"acquire|sell|cut|lay off|close|spin)\b|acquires?\b|agrees?\b|announces?\b|unveils?\b|launches?\b|"
-          r"recalls?\b|guidance\b|outlook\b|forecasts?\b|upgraded\b|downgraded\b|price target\b|dividend\b|"
-          r"buyback\b|layoffs?\b|stores?\b|investors\b|analysts?\b)))")
-# ...or just before it ("shares of Target", "Target (TGT)" is covered above).
+# A word that makes an ambiguous name a company: right after it ("Target shares", "Gap Inc", "Visa (V)", "Oracle
+# signs"), after its possessive ("Lilly's obesity pill", "Ford's EV losses"), or just before it ("shares of Target").
+_BUSINESS_STRICT = (r"Inc\b|Corp\b|Co\b|Cos\b|Group\b|Holdings\b|shares?\b|stock\b|earnings\b|profits?\b|"
+                    r"revenue\b|sales\b|quarter|Q[1-4]\b|CEO\b|CFO\b|dividend\b|buyback\b|price target\b|investors\b|"
+                    r"analysts?\b")
+_BUSINESS_AFTER = (_BUSINESS_STRICT + r"|beats?\b|tops?\b|miss(?:es)?\b|reports?\b|posts?\b|raises?\b|cuts?\b|"
+                   r"lifts?\b|lowers?\b|CEO\b|CFO\b|chief\b|to (?:buy|acquire|sell|cut|lay off|close|spin|invest|"
+                   r"open|build|pay|settle|merge)\b|acquires?\b|buys?\b|sells?\b|invests?\b|agrees?\b|signs?\b|wins?\b|"
+                   r"announces?\b|unveils?\b|launches?\b|recalls?\b|cancels?\b|delays?\b|halts?\b|warns?\b|files?\b|"
+                   r"sues?\b|settles?\b|hires?\b|appoints?\b|names (?:new|a)\b|expands?\b|confirms?\b|completes?\b|"
+                   r"shuts?\b|jumps?\b|soars?\b|surges?\b|rall(?:y|ies)\b|climbs?\b|rises?\b|gains?\b|falls?\b|drops?\b|"
+                   r"slides?\b|sinks?\b|slumps?\b|tumbles?\b|plunges?\b|guidance\b|outlook\b|forecasts?\b|upgraded\b|"
+                   r"downgraded\b|layoffs?\b|stores?\b")
+_BUSINESS_NOUNS = (r"revenue|profits?|sales|shares|stock|earnings|CEO|chief|deal|bid|merger|acquisition|takeover|guidance|"
+                   r"outlook|forecast|results|quarter|margins?|growth|dividend|buyback|layoffs?|stores?|plants?|"
+                   r"factor(?:y|ies)|cloud|chips?|drugs?|pill|trial|EVs?|deliveries|orders|loss(?:es)?|board|investors|"
+                   r"bonds?|debt|valuation|market value|stake|unit|division|business|cash|sensors?|devices?|"
+                   r"products?|portfolio")
+def _after(words: str) -> str:
+    return (r"(?=,\s*(?i:Inc|Corp|Co|Ltd)\b|\s*\((?:NYSE|NASDAQ|Nasdaq|NYSEARCA|AMEX)?:?\s*[A-Z.]{1,6}\)|\s+(?i:"
+            + words + r")|['’]s\s+(?:[\w-]+\s+){0,3}(?i:" + _BUSINESS_NOUNS + r")\b)")
+
+
+_AFTER = _after(_BUSINESS_AFTER)
+# In a headline in Title Case every word is capitalised, verbs included ("Visa Cuts For Students", "Mississippi
+# Delta Reports Record Flooding"), so there only a business noun next to the name counts.
+_AFTER_STRICT = _after(_BUSINESS_STRICT)
 _BEFORE = r"(?:shares of|stock of|stake in|analysts? (?:on|at)|downgrades?|upgrades?)\s+"
+
+# What a name means elsewhere, taken out of a headline before it is matched: people, places, the Dow the index,
+# and banks and raters writing about the market rather than being written about.
+_RESEARCH = (r"(?:\s+(?:strategists?|analysts?|economists?|research|Research|Securities|Global Research|Asset Management|"
+             r"Wealth Management|Investment Institute|upgrades|downgrades|initiates|reiterates|sees|expects|predicts|"
+             r"forecasts)\b|\s+(?:raises|cuts|lifts|lowers|boosts|trims)\s+(?:its\s+|the\s+)?[^,;:]{0,30}?"
+             r"(?:target|forecast|outlook|view)s?\b)")
+EXCLUDE: dict[str, str] = {
+    "HLT": r"(?:Paris|Perez) Hilton", "SCHW": r"Klaus Schwab", "C": r"Citi (?:Field|Bike|Open)\b",
+    "COF": r"Capital One (?:Arena|Field|Center|Hall|Cup|Orange Bowl)", "MRK": r"Merck (?:KGaA|Group)",
+    "CVX": r"(?i:Chevron (?:deference|doctrine|ruling|precedent|decision))",
+    "INTC": r"(?i:\bintel(?:ligence)?\s+(?:chiefs?|officials?|agenc(?:y|ies)|community|committees?|reports?|sources|"
+            r"assessments?|services?|briefings?|operations?|gathering|sharing)\b)",
+    "META": r"(?i:\bmeta-?(?:analys[ie]s|data|verse)\b)",
+    "AMZN": r"(?i:\bAmazon(?:ian|\s+(?:rainforest|river|basin|jungle|forest|deforestation|tribes?|region|fires?)\b))",
+    "GE": r"GE (?:Vernova|HealthCare|Healthcare|Appliances)", "GM": r"\b(?:assistant|interim|new|former) GM\b",
+    "DOW": r"(?i:\bDow\s+(?:Jones|futures|stock futures|industrials|average|index|transports|utilities|points?|[+-]?\d)|"
+           r"\bthe Dow\b)",
+    "MMM": r"(?i:\b3M\s+(?:users|views|downloads|subscribers|people|fans|followers|members|customers|homes|"
+           r"vehicles|barrels|jobs|visitors|streams|copies)\b)",
+    "MCO": r"Moody['’]s(?:\s+Analytics)?(?:\s+(?:downgrades|upgrades|cuts|affirms|rates|warns|says|economists?)\b|['’]\s+\w+)",
+    "SPGI": r"S&P Global(?:\s+(?:Ratings|Market Intelligence|Mobility|Commodity Insights))?\s+(?:(?:\w+\s+){0,2}PMI|"
+            r"downgrades|upgrades|cuts|affirms|says|warns|survey)",
+}
+for _sym in ("GS", "JPM", "MS", "BAC", "C", "WFC"):
+    _forms = "|".join(re.escape(f.lstrip("=").rstrip("+")) for f in NEWS_NAMES[_sym] if not f.startswith(("re:", "q:")))
+    EXCLUDE[_sym] = "|".join(x for x in (EXCLUDE.get(_sym), r"(?:" + _forms + r")" + _RESEARCH) if x)
+
+# Headlines that only describe the price ("Why Oracle stock is soaring today", "Tesla shares fall 8%"): they say
+# the stock moved, not why, so they are not news behind a move.
+_MOVE = (r"(?:up|down|higher|lower|soar\w*|jump\w*|surg\w*|rall\w*|climb\w*|ris(?:e|es|ing)|rose|gain\w*|spik\w*|"
+         r"pop\w*|fall\w*|fell|drop\w*|slid\w*|slip\w*|sink\w*|sank|slump\w*|tumbl\w*|plung\w*|crash\w*|tank\w*)")
+_WHY = re.compile(r"^\s*(?:why|here['’]?s why|what['’]?s going on with|what happened (?:to|with)|is it time to)\b", re.I)
+_PRICE_MOVE = re.compile(r"\b(?:shares?|stock)\b[^.:;]{0,30}?\b" + _MOVE + r"\b", re.I)
+_CATALYST = re.compile(r"\b(?:after|as|following|amid|despite|due to|because of|thanks to|over|post-|ahead of|on "
+                       r"(?!(?:mon|tues|wednes|thurs|fri|satur|sun)day\b|today\b|the day\b|heavy\b|high\b|volume\b))"
+                       r"|[:—–]", re.I)
+
+
+def move_only(title: str) -> bool:
+    """Whether a headline only says the stock moved."""
+    if _WHY.search(title):
+        return True
+    return bool(_PRICE_MOVE.search(title)) and not _CATALYST.search(title)
 
 
 def clean_name(raw: str | None) -> str | None:
@@ -203,15 +266,15 @@ def _plain(form: str) -> str:
 
 
 def _word(text: str) -> str:
-    """A name as a pattern: a one-word name starts with a capital ("Booking" the company, not "booking" a flight),
-    the rest in any case since news writes "Nvidia" for "NVIDIA"; a name that starts in lower case ("eBay",
-    "onsemi") in any case at all; a longer name in any case."""
-    body = re.escape(text)
-    if " " not in text and text[:1].isupper():
-        body = re.escape(text[0]) + "(?i:" + re.escape(text[1:]) + ")"
-    elif " " in text or text[:1].islower():
-        body = "(?i:" + body + ")"
-    return r"(?<![\w&])" + body + r"(?![\w&])"
+    """A name as a pattern. Each word starts with its capital ("Best Buy" the company, not "the best buy";
+    "Booking", not "booking" a flight), the rest of it in any case, since news writes "Nvidia" for "NVIDIA".
+    A word that starts in lower case ("eBay", "onsemi", "of") is matched in any case."""
+    def one(w: str) -> str:
+        if w[:1].isupper():
+            return re.escape(w[0]) + ("(?i:" + re.escape(w[1:]) + ")" if len(w) > 1 else "")
+        return "(?i:" + re.escape(w) + ")"
+    body = r"\s+".join(one(w) for w in text.split())
+    return r"(?<![\w&$€£])" + body + r"(?![\w&])"
 
 
 def name_forms(symbol: str, name: str | None) -> tuple[str, ...]:
@@ -233,21 +296,30 @@ def name_forms(symbol: str, name: str | None) -> tuple[str, ...]:
     return tuple(forms)
 
 
-def name_patterns(symbol: str, name: str | None) -> list[re.Pattern]:
+def title_case(text: str) -> bool:
+    """Whether a headline capitalises (nearly) every word."""
+    words = [w for w in re.findall(r"[A-Za-z][\w'’-]*", text or "") if len(w) >= 4]
+    return len(words) >= 3 and sum(w[0].isupper() for w in words) >= 0.8 * len(words)
+
+
+def name_patterns(symbol: str, name: str | None, strict: bool = False) -> list[re.Pattern]:
     """What a headline must contain to be about this stock (see name_forms), or its ticker: as written in
     capitals for a ticker of three letters or more that is not a word, and only as "$XX" or "(NYSE: XX)" for
-    any other."""
+    any other. `strict` (for a headline in Title Case): a name that needs a business word needs a noun."""
+    after = _AFTER_STRICT if strict else _AFTER
     pats: list[re.Pattern] = []
     for form in name_forms(symbol, name):
         if form.startswith("q:"):
             continue
         if form.startswith("re:"):
             pats.append(re.compile(form[3:]))
+        elif form.startswith("=") and form.endswith("+"):
+            pats.append(re.compile(r"(?<![\w&$])" + re.escape(form[1:-1]) + r"(?![\w&])" + after))
         elif form.startswith("="):
-            pats.append(re.compile(r"(?<![\w&])" + re.escape(form[1:]) + r"(?![\w&])"))
+            pats.append(re.compile(r"(?<![\w&$€£])" + re.escape(form[1:]) + r"(?![\w&])"))
         elif form.endswith("+"):
             w = _word(form[:-1])
-            pats.append(re.compile(w + _AFTER))
+            pats.append(re.compile(w + after))
             pats.append(re.compile(r"(?i:" + _BEFORE + r")" + w))
         else:
             pats.append(re.compile(_word(form)))
@@ -262,6 +334,33 @@ def name_patterns(symbol: str, name: str | None) -> list[re.Pattern]:
 
 def mentions(text: str, patterns: list[re.Pattern]) -> bool:
     return any(p.search(text or "") for p in patterns)
+
+
+def _cleared(symbol: str, title: str) -> str:
+    """The headline with this stock's other meanings (EXCLUDE) taken out."""
+    ex = EXCLUDE.get(symbol.upper())
+    return re.sub(ex, " ", title) if ex else title
+
+
+def loose_patterns(symbol: str, name: str | None) -> list[re.Pattern]:
+    """Anything that might be the stock: a name form in any case, or a ticker that counts on its own in any case.
+    A headline that has one of these but not a match is one the search could not tie to the stock."""
+    pats = [re.compile(r"(?<![\w&])" + re.escape(_plain(f)) + r"(?![\w&])", re.I)
+            for f in name_forms(symbol, name) if not f.startswith("re:")]
+    sym = symbol.upper()
+    if len(re.sub(r"[^A-Z]", "", sym)) >= 3 and sym not in COMMON_WORDS:
+        pats.append(re.compile(r"(?<![A-Za-z0-9])" + re.escape(sym) + r"(?![A-Za-z0-9])", re.I))
+    return pats
+
+
+def about(symbol: str, name: str | None, title: str) -> str | None:
+    """How a headline reads for a stock: "news" (it names the stock and is not only about the price), "move"
+    (it names the stock but only says it moved), "maybe" (it might be about the stock but cannot be tied to
+    it), or None."""
+    text = _cleared(symbol, title or "")
+    if mentions(text, name_patterns(symbol, name, strict=title_case(text))):
+        return "move" if move_only(text) else "news"
+    return "maybe" if mentions(text, loose_patterns(symbol, name)) else None
 
 
 def _safe_xml(text: str) -> ET.Element:
@@ -386,7 +485,7 @@ class SearchNews:
         symbol = symbol.upper()
         if symbol in NEWS_NAMES:
             return _plain(next((f for f in NEWS_NAMES[symbol] if not f.startswith("re:")), NEWS_NAMES[symbol][0]))
-        key = f"names:{symbol}"
+        key = f"search:name:{symbol}"
         try:
             hit = self.db.cache_get(key, NAME_DAYS * 86400)
         except Exception:                             # noqa: BLE001 - no cache: look it up
@@ -470,11 +569,12 @@ class SearchNews:
                         else f"the rest of Brave's daily limit is kept for the Morning plan ({today} of {limit_d} used)")
             self._put(cur, f"brave:day:{_day(now)}", {"n": today + 1})
             return None
-        with self._lock:
-            try:
-                return self._locked(work)
-            except sqlite3.Error as exc:
-                return f"Brave's count could not be kept ({exc.__class__.__name__}), so Brave was not asked"
+        # The database transaction alone orders the claims (BEGIN IMMEDIATE under the database's own lock); a
+        # lock of this object's around it could be taken in the other order by a caller already in a transaction.
+        try:
+            return self._locked(work)
+        except sqlite3.Error as exc:
+            return f"Brave's count could not be kept ({exc.__class__.__name__}), so Brave was not asked"
 
     def _google_pause(self) -> float:
         """Until when Google News is paused (its refusal is shared through the database)."""
@@ -504,13 +604,11 @@ class SearchNews:
             slot = max(now, nxt)
             self._put(cur, "search:google_next", {"at": slot + GOOGLE_GAP_SECONDS})
             return slot
-        with self._lock:
-            try:
-                slot = self._locked(work)
-            except sqlite3.Error:
-                now = time.time()
-                slot = max(now, self._google_next)
-            self._google_next = slot + GOOGLE_GAP_SECONDS
+        try:
+            slot = self._locked(work)
+        except sqlite3.Error:
+            slot = max(time.time(), self._google_next)
+        self._google_next = slot + GOOGLE_GAP_SECONDS
         if slot > time.time():
             time.sleep(slot - time.time())
 
@@ -592,23 +690,25 @@ class SearchNews:
         self.last_ok["Brave"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         return parse_brave(body)
 
-    def search(self, symbol: str, *, hours: int = 24, name_hint: str | None = None,
-               brave: str = "fallback", have: int = 0, brave_reserve: int = 0) -> dict[str, Any]:
+    def search(self, symbol: str, *, hours: int = 24, name_hint: str | None = None, brave: str = "fallback",
+               have: int = 0, brave_reserve: int = 0, brave_if_unmatched: bool = True) -> dict[str, Any]:
         """Recent news about one stock. `brave`: "never", "fallback" (only when nothing was found: not by Google
         News, and not the `have` items the caller already found elsewhere) or "always"; `brave_reserve` leaves
         that many of Brave's daily searches to other callers.
 
-        Returns {"items", "checked", "errors", "skipped", "unmatched", "name"}: items in the shared headline shape;
-        the sources that answered; failures; searches a limit did not allow (not failures); and how many results
-        inside the window came back but could not be tied to the stock."""
+        `brave_if_unmatched=False` skips Brave when Google returned headlines it could not tie to the stock.
+
+        Returns {"items", "checked", "errors", "skipped", "unmatched", "move_only", "name"}: items in the shared
+        headline shape; the sources that answered; failures; searches a limit did not allow (not failures); how
+        many results inside the window might be about the stock but could not be tied to it, or only say that it
+        moved (`move_only` of them); those are not news, and not "no news" either."""
         symbol = symbol.upper()
         if self.demo:
             return self._demo(symbol, hours)
         name = self.company_name(symbol, name_hint)
-        pats = name_patterns(symbol, name)
         forms = [_plain(f) for f in name_forms(symbol, name) if not f.startswith("re:")]
         if not forms and (len(re.sub(r"[^A-Z]", "", symbol)) < 3 or symbol in COMMON_WORDS):
-            return {"items": [], "checked": [], "skipped": [], "unmatched": 0, "name": name,
+            return {"items": [], "checked": [], "skipped": [], "unmatched": 0, "move_only": 0, "name": name,
                     "errors": [f"No company name is known for {symbol}, and its ticker can be mistaken for a word, so "
                                "news about it cannot be told apart from other news. Set SEC_USER_AGENT for names."]}
         terms = [f'"{f}"' for f in list(dict.fromkeys(forms))[:3]]
@@ -616,18 +716,20 @@ class SearchNews:
             terms.append(f'"{symbol}"')
         query = " OR ".join(terms) if terms else f'"{symbol}" stock'
         checked, errors, skipped, found = [], [], [], []
-        unmatched = 0
+        unmatched = moves = 0
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         def keep(rows: list[dict[str, Any]], via: str) -> None:
-            nonlocal unmatched
+            nonlocal unmatched, moves
             for row in rows:
                 if row["published"] is not None and row["published"] < cutoff:
                     continue
-                if mentions(row["title"], pats):
+                verdict = about(symbol, name, row["title"])
+                if verdict == "news":
                     found.append({**row, "via": via})
-                else:
+                elif verdict:
                     unmatched += 1
+                    moves += verdict == "move"
         if self.google_on:
             try:
                 keep(self.google(query, hours), "Google News")
@@ -636,7 +738,8 @@ class SearchNews:
                 skipped.append(self._fail("Google News", str(exc), quiet=True))
             except RuntimeError as exc:
                 errors.append(self._fail("Google News", str(exc)))
-        if self.brave_on and (brave == "always" or (brave == "fallback" and not found and not have)):
+        if self.brave_on and (brave == "always" or (brave == "fallback" and not found and not have
+                                                    and (brave_if_unmatched or not unmatched))):
             try:
                 keep(self.brave(f"{forms[0] if forms else symbol} stock", hours, brave_reserve), "Brave")
                 checked.append("Brave")
@@ -655,7 +758,7 @@ class SearchNews:
         if not checked and skipped and not errors:
             errors.append(skipped[0])                 # nothing at all was asked: the caller must not read "no news"
         return {"items": items[:MAX_RESULTS], "checked": checked, "errors": errors, "skipped": skipped,
-                "unmatched": unmatched, "name": name}
+                "unmatched": unmatched, "move_only": moves, "name": name}
 
     @staticmethod
     def _as_item(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
@@ -669,7 +772,7 @@ class SearchNews:
         """Made-up results on demo data, the same for a stock and day: two stocks in three have news."""
         now = datetime.now(timezone.utc)
         seed = int(hashlib.sha256(f"{symbol}|{now.date()}".encode()).hexdigest()[:6], 16)
-        base = {"checked": ["Demo search"], "errors": [], "skipped": [], "unmatched": 0, "name": None}
+        base = {"checked": ["Demo search"], "errors": [], "skipped": [], "unmatched": 0, "move_only": 0, "name": None}
         if seed % 3 == 0:
             return {**base, "items": []}
         row = {"title": f"{symbol} shares move after an analyst note (made up)",
@@ -705,4 +808,4 @@ def for_service(svc: Any) -> SearchNews:
 
 
 __all__ = ["SearchNews", "Refused", "for_service", "parse_google_news", "parse_brave", "clean_name", "name_forms",
-           "name_patterns", "mentions", "NEWS_NAMES"]
+           "name_patterns", "mentions", "about", "move_only", "NEWS_NAMES"]

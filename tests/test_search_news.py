@@ -100,8 +100,37 @@ def test_brave_results_are_read_with_their_times():
     ("C", "CITIGROUP INC", "Citi beats estimates", True),
     ("BAC", "BANK OF AMERICA CORP", "BofA beats on trading", True),
     ("PG", "PROCTER & GAMBLE Co", "P&G beats on price increases", True),
-    ("ON", "ON SEMICONDUCTOR CORP", "Onsemi shares tumble", True),
-    ("BRK.B", "BERKSHIRE HATHAWAY", "Why BRK-B is up today", True),
+    ("ON", "ON SEMICONDUCTOR CORP", "Onsemi shares tumble on weak guidance", True),
+    ("BRK.B", "BERKSHIRE HATHAWAY", "BRK-B holders approve the plan", True),
+    ("LLY", "ELI LILLY & Co", "Lilly's obesity pill wins approval", True),
+    ("ORCL", "ORACLE CORP", "Oracle's cloud revenue jumps 50%", True),
+    ("ORCL", "ORACLE CORP", "Oracle signs a $30 billion cloud deal", True),
+    ("F", "FORD MOTOR CO", "Ford's EV losses widen", True),
+    ("ABT", "ABBOTT LABORATORIES", "Abbott's diabetes sensors drive growth", True),
+    ("MMM", "3M CO", "Startup raises $3M seed round", False),
+    ("GM", "GENERAL MOTORS CO", "Jets fire GM Joe Douglas", False),
+    ("GM", "GENERAL MOTORS CO", "GM recalls 100,000 trucks", True),
+    ("BBY", "BEST BUY CO INC", "The best buy in tech stocks right now", False),
+    ("WM", "WASTE MANAGEMENT INC", "Nuclear waste management plan approved", False),
+    ("SMCI", "SUPER MICRO COMPUTER INC", "5 super micro-cap stocks to watch", False),
+    ("HLT", "HILTON WORLDWIDE", "Paris Hilton launches a podcast", False),
+    ("SCHW", "SCHWAB CHARLES CORP", "Klaus Schwab steps down", False),
+    ("C", "CITIGROUP INC", "Mets beat Phillies at Citi Field", False),
+    ("COF", "CAPITAL ONE FINANCIAL", "Capitals win at Capital One Arena", False),
+    ("SPGI", "S&P GLOBAL INC", "S&P Global PMI shows factory contraction", False),
+    ("MCO", "MOODYS CORP", "Moody's downgrades US credit rating", False),
+    ("GS", "GOLDMAN SACHS GROUP", "Goldman Sachs raises its S&P 500 target", False),
+    ("GS", "GOLDMAN SACHS GROUP", "Goldman Sachs profit beats estimates", True),
+    ("FANG", "DIAMONDBACK ENERGY", "FANG stocks lead the Nasdaq higher", False),
+    ("CVX", "CHEVRON CORP", "Supreme Court overturns Chevron deference", False),
+    ("AMZN", "AMAZON COM INC", "Amazon Rainforest Fires Spread", False),
+    ("MRK", "MERCK & CO", "Merck KGaA raises its outlook", False),
+    ("INTC", "INTEL CORP", "Intel Chiefs Warn Congress Of Russian Threat", False),
+    ("META", "META PLATFORMS", "Meta-analysis finds no link", False),
+    ("DOW", "DOW INC", "Dow stock futures rise ahead of jobs report", False),
+    ("V", "VISA INC", "Visa Cuts For Students Announced", False),
+    ("DAL", "DELTA AIR LINES", "Mississippi Delta Reports Record Flooding", False),
+    ("TGT", "TARGET CORP", "Fed Holds Inflation Target, Cuts Outlook", False),
     ("EBAY", "EBAY INC", "eBay raises its outlook", True),
     ("GE", "GE Aerospace", "GE raises full-year outlook", True),
     ("GE", "GE Aerospace", "GE Vernova jumps on orders", False),
@@ -141,7 +170,15 @@ def test_brave_results_are_read_with_their_times():
     ("TSMX", "TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD", "Taiwan holds drills", False),
 ])
 def test_a_headline_counts_for_a_stock_only_when_it_names_the_company(symbol, raw, headline, expected):
-    assert S.mentions(headline, S.name_patterns(symbol, S.clean_name(raw))) is expected
+    assert (S.about(symbol, S.clean_name(raw), headline) == "news") is expected
+
+
+@pytest.mark.parametrize("symbol,headline", [("ORCL", "Why Oracle stock is soaring today"), ("TSLA", "Tesla shares fall 8%"),
+                                             ("NVDA", "Nvidia shares are up today. Here's why"),
+                                             ("NFLX", "Here's why Netflix stock jumped")])
+def test_a_headline_that_only_says_the_stock_moved_is_not_news_behind_the_move(symbol, headline):
+    assert S.about(symbol, None, headline) == "move"
+    assert S.about("TSLA", None, "Tesla shares fall 8% after deliveries miss") == "news"
 
 
 def test_company_names_are_cleaned_and_demo_names_never_used():
@@ -169,12 +206,15 @@ def test_google_results_count_only_when_recent_and_the_headline_names_the_stock(
     feed = rss([("Acme Widgets wins a contract", "Reuters", "https://news.google.com/a", NOW - timedelta(hours=1)),
                 ("Old Acme Widgets story", "AP", "https://news.google.com/b", NOW - timedelta(hours=30)),
                 ("Markets drift as yields rise", "Acme Widgets Daily", "https://news.google.com/c",
-                 NOW - timedelta(minutes=5))])                       # the publisher's name is not the stock's news
+                 NOW - timedelta(minutes=5)),                        # the publisher's name is not the stock's news
+                ("acme widgets fan club meets", "Blog", "https://news.google.com/d", NOW),        # might be it
+                ("Acme Widgets shares jump", "Blog", "https://news.google.com/e", NOW)])          # only the move
     session = FakeSession(google=feed)
     search, _ = make(tmp_path, session)
     got = search.search("ACME", hours=18)
     assert [i["headline"] for i in got["items"]] == ["Acme Widgets wins a contract"]
-    assert got["checked"] == ["Google News"] and got["unmatched"] == 1 and got["errors"] == []
+    assert got["checked"] == ["Google News"] and got["errors"] == []
+    assert got["unmatched"] == 2 and got["move_only"] == 1
     q = session.calls[0][0]
     assert "when%3A18h" in q and "%22Acme+Widgets%22" in q
     search.search("ACME", hours=72)
@@ -191,6 +231,9 @@ def test_brave_is_a_capped_fallback_and_a_cap_is_not_a_failure(tmp_path):
     assert session.calls[-1][2]["X-Subscription-Token"] == "secret-brave"
     assert session.calls[-1][3] is False                                                   # no redirects followed
     assert search.search("ACME", brave="fallback", have=3)["checked"] == ["Google News"]   # found elsewhere already
+    session.google = rss([("acme widgets fan club meets", "Blog", "https://news.google.com/d", NOW)])
+    assert search.search("ACME", brave="fallback", brave_if_unmatched=False)["checked"] == ["Google News"]
+    session.google = rss([])
     # The window is any 31 days: a search 20 days ago, last month, counts against this one.
     with db.tx() as cur:
         S.SearchNews._put(cur, f"brave:day:{S._day(NOW - timedelta(days=20))}", {"n": 1})
@@ -229,6 +272,29 @@ def test_brave_never_passes_its_limit_from_two_copies_of_the_app_at_once(tmp_pat
     for t in threads:
         t.join(30)
     assert len(granted) == 40 and a.brave_usage()["month"] == 40
+
+
+def test_a_claim_from_inside_a_transaction_never_deadlocks(tmp_path):
+    session = FakeSession(google=rss([]), brave={"results": []})
+    search, db = make(tmp_path, session, brave_api_key="k", brave_monthly_limit=500, brave_daily_limit=500)
+    done = []
+
+    def inside():
+        for _ in range(50):
+            with db.tx():
+                search._brave_claim(datetime.now(timezone.utc))
+        done.append("inside")
+
+    def outside():
+        for _ in range(50):
+            search._brave_claim(datetime.now(timezone.utc))
+        done.append("outside")
+    threads = [threading.Thread(target=f, daemon=True) for f in (inside, outside)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+    assert sorted(done) == ["inside", "outside"] and search.brave_usage()["month"] == 100
 
 
 def test_google_refusing_pauses_it_for_every_copy_and_an_unreadable_feed_is_a_failure(tmp_path):
@@ -316,6 +382,7 @@ def morning(tmp_path, monkeypatch):
       "sources": ["Google News"], "errors": []}, "news"),
     ({"items": [], "sources": ["Google News"], "errors": [], "unmatched": 0}, "no_news"),
     ({"items": [], "sources": ["Google News"], "errors": [], "unmatched": 3}, "unchecked"),
+    ({"items": [], "sources": ["Google News"], "errors": [], "unmatched": 1, "move_only": 1}, "unchecked"),
     ({"items": [], "sources": [], "errors": ["Google News refused the request (429)"]}, "unchecked"),
     ({"items": [], "sources": ["Google News"], "errors": [], "skipped": ["Brave's daily limit is used up"]}, "no_news"),
 ])
@@ -325,7 +392,7 @@ def test_the_morning_news_check_never_reads_a_doubt_as_no_news(morning, reply, s
     assert got["state"] == state, got
     assert morning._news.calls == [(True, 36)]
     if state == "unchecked" and reply.get("unmatched"):
-        assert "may be about ACME" in got["label"]
+        assert ("moved, not why" if reply.get("move_only") else "may be about ACME") in got["label"]
 
 
 # --- Live news -------------------------------------------------------------------------------------------------
@@ -379,8 +446,21 @@ def test_the_movers_list_is_todays_and_brave_is_asked_once_a_stock_a_day(feed, m
     first = {s for s, _, _ in calls}
     assert first and all(b == "fallback" and r == feed.settings.brave_daily_limit // 2 for _, b, r in calls)
     calls.clear()
+    feed._movers = {}                                                 # every stock dropped off the list, then back
     feed._scan_movers()
     assert calls and all(b == "never" for s, b, _ in calls if s in first)
+
+
+def test_a_mover_whose_headlines_cannot_be_tied_to_it_is_not_ruled_out(feed):
+    def search(sym, **kw):
+        assert kw["brave_if_unmatched"] is False
+        return {"items": [], "checked": ["Google News"], "errors": [], "unmatched": 2, "move_only": 0, "name": "Acme"}
+    feed.svc.search_news = SimpleNamespace(available=True, google_on=True, brave_on=False, google_paused=False,
+                                           search=search, status=lambda: {}, sources=lambda: ["Google News"])
+    feed._scan_movers()
+    rows = [m for m in feed.movers() if m["checked"]]
+    assert rows and all(m["found"] is None and m["unclear"] == 2 for m in rows)
+    assert rows[0]["search_url"].startswith("https://news.google.com/search?q=%22Acme%22")
 
 
 def test_after_the_close_the_day_is_measured_from_todays_close(feed, monkeypatch):
@@ -400,7 +480,9 @@ def test_after_the_close_the_day_is_measured_from_todays_close(feed, monkeypatch
     assert feed._day_close(q, {"prev_close": 106.0, "last_date": wed}) == 106.0
     assert feed._day_close(q, {"prev_close": 100.0, "last_date": tue}) == 106.0       # bars not refreshed yet
     assert feed._day_close({"prevclose": 100.0}, {"prev_close": 100.0, "last_date": tue}) is None
-    assert feed._day_close({"prevclose": 100.0, "official_close": 105.5}, None) == 105.5   # Robinhood's
+    rh = {"prevclose": 100.0, "regular_last": 105.5, "regular_trade_time": "2026-10-14T19:59:58+00:00"}
+    assert feed._day_close(rh, None) == 105.5                                            # Robinhood's last regular trade
+    assert feed._day_close({**rh, "regular_trade_time": "2026-10-13T19:59:58+00:00"}, None) is None   # yesterday's
     assert feed._quote_close(q) == 106.0
     # The case that read as a rally: closed at 106 from 100, news at 105, now 104.6 after hours.
     v = L.judge(ref=105.0, price=104.6, prev_close=feed._day_close(q, None), atr=2.0, late=True, settings=feed.settings)
@@ -408,6 +490,11 @@ def test_after_the_close_the_day_is_measured_from_todays_close(feed, monkeypatch
     At.moment = datetime(2026, 10, 14, 10, 0, tzinfo=NY)                # the same day, before the close
     assert feed._day_close({"prevclose": 106.0}, {"prev_close": 106.0, "last_date": tue}) == 106.0
     assert feed._day_close({"prevclose": 106.0}, {"prev_close": 100.0, "last_date": mon}) == 106.0   # stale bars
+    # An early close: at 2 p.m. on the day after Thanksgiving the session is over.
+    At.moment = datetime(2026, 11, 27, 14, 0, tzinfo=NY)
+    monkeypatch.setattr(feed, "session", lambda: "extended")
+    assert feed._day_close({"prevclose": 100.0, "close": 104.0}, {"prev_close": 100.0, "last_date": date(2026, 11, 25)}) \
+        == 104.0
 
 
 def test_one_move_is_traded_once_a_day(feed):
