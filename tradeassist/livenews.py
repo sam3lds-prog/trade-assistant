@@ -793,6 +793,8 @@ class LiveFeed:
                 if not stop.is_set() and self._scan_due():
                     self._scan_movers(stop)
             except Exception:                         # noqa: BLE001 - the thread must survive anything
+                if stop.is_set():
+                    break                             # stopped mid-pass (the app is closing): nothing to report
                 log.exception("Live news: a search pass failed")
             stop.wait(LOOP_SECONDS)
 
