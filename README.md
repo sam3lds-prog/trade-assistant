@@ -161,7 +161,10 @@ cd ~/projects/trade-assistant
 ./update.sh
 ```
 
-It downloads the newest version, installs any new packages, and lists what changed.
+It downloads the newest version, installs any new packages, and lists what changed. If a review copy
+sits beside the app as a git worktree at `../trade-assistant-review` (for a read-only code review), the
+script then moves it to the same version, but only when it is clean, and says when it skipped. Quit any
+review session first.
 Your `.env` and `data` folder are not part of the repository, so updating never
 touches your settings, journal or Robinhood sign-in. If you have edited files in the
 folder yourself, it stops instead of overwriting them.
