@@ -1017,3 +1017,36 @@ Still open:
 - **S1.** Whether Tradier's quotes before the open carry pre-market trades. Noted in the README.
 - **S4.** A news halt: the open-session price has no age check.
 - **S5.** The loop's failed quotes count toward the source's pause.
+
+## 2.11: news found by searching
+
+**The request.** The user asked for news pulled in through a free Google or Brave search, as an AI client
+would through a search MCP server, instead of a paid news feed.
+
+**What was built, and why it differs from the request.**
+
+- **No language model in the loop.** An MCP search server is a tool an AI model calls. Putting Claude in
+  the app's refresh loop would spend API tokens on every refresh, which defeats the point of a $0 source.
+  The app makes the same searches itself.
+- **Google.** Google's Custom Search JSON API is closed to new users and ends on 1 January 2027, so the
+  free Google route is the Google News search feed. It needs no key. It is unofficial, so the app spaces
+  its requests and pauses after a refusal.
+- **Brave.** Brave's free plan ended in February 2026. The $5 monthly credit (about 1,000 searches) needs
+  a card and is billed past it, so Brave is optional, asked only as a fallback, and capped below the
+  credit.
+- **Latency.** A search engine indexes a story minutes after publication. Search explains moves and
+  checks "no news"; it does not replace RTPR's stream for speed.
+
+| Part | Where | Tests |
+| --- | --- | --- |
+| Google News feed and Brave results read from their formats; DOCTYPE and ENTITY refused; non-http links dropped | `searchnews.parse_google_news`, `parse_brave`, `_safe_xml` | `test_google_news_feed_is_read_and_the_publisher_taken_off_the_headline`, `test_brave_results_are_read_with_their_times` |
+| A result counts only when it names the company or a ticker that is not an everyday word | `clean_name`, `name_patterns`, `mentions` | `test_company_names_and_what_counts_as_a_mention`, `test_google_results_are_kept_only_when_recent_and_about_the_stock`, `test_a_ticker_that_is_a_word_and_has_no_name_is_not_searched` |
+| Brave only as a fallback, never past its caps, its key never in an error | `SearchNews.search`, `_brave_claim`, `_fail` | `test_brave_is_asked_only_when_nothing_was_found_and_never_past_its_caps` |
+| Google refusing pauses it for 15 minutes | `SearchNews.google` | `test_google_refusing_pauses_it_and_says_so` |
+| Analyze's news and the Morning plan's check search too; only the deep check asks Brave | `NewsClient.company`, `Morning._news_state` | `test_the_news_client_adds_search_results_and_only_a_deep_check_asks_brave`, `test_the_morning_news_check_uses_search_when_nothing_else_is_set` |
+| Live news: holdings then watchlist on Google News; the movers scan; one copy of a headline | `LiveFeed._google_rotation`, `_scan_movers`, `_duplicate` | `test_google_news_reads_your_holdings_first`, `test_movers_get_a_search_and_news_found_becomes_a_signal`, `test_the_same_headline_from_two_sources_is_kept_once` |
+| The "Why is it moving?" panel | `static/live.js` `moversPanel` | Chromium: `test_live_news_lists_movers_with_the_news_search_found` |
+| Settings | `config.py` | `test_settings_read_the_search_options` |
+
+Not verified against the real services, which this build environment cannot reach: Google News's search
+feed and Brave's news API are written to their published formats.

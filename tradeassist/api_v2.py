@@ -945,7 +945,8 @@ def build_router(svc: Any) -> APIRouter:
     from .makeup import MarketMakeup
     from .news import NewsClient
     ai = svc.ai if getattr(svc, "ai", None) else AIClient(svc.settings, svc.db)
-    news = svc.news if getattr(svc, "news", None) else NewsClient(svc.settings, svc.db, svc.sec)
+    from .searchnews import for_service as search_for
+    news = svc.news if getattr(svc, "news", None) else NewsClient(svc.settings, svc.db, svc.sec, search=search_for(svc))
     makeup = MarketMakeup(svc, analyst)
     briefs = Briefs(ai, svc, news, makeup, lab, analyst)
     svc.ai, svc.news, svc.makeup, svc.briefs = ai, news, makeup, briefs

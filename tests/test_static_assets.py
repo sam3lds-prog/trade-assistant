@@ -440,6 +440,35 @@ def test_live_news_listens_shows_the_feed_and_turns_a_confirmed_move_into_a_card
 
 
 @pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_live_news_lists_movers_with_the_news_search_found(tmp_path, monkeypatch):
+    """2.11: "Why is it moving?" lists the stocks that moved, the news search found for each (or that none was
+    found), and opens Decide from the row. The scan's rows are fixed here; the scan itself is tested in
+    tests/test_search_news.py."""
+    import tradeassist.livenews as live_mod
+    rows = [{"symbol": "AMZN", "price": 190.5, "prev_close": 177.2, "move_pct": 7.5, "ranges": 2.3, "found": True,
+             "checked": ["Google News"], "errors": [], "headline": "Amazon wins a cloud contract",
+             "url": "https://example.com/a", "via": "Google News", "checked_at": "2026-10-16T14:00:00+00:00"},
+            {"symbol": "FDX", "price": 240.0, "prev_close": 260.0, "move_pct": -7.7, "ranges": -2.0, "found": False,
+             "checked": ["Google News", "Brave"], "errors": [], "checked_at": "2026-10-16T14:00:00+00:00"},
+            {"symbol": "UBER", "price": 80.0, "prev_close": 76.0, "move_pct": 5.3, "ranges": 1.6, "found": None,
+             "checked": [], "errors": ["Google News refused the request (429); pausing it for 15 minutes"]}]
+    monkeypatch.setattr(live_mod.LiveFeed, "movers", lambda self: rows)
+    monkeypatch.setattr(live_mod.LiveFeed, "running", property(lambda self: True))
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#live")
+        page.wait_for_selector("text=Why is it moving? (3)", timeout=20000)
+        panel = page.locator(".panel", has_text="Why is it moving?").first
+        text = panel.inner_text()
+        assert "Amazon wins a cloud contract" in text and "+7.5%" in text and "(Google News)" in text
+        assert "No news found" in text and "Google News, Brave" in text and "snap back" in text
+        assert "Search failed: Google News refused" in text
+        assert panel.locator("a", has_text="Amazon wins a cloud contract").get_attribute("href") == "https://example.com/a"
+        panel.locator("tr", has_text="AMZN").locator("button:text-is('Analyze')").click()
+        page.wait_for_function("location.hash === '#analyze'", timeout=20000)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
 def test_price_an_option_shows_the_fair_price_and_its_evidence(tmp_path):
     with demo_page(tmp_path) as (page, errors):
         page.goto(page.base + "#price")

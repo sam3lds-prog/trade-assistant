@@ -132,6 +132,13 @@ class Settings:
     live_min_day_pct: float = 3.0           # ...and in percent
     live_news_email: bool = False           # email each new opportunity and each alert on a stock you hold
     live_news_autostart: bool = False       # start listening when the app starts
+    # 2.11: news found by searching. Google News search feeds are free (no key); Brave is optional, capped so it
+    # stays inside the $5 monthly credit that comes with a key. Movers are scanned this often while trading.
+    google_news: bool = True
+    brave_api_key: str = field(default="", repr=False)
+    brave_monthly_limit: int = 900
+    brave_daily_limit: int = 40
+    live_mover_sweep_minutes: float = 5.0   # 0 switches the "why is it moving?" scan off
 
     # V2 areas that can be switched off (see features.py)
     features: dict[str, bool] = field(default_factory=lambda: dict(FEATURE_DEFAULTS))
@@ -220,6 +227,11 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         live_min_day_pct=_float("LIVE_MIN_DAY_PCT", 3.0),
         live_news_email=_flag("LIVE_NEWS_EMAIL"),
         live_news_autostart=_flag("LIVE_NEWS_AUTOSTART"),
+        google_news=_flag("GOOGLE_NEWS", True),
+        brave_api_key=_clean_token(os.getenv("BRAVE_API_KEY")),
+        brave_monthly_limit=max(_int("BRAVE_MONTHLY_LIMIT", 900), 0),
+        brave_daily_limit=max(_int("BRAVE_DAILY_LIMIT", 40), 0),
+        live_mover_sweep_minutes=max(_float("LIVE_MOVER_SWEEP_MINUTES", 5.0), 0.0),
         features=load_features(),
         freshness=freshness_thresholds(),
     )

@@ -18,6 +18,38 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.11.0
+
+**News found by searching, at no cost.**
+
+- **Google News search** (free, no key, on unless `GOOGLE_NEWS=0`). Each stock is searched by its company
+  name and its ticker. A result counts only when the headline or summary names the company, so a ticker
+  that is an everyday word (V, ON, ALL) is matched by its name. Company names come from the SEC's ticker
+  list or the quote. The searches are spaced two seconds apart, and if Google refuses one the app pauses
+  them for 15 minutes.
+- **Brave news search** (optional, `BRAVE_API_KEY`). Asked only when nothing else found news. Brave ended
+  its free plan in February 2026: an account now needs a card and gets $5 of searches a month (about
+  1,000), billed past that. The app counts each request before sending it and stops at
+  `BRAVE_MONTHLY_LIMIT` (900) and `BRAVE_DAILY_LIMIT` (40). Data health shows the month's count.
+- **Where it is used.**
+  - Analyze: Google News results join the Finnhub headlines and SEC filings.
+  - The Morning plan's ride-or-fade check: Google News, and Brave when nothing else found news, so "no
+    news" rests on more than one source.
+  - Live news: your holdings, then your watchlist, four stocks every five minutes.
+- **"Why is it moving?"** (new panel on Live news). Every five minutes the app lists the stocks that moved
+  3% and 1.5 daily ranges since the close, and searches the news for those with nothing in the feed. News
+  found joins the feed and can become an opportunity. A big move with no news found is flagged: check it
+  before riding it.
+- **No AI in the loop.** The searches are plain requests from the app, so they use no Anthropic tokens.
+- **What search cannot do.** A search engine indexes a story minutes after it is published. Search
+  explains a move; it does not come before one. RTPR's stream is still the source for that.
+
+**Also.** The same headline from two sources is kept once in Live news. A signal's day move is measured
+from the quote's previous close when the quote carries it.
+
+New settings: `GOOGLE_NEWS`, `BRAVE_API_KEY`, `BRAVE_MONTHLY_LIMIT`, `BRAVE_DAILY_LIMIT`,
+`LIVE_MOVER_SWEEP_MINUTES` (see `.env.example`). No database migration.
+
 ## 2.10.0
 
 **Prices you can get, and Live news.**

@@ -288,7 +288,7 @@ def classify(*, ranges: float | None, move_pct: float, direction: int, news_stat
                 "why": f"No news found behind a {ranges:.1f}-range move, and it looks overextended "
                        f"({', '.join(overext_why)}): moves like this have tended to reverse ({word})."}
     if news_state == "unchecked":
-        why = "News could not be checked (no Finnhub key and no SEC contact set), so neither setup applies."
+        why = "News could not be checked (no source set up, or the check failed), so neither setup applies."
     elif ranges < RIDE_MIN_RANGES:
         why = f"An ordinary move for this stock ({ranges:.1f} of its daily ranges)."
     elif news_state == "no_news" and ranges < FADE_MIN_RANGES:
@@ -410,7 +410,9 @@ class Morning:
     def news_client(self):
         if self._news is None:
             from .news import NewsClient
-            self._news = getattr(self.svc, "news", None) or NewsClient(self.svc.settings, self.svc.db, self.svc.sec)
+            from .searchnews import for_service
+            self._news = getattr(self.svc, "news", None) or NewsClient(self.svc.settings, self.svc.db, self.svc.sec,
+                                                                       search=for_service(self.svc))
         return self._news
 
     def _quotes(self, names: list[str], progress=None, total: int = 0) -> dict[str, dict[str, Any]]:
@@ -459,10 +461,11 @@ class Morning:
                 return {"state": "no_news", "label": "No news found (made up)", "items": []}
             return {"state": "news", "label": "Demo headline (made up)",
                     "items": [{"headline": f"{symbol} demo headline", "source": "Demo", "published": None, "url": None}]}
-        if not client.configured and not (self.svc.sec and self.svc.sec.enabled):
-            return {"state": "unchecked", "label": "News not checked (no Finnhub key, no SEC contact)", "items": []}
+        if not client.configured and not (self.svc.sec and self.svc.sec.enabled) and not client.searchable:
+            return {"state": "unchecked", "label": "News not checked (no Finnhub key, no SEC contact, search off)",
+                    "items": []}
         try:
-            got = client.company(symbol, days=3)
+            got = client.company(symbol, days=3, deep=True)
         except Exception as exc:                      # noqa: BLE001 - news failing must not sink the plan
             return {"state": "unchecked", "label": f"News check failed ({_why(exc)})", "items": []}
         fresh = []
