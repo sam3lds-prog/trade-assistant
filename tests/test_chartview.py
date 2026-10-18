@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -102,7 +103,8 @@ def test_bars_within_the_day_are_kept_and_refreshed_sparingly(tmp_path, monkeypa
     a = it.bars("AAPL", "5m", 5)
     b = it.bars("AAPL", "5m", 5)
     assert len(calls) == 1 and a.equals(b) and len(a) % 78 == 0 and 3 * 78 <= len(a) <= 5 * 78
-    assert svc.db.one("SELECT COUNT(*) AS n FROM intraday_bars WHERE symbol = 'AAPL' AND interval = '5m'")["n"] >= 20 * 78
+    stored = svc.db.one("SELECT COUNT(*) AS n FROM intraday_bars WHERE symbol = 'AAPL' AND interval = '5m'")["n"]
+    assert stored >= len(a) and stored % 78 == 0                         # a day's slack is fetched beyond the ask
     monkeypatch.setattr(I, "FRESH_SECONDS", 0)
     monkeypatch.setattr(I, "QUIET_SECONDS", 0)
     it.bars("AAPL", "5m", 5)
@@ -114,6 +116,49 @@ def test_bars_within_the_day_are_kept_and_refreshed_sparingly(tmp_path, monkeypa
     c = it.bars("AAPL", "5m", 5)
     assert len(c) == len(a) and "down" in it.last_error["AAPL:5m"]          # what is held stands, and the failure is kept
     assert it.available_groups(1) == ["5m", "15m", "1h", "1d"] and it.available_groups(400) == ["1d", "1w", "1M", "1Q"]
+
+
+class FakeLive:
+    """A live-like source: 5-minute bars for the last `reach` calendar days, weekdays only, 9:30 to 16:00."""
+
+    def __init__(self, reach=39):
+        self.reach, self.calls = reach, []
+
+    def intraday_reach(self):
+        return {"1m": 0, "5m": 40, "note": "about 40 days"}
+
+    def intraday(self, symbol, interval, start, end):
+        self.calls.append((start, end))
+        rows, day = [], datetime.now(NY).replace(hour=0, minute=0, second=0, microsecond=0)
+        for back in range(self.reach):
+            d = day - timedelta(days=back)
+            if d.weekday() >= 5:
+                continue
+            for i in range(78):
+                t = int((d.replace(hour=9, minute=30) + timedelta(minutes=5 * i)).timestamp())
+                if start.timestamp() <= t <= end.timestamp():
+                    rows.append({"t": t, "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 1, "vwap": 10.1})
+        return I.intraday_frame(rows)
+
+
+def test_a_live_source_is_asked_once_for_the_span_then_only_for_the_last_day(tmp_path, monkeypatch):
+    svc = service(tmp_path)
+    src = FakeLive(reach=38)                      # a source a little short of its stated reach, weekends off
+    monkeypatch.setattr(type(svc.market), "info", property(lambda self: SimpleNamespace(mode="live", label="Fake")))
+    monkeypatch.setattr(svc.market, "provider", src)
+    svc.market._call = lambda what, fn: fn()
+    it = I.Intraday(svc.market, svc.db)
+    it._trading_now = lambda: True
+    a = it.bars("AAPL", "5m", 40)
+    b = it.bars("AAPL", "5m", 40)
+    c = it.bars("AAPL", "5m", 5)
+    assert len(src.calls) == 1 and a.equals(b) and len(c) < len(a)        # one fetch covers every later call
+    monkeypatch.setattr(I, "FRESH_SECONDS", 0)
+    it.bars("AAPL", "5m", 40)
+    assert len(src.calls) == 2
+    start, end = src.calls[-1]
+    assert (end - start).days <= 4, "a refresh asks only from the last kept day, not the whole span again"
+    assert svc.db.one("SELECT asked_from FROM intraday_meta WHERE symbol = 'AAPL'")["asked_from"] <= src.calls[0][0].timestamp() + 1
 
 
 def test_the_series_for_each_grouping_has_times_the_chart_can_draw(tmp_path):
@@ -182,6 +227,12 @@ def test_a_planted_shape_is_found_in_the_past_but_never_in_itself():
     assert all(abs(s - (n - 100)) >= 40 for s in starts)
     assert all(abs(a - b) >= 40 for i, a in enumerate(starts) for b in starts[i + 1:])     # no overlap
     assert all(m["correlation"] >= 0.9 for m in r["matches"]) and r["min_correlation"] == 0.9
+    assert all(m["end"] + 20 < n - 100 for m in r["matches"]), "nothing read after a match reaches the window"
+    # A shape right before the window would have the window as its "after": refused.
+    twice = pd.DataFrame({"close": np.concatenate([base := np.linspace(100, 110, 60), base, base]), "high": 0.0, "low": 0.0})
+    twice["high"], twice["low"] = twice["close"] + 0.5, twice["close"] - 0.5
+    r2 = S.search(twice, 120, 179, "1d", min_corr=0.9)
+    assert all(m["end"] + 20 < 120 for m in r2["matches"])
     h = next(x for x in r["horizons"] if x["bars"] == 5)
     assert h["cases"] == len(r["matches"]) and h["up"] + h["down"] <= h["cases"] and 0 <= h["low"] <= h["up_frequency"] <= h["high"] <= 1
     sc = h["scenarios"]
@@ -196,11 +247,13 @@ def test_the_bar_is_lowered_a_step_at_a_time_when_nothing_matches_and_the_result
     base = np.cumsum(rng.standard_normal(600)) + 100
     df = pd.DataFrame({"close": base, "high": base + 0.5, "low": base - 0.5})
     r = S.search(df, 560, 599, "1d", min_corr=0.99)
-    assert r["lowered_from"] in (0.99, None)
-    if r["matches"]:
-        assert r["min_correlation"] < 0.99 and "lowered" in r["note"]
-    else:
-        assert r["best_correlation"] is not None and "closest was" in r["note"]
+    assert r["lowered_from"] == 0.99 and r["matches"] and r["min_correlation"] < 0.99 and "lowered" in r["note"]
+    S.search(df, 560, 599, "1d", min_corr=0.99, limit=20)
+    strict = pd.DataFrame({"close": np.linspace(100, 101, 60) + np.r_[np.zeros(40), np.sin(np.arange(20))],
+                           "high": 0.0, "low": 0.0})
+    strict["high"], strict["low"] = strict["close"] + 0.1, strict["close"] - 0.1
+    r3 = S.search(strict, 40, 59, "1d", min_corr=0.99)
+    assert r3["matches"] == [] and "closest was" in r3["note"] and r3["lowered_from"] is None
     assert "at least 8 bars" in S.search(df, 595, 599, "1d")["note"]
     flat = pd.DataFrame({"close": [100.0] * 50, "high": [100.0] * 50, "low": [100.0] * 50})
     assert "flat" in S.search(flat, 30, 49, "1d")["note"]
@@ -221,9 +274,16 @@ def test_the_chart_covers_the_range_in_the_grouping_asked_for_and_loads_the_hist
         bars, w = c["bars"], c["window"]
         assert len(bars) >= w["bars"] and w["end"] - w["start"] + 1 == w["bars"]
         assert all(bars[i]["tl"] < bars[i + 1]["tl"] for i in range(len(bars) - 1))
-        assert bars[w["end"] - w["offset"]]["complete"] in (True, False) and len(c["future_times"]) >= 12
+        assert isinstance(bars[w["end"] - w["offset"]]["complete"], bool) and len(c["future_times"]) >= 12
         assert c["future_times"][0] > bars[-1]["tl"]
-        assert "structure" in c and "reversal" in c and "news" in c
+        assert c["structure"]["swings"] and c["news"] is not None
+        if len(bars) >= 80:
+            assert c["reversal"] is not None and set(c["reversal"]["now"]) == {"bottom", "top"}
+            assert c["reversal"]["now"]["bottom"]["stage"] in ("NONE", "WATCH", "CANDIDATE", "CONFIRMED", "FAILED")
+            assert all(m["stage"] in ("CANDIDATE", "CONFIRMED", "FAILED") and m["tl"] in {b["tl"] for b in bars}
+                       for m in c["reversal"]["markers"])
+        else:
+            assert c["reversal"] is None
     one = view.chart("AAPL", "1d")
     assert one["window"]["bars"] == 78 and one["group"]["kind"] == "intraday"
     assert "1d" in one["range"]["groups"] and "1w" not in one["range"]["groups"]
@@ -239,6 +299,12 @@ def test_custom_ranges_are_checked_and_honoured(view):
             view.chart("AAPL", "custom", None, bad.get("start"), bad.get("end"))
     with pytest.raises(RequestError):
         view.chart("AAPL", "weekly")
+    with pytest.raises(RequestError, match="traded on"):
+        view.chart("AAPL", "custom", "1d", "2026-10-17", "2026-10-18")          # a weekend
+    # 1D is the last day that has bars, whatever the clock says.
+    one = view.chart("AAPL", "1d")
+    days = {datetime.fromtimestamp(b["t"], NY).date() for b in one["bars"][one["window"]["start"] - one["window"]["offset"]:]}
+    assert len(days) == 1
 
 
 def test_the_news_sits_on_the_bars_of_the_range(view):
@@ -248,6 +314,12 @@ def test_the_news_sits_on_the_bars_of_the_range(view):
     assert c["news"]["items"], "demo headlines are dated inside the month"
     for n in c["news"]["items"]:
         assert lo <= n["t"] <= hi and n["headline"] and n["tl"] in {b["tl"] for b in c["bars"]}
+        # A headline sits on a bar of its own New York day (a pre-market headline on that day's first bar).
+        bar = next(b for b in c["bars"] if b["tl"] == n["tl"])
+        assert datetime.fromtimestamp(bar["t"], NY).date() <= datetime.fromtimestamp(n["t"], NY).date()
+        later = [b for b in c["bars"] if b["t"] > bar["t"]]
+        if later and datetime.fromtimestamp(bar["t"], NY).date() < datetime.fromtimestamp(n["t"], NY).date():
+            assert datetime.fromtimestamp(later[0]["t"], NY).date() > datetime.fromtimestamp(n["t"], NY).date()
     far = view.chart("AAPL", "2y", "1d")
     assert far["news"]["items"] == [] and "30 days" in far["news"]["note"]
 
@@ -274,15 +346,21 @@ def test_the_outlook_reads_patterns_a_top_or_bottom_the_signals_and_the_news_eac
     o = view.outlook("AAPL", "6m", None, None, None, horizon=5, min_corr=0.6)
     keys = [r["key"] for r in o["readings"]]
     assert keys[0] == "patterns" and "reversal" in keys and keys[-1] == "news"
+    voted = []
     for r in o["readings"]:
         if r.get("frequency") is not None:
             assert 0 <= r["low"] <= r["frequency"] <= r["high"] <= 1 and r["cases"] > 0
-            assert r["enough"] == (r["cases"] >= 10)
+        assert r["enough"] == (bool(r.get("cases")) and r["cases"] >= 10)
+        assert r["votes"] == bool(r["enough"] and r.get("direction") and (r.get("frequency") or 0) >= 0.55)
+        if r["votes"]:
+            voted.append(r["direction"])
     lean = o["lean"]
-    assert lean["direction"] in ("higher", "lower", "no lean") and lean["for"] + lean["against"] <= lean["of"]
-    assert "not a forecast" in o["note"] and o["horizon"] is None or o["horizon"]["bars"] in {h["bars"] for h in o["horizons"]}
+    assert lean["of"] == len(voted) and lean["for"] == max(voted.count(1), voted.count(-1), 0) if voted else lean["of"] == 0
+    assert lean["direction"] == ("higher" if voted.count(1) > voted.count(-1) else "lower" if voted.count(-1) > voted.count(1) else "no lean")
+    assert "is a forecast" in o["note"] and o["horizon"]["bars"] == 5 and o["similar"]["matches"] is not None
+    assert view.outlook("AAPL", "6m", None, None, None, min_corr=0.6)["horizon"]["bars"] == 5   # the default: a week on
     news = o["readings"][-1]
-    assert "move" in news and "text" in news
+    assert "move" in news and "text" in news and all((n["url"] or "https://").startswith("http") for n in news["items"])
 
 
 # --- the API ------------------------------------------------------------------------------------------------------

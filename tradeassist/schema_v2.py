@@ -574,5 +574,6 @@ def intraday_tables(cur: sqlite3.Cursor) -> None:
         first_t    INTEGER,
         last_t     INTEGER,
         fetched_at REAL NOT NULL,
+        asked_from REAL,                        -- the start of the span last asked of the source (UTC seconds)
         PRIMARY KEY (symbol, interval)
     )""")

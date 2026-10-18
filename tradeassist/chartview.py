@@ -15,6 +15,7 @@ never a forecast. Nothing here places an order.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,8 @@ from .providers.base import DataError
 from .structure import SWING_ATR
 from .structure import analyse as analyse_structure
 
+log = logging.getLogger(__name__)
+
 MAX_BARS = 6000
 NEWS_DAYS_MAX = 30
 INDICATOR_COLUMNS = ("ema20", "sma50", "sma200", "bb_low", "bb_mid", "bb_high", "rsi", "macd", "macd_signal", "macd_hist",
@@ -50,9 +53,11 @@ def _range_days(range_key: str, start: str | None, end: str | None) -> tuple[flo
         if not start:
             raise RequestError("A custom range needs a start date (YYYY-MM-DD)")
         try:
-            s = datetime.fromisoformat(start).replace(tzinfo=NY) if len(start) == 10 else datetime.fromisoformat(start).astimezone(NY)
-            e = (datetime.fromisoformat(end).replace(tzinfo=NY) + timedelta(days=1) if end and len(end) == 10
-                 else datetime.fromisoformat(end).astimezone(NY) if end else now)
+            def moment(text: str) -> datetime:
+                d = datetime.fromisoformat(text)
+                return d.replace(tzinfo=NY) if d.tzinfo is None else d.astimezone(NY)
+            s = moment(start)
+            e = (moment(end) + timedelta(days=1) if end and len(end) == 10 else moment(end) if end else now)
         except ValueError as exc:
             raise RequestError(f"Dates must be YYYY-MM-DD: {exc}") from None
         if e <= s:
@@ -94,11 +99,15 @@ class ChartView:
     def series(self, symbol: str, group: str, days: float) -> tuple[pd.DataFrame, dict[str, Any]]:
         """The whole available series of `group` bars (not just the range), enriched, with `t` and `tl` on
         every row; and notes about the source. Cached a minute so the three calls share one build."""
-        key = (symbol, group, round(days, 1), self.svc.market.info.mode)
-        hit = self._series_cache.get(key)
-        if hit and time.time() - hit[0] < 60:
-            return hit[1], hit[2]
         g = GROUPS[group]
+        years = 10 if group in ("1M", "1Q") else max(5.0, days / 365.25 + 0.3) if g["kind"] != "intraday" else 0
+        key = (symbol, group, round(days, 1) if g["kind"] == "intraday" else round(years, 1), self.svc.market.info.mode)
+        now = time.time()
+        for k in [k for k, v in self._series_cache.items() if now - v[0] >= 60]:
+            self._series_cache.pop(k, None)
+        hit = self._series_cache.get(key)
+        if hit:
+            return hit[1], hit[2]
         notes: dict[str, Any] = {"group": group, "kind": g["kind"], "label": g["label"]}
         if g["kind"] == "intraday":
             reach = self.intraday.offered()
@@ -112,30 +121,51 @@ class ChartView:
             frame["date"] = pd.to_datetime(frame["t"], unit="s", utc=True)
         else:
             # Daily and grouped bars: five years, or ten for monthly and quarterly, so the search has history.
-            years = 10 if group in ("1M", "1Q") else max(5.0, days / 365.25 + 0.3)
             frame = self.intraday.series(symbol, group, years * 365.25)
             if frame.empty:
                 raise DataError(f"No bars for {symbol}")
             opens = pd.to_datetime(frame["date"]).dt.tz_localize(NY) + pd.Timedelta(hours=9, minutes=30)
             frame["t"] = np.array([int(x.timestamp()) for x in opens], dtype="int64")
         frame = frame.reset_index(drop=True)
-        if len(frame) > 20:
-            rich = enrich(frame.rename(columns={"complete": "bar_complete"}))
-            for col in INDICATOR_COLUMNS:
-                if col in rich.columns and col not in frame.columns:
-                    frame[col] = rich[col].to_numpy()
-            frame["structure_state"] = rich["structure_state"].to_numpy() if "structure_state" in rich.columns else 0
         frame["tl"] = [local_shift(int(t)) for t in frame["t"]]
+        if len(frame) > 20:
+            # The whole enriched frame is kept (the reversal engine needs its pattern columns), with `complete`
+            # and `tl` carried over; the chart reads the indicator columns off it.
+            rich = enrich(frame.rename(columns={"complete": "bar_complete"}))
+            rich["complete"] = frame["complete"].to_numpy()
+            rich["tl"] = frame["tl"].to_numpy()
+            frame = rich
         self._series_cache[key] = (time.time(), frame, notes)
         return frame, notes
 
-    def _window(self, frame: pd.DataFrame, start: datetime, end: datetime) -> tuple[int, int]:
-        """Bar positions of the first and last bar inside [start, end]."""
+    def _reversal_eval(self, frame: pd.DataFrame) -> dict[str, Any] | None:
+        """The reversal engine on the series, run once per cached series (about a second on 2,500 bars)."""
+        if len(frame) < 80 or "atr" not in frame.columns:
+            return None
+        cached = frame.attrs.get("reversal")
+        if cached is not None:
+            return cached
+        try:
+            ev = reversal_engine.evaluate(frame)
+        except Exception:                                      # noqa: BLE001 - the engine needs the pattern columns
+            log.warning("Reversal engine failed on the chart series", exc_info=True)
+            return None
+        frame.attrs["reversal"] = ev
+        return ev
+
+    def _window(self, frame: pd.DataFrame, start: datetime, end: datetime, range_key: str = "") -> tuple[int, int]:
+        """Bar positions of the first and last bar inside [start, end]. For 1D, the last day that has bars (a
+        holiday, or the minutes before the open, would otherwise leave it empty)."""
         t = frame["t"].to_numpy(dtype="int64")
+        if range_key == "1d":
+            last_day = datetime.fromtimestamp(int(t[-1]), NY).date()
+            days = [datetime.fromtimestamp(int(x), NY).date() for x in t[-500:]]
+            first = len(t) - len(days) + days.index(last_day)
+            return int(first), int(len(t) - 1)
         lo, hi = int(start.timestamp()), int(end.timestamp())
         idx = np.flatnonzero((t >= lo) & (t <= hi))
         if len(idx) == 0:
-            raise DataError("No bars fall inside that range")
+            raise RequestError("No bars fall inside that range: pick dates the market traded on")
         return int(idx[0]), int(idx[-1])
 
     def resolve(self, symbol: str, range_key: str, group: str | None, start: str | None, end: str | None) -> dict[str, Any]:
@@ -158,7 +188,7 @@ class ChartView:
         symbol = self.svc._symbol(symbol)
         r = self.resolve(symbol, range_key, group, start, end)
         frame, notes = self.series(symbol, r["group"], r["days"])
-        i0, i1 = self._window(frame, r["start"], r["end"])
+        i0, i1 = self._window(frame, r["start"], r["end"], r["range"])
         if i1 - i0 + 1 > MAX_BARS:
             raise RequestError(f"That range holds {i1 - i0 + 1} bars at this grouping; group them more coarsely")
         # The whole series goes to the chart (the last MAX_BARS of it), with the range marked as the window,
@@ -167,6 +197,7 @@ class ChartView:
         view = frame.iloc[offset:]
         g = GROUPS[r["group"]]
         cols = ["open", "high", "low", "close", "volume"] + [c for c in INDICATOR_COLUMNS if c in view.columns]
+        view = view.assign(complete=view["complete"].astype(bool))
         bars = []
         for row in view[["t", "tl", "complete", *cols]].itertuples(index=False):
             d = {"t": int(row.t), "tl": int(row.tl), "complete": bool(row.complete)}
@@ -193,7 +224,7 @@ class ChartView:
         # Structure: swings, support and resistance, trendlines, on the series the chart shows.
         if len(frame) >= 60:
             try:
-                structure = analyse_structure(frame.rename(columns={"complete": "bar_complete"}), swing_atr)
+                structure = analyse_structure(frame, swing_atr)
                 tl = frame["tl"].to_numpy(dtype="int64")
                 swings = [{**sw, "tl": int(tl[sw["index"]]), "tl_confirmed": int(tl[sw["confirmed"]])}
                           for sw in structure["swings"] if sw["index"] >= offset]
@@ -213,11 +244,8 @@ class ChartView:
         return out
 
     def _reversal_on(self, frame: pd.DataFrame, i0: int, i1: int) -> dict[str, Any] | None:
-        if len(frame) < 80 or "atr" not in frame.columns:
-            return None
-        try:
-            ev = reversal_engine.evaluate(frame.rename(columns={"complete": "bar_complete"}))
-        except Exception:                                      # noqa: BLE001
+        ev = self._reversal_eval(frame)
+        if ev is None:
             return None
         markers = []
         tl = frame["tl"].to_numpy()
@@ -293,6 +321,11 @@ class ChartView:
             seen.add(key)
             pos = int(np.searchsorted(t, ts, side="right") - 1)
             pos = min(max(pos, i0), i1)
+            # A headline before the open belongs to that day's bars, not the day before's.
+            day = datetime.fromtimestamp(ts, NY).date()
+            if pos + 1 <= i1 and datetime.fromtimestamp(int(t[pos]), NY).date() < day <= \
+                    datetime.fromtimestamp(int(t[pos + 1]), NY).date():
+                pos += 1
             markers.append({"t": ts, "tl": int(tl[pos]), "headline": it.get("headline"), "source": it.get("source"),
                             "url": it.get("url") if str(it.get("url") or "").startswith(("http://", "https://")) else None,
                             "tone": it.get("tone"), "kind": it.get("kind") or "news", "via": it.get("via")})
@@ -309,7 +342,7 @@ class ChartView:
         symbol = self.svc._symbol(symbol)
         r = self.resolve(symbol, range_key, group, start, end)
         frame, _ = self.series(symbol, r["group"], r["days"])
-        i0, i1 = self._window(frame, r["start"], r["end"])
+        i0, i1 = self._window(frame, r["start"], r["end"], r["range"])
         last = len(frame) - 1
         ws = i0 if window_start is None else max(0, min(int(window_start), last))
         we = i1 if window_end is None else max(ws, min(int(window_end), last))
@@ -371,8 +404,11 @@ class ChartView:
         horizons = found["horizons"]
         chosen = None
         if horizons:
-            chosen = next((h for h in horizons if h["bars"] == horizon), None) or \
-                next((h for h in horizons if h["bars"] >= (horizon or 0)), horizons[min(2, len(horizons) - 1)])
+            if horizon is None:
+                chosen = horizons[min(2, len(horizons) - 1)]          # the middle horizon: a week on daily bars
+            else:
+                chosen = next((h for h in horizons if h["bars"] == horizon), None) or \
+                    next((h for h in horizons if h["bars"] >= horizon), horizons[-1])
         readings: list[dict[str, Any]] = []
         votes: list[tuple[str, int, str]] = []            # (reading, direction, why)
         price = None
@@ -385,14 +421,13 @@ class ChartView:
         if chosen:
             freq = chosen["up_frequency"]
             d = 1 if freq >= 0.55 else -1 if freq <= 0.45 else 0
+            lo_f, hi_f = (chosen["low"], chosen["high"]) if d >= 0 else (1 - chosen["high"], 1 - chosen["low"])
             readings.append({"key": "patterns", "label": f"Similar patterns, {chosen['label']} on",
-                             "direction": d, "frequency": freq, "low": chosen["low"], "high": chosen["high"],
-                             "cases": chosen["cases"], "enough": chosen["enough"],
+                             "direction": d, "frequency": freq if d >= 0 else 1 - freq, "low": lo_f, "high": hi_f,
+                             "cases": chosen["cases"], "why": "the pattern matches",
                              "text": f"{len(found['matches'])} past matches of this shape: {chosen['up']} of {chosen['cases']} were "
                                      f"higher {chosen['label']} later (median {chosen['median_pct']:+.1f}%).",
                              "scenarios": chosen.get("scenarios")})
-            if chosen["enough"] and d:
-                votes.append(("patterns", d, "the pattern matches"))
         else:
             readings.append({"key": "patterns", "label": "Similar patterns", "direction": 0, "frequency": None,
                              "cases": 0, "enough": False, "text": found.get("note") or "No matches."})
@@ -417,10 +452,9 @@ class ChartView:
                                          f"({mine['cases']} cases).")
                             readings.append({"key": "reversal", "label": f"{'Bottom' if d > 0 else 'Top'} forming ({stage.lower()})",
                                              "direction": d, "frequency": mine["frequency"], "low": mine["frequency_low"],
-                                             "high": mine["frequency_high"], "cases": mine["cases"], "enough": mine["enough"],
+                                             "high": mine["frequency_high"], "cases": mine["cases"],
+                                             "why": f"a {lead} {stage.lower()}",
                                              "text": (conf.get("headline") or "") + past_text})
-                            if mine["enough"]:
-                                votes.append(("reversal", d, f"a {lead} {stage.lower()}"))
                             break
                 else:
                     readings.append({"key": "reversal", "label": f"{'Bottom' if d > 0 else 'Top'} forming ({stage.lower()})",
@@ -444,19 +478,20 @@ class ChartView:
                 readings.append({"key": f"signal:{s.get('key')}", "label": f"Signal: {s.get('label') or s.get('key')}",
                                  "direction": d, "frequency": summary.get("frequency"), "low": summary.get("frequency_low"),
                                  "high": summary.get("frequency_high"), "cases": summary.get("cases"),
-                                 "enough": summary.get("enough"),
+                                 "why": f"the {s.get('label') or s.get('key')} signal",
                                  "text": f"Fired {s.get('date') or 'recently'}; on this stock it went its way two weeks later "
                                          f"{summary['frequency']:.0%} of the time ({summary['cases']} cases)."})
-                if summary.get("enough") and d and summary["frequency"] >= 0.55:
-                    votes.append((f"signal:{s.get('key')}", d, f"the {s.get('label') or s.get('key')} signal"))
         except Exception:                                  # noqa: BLE001 - signals are a bonus
             pass
         # 4. The news: is today's move one with news behind it, and how did such moves on this stock go on?
-        readings.append(self._news_reading(symbol, q, votes))
-        for r in readings:                                 # one bar for every reading: MIN_CASES cases to vote
+        readings.append(self._news_reading(symbol, q))
+        # One bar for every reading: MIN_CASES cases to vote, and the vote's way at least 55% of them. Each
+        # reading's `frequency` is how often its `direction` followed; `enough` is the same test for all.
+        for r in readings:
             r["enough"] = bool(r.get("cases")) and int(r["cases"]) >= similar_engine.MIN_CASES
-        votes = [v for v in votes if next((r for r in readings if r["key"] == v[0]), {}).get("enough")]
-        # The lean: a simple count of the readings with enough cases, never more than that.
+            r["votes"] = bool(r["enough"] and r.get("direction") and (r.get("frequency") or 0) >= 0.55)
+        votes = [(r["key"], int(r["direction"]), r.get("why") or r["label"]) for r in readings if r["votes"]]
+        # The lean: a simple count of the readings that vote, never more than that.
         up = sum(1 for _, d, _ in votes if d > 0)
         down = sum(1 for _, d, _ in votes if d < 0)
         lean = "higher" if up > down else "lower" if down > up else "no lean"
@@ -465,12 +500,12 @@ class ChartView:
                 "readings": readings, "lean": {"direction": lean, "for": up if lean == "higher" else down,
                                                "against": down if lean == "higher" else up, "of": len(votes),
                                                "why": why},
-                "window": found["window"], "matches": len(found["matches"]),
+                "window": found["window"], "matches": len(found["matches"]), "similar": found,
                 "note": ("Each reading is how often the same thing on this stock was followed by a rise or a fall, "
                          "with a 95% interval; readings with fewer than 10 cases carry no vote. The lean counts the "
                          "readings, nothing more. None of this is a forecast, and no order is placed.")}
 
-    def _news_reading(self, symbol: str, q: dict[str, Any], votes: list) -> dict[str, Any]:
+    def _news_reading(self, symbol: str, q: dict[str, Any]) -> dict[str, Any]:
         news = getattr(self.svc, "news", None)
         items: list[dict[str, Any]] = []
         tone = None
@@ -490,6 +525,9 @@ class ChartView:
                 tone = float(np.mean(tones)) if tones else None
         except Exception:                                  # noqa: BLE001
             pass
+        for it in items:
+            if not str(it.get("url") or "").startswith(("http://", "https://")):
+                it["url"] = None
         reading: dict[str, Any] = {"key": "news", "label": "News", "direction": 0, "frequency": None, "cases": 0,
                                    "enough": False, "items": items[:5]}
         # Today's move, in this stock's daily ranges.
@@ -518,11 +556,15 @@ class ChartView:
                                             f"days later {cont:.0%} of the time ({h3['cases']} cases); moves with news tend to "
                                             f"keep going and moves without it to snap back, which the past record alone "
                                             f"cannot tell apart.")
-                        reading.update(frequency=cont, low=h3["low"], high=h3["high"], cases=h3["cases"],
-                                       enough=h3["enough"], direction=d if with_news else -d)
-                        if h3["enough"]:
-                            votes.append(("news", d if with_news else -d,
-                                          "a move with news behind it" if with_news else "a move with no news found"))
+                        # The reading's way: with news, the move's (how often it kept going); without, the other
+                        # (how often it snapped back).
+                        if with_news:
+                            reading.update(frequency=cont, low=h3["low"], high=h3["high"], direction=d,
+                                           why="a move with news behind it")
+                        else:
+                            reading.update(frequency=1 - cont, low=1 - h3["high"], high=1 - h3["low"], direction=-d,
+                                           why="a move with no news found")
+                        reading.update(cases=h3["cases"])
                 else:
                     reading["text"] = (f"No big move today ({pct:+.1f}%, {abs(ranges):.1f} ranges). "
                                        + (f"{len(items)} headline{'s' if len(items) != 1 else ''} in the last 36 hours"

@@ -792,13 +792,14 @@ contract opens Price an option on it with the limit ladder ready.
    is the median of what followed, the dashed lines the middle half. The table lists each match with its
    likeness and what came one, three and five bars later; **Go there** pans to it. The likeness bar
    (correlation) starts at 75% and is lowered a step at a time when nothing matches, which the note says.
-6. **Possible outcomes.** For the horizon you pick (one bar to twenty, in that grouping's time): how often
-   the matches went on to rise more than one daily range, stay within one, or fall more than one, and how
-   often they were simply higher, each with a 95% interval and the count. Then the other readings, each
+6. **Possible outcomes.** For the horizon you pick (one bar to twenty, in that grouping's time; a week on
+   daily bars to start): how often the matches went on to rise more than one average range of those bars,
+   stay within one, or fall more than one, and how often they were simply higher, each with a 95% interval
+   and the count. Then the other readings, each
    with its own count: a top or bottom forming on the daily bars and how that reading went before on this
    stock; the signals of the last ten bars and their record; today's move with the news behind it, and how
-   moves this size on this stock went on. **Lean** counts the readings with ten cases or more; with fewer
-   than ten, a reading is shown but does not count.
+   moves this size on this stock went on. **Lean** counts the readings with ten cases or more whose way
+   followed at least 55% of the time; the others are shown but do not count.
 
 What this is not. A shape that looked the same before had other news and another market behind it, and
 eight matches say little: with 8 cases the interval runs from about 15% to 85%. These are frequencies on

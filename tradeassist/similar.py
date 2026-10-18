@@ -3,13 +3,13 @@ the price did next.
 
 The shape is the closes of the window on the screen, normalised (each close as standard deviations from the
 window's mean, on a log scale, so a $50 stock and a $500 stock, a rise and a fall of the same form, all compare
-alike). Every window of the same length in the stock's history of the same bar size is scored against it:
+alike). Every window of the same length in the stock's history of the same bar size is scored against it by Pearson
+correlation on the normalised closes (the root-mean-square distance between two standardised shapes is a
+function of that correlation, sqrt(2 - 2r), so it is reported but adds nothing).
 
-    correlation   how alike the two shapes are, whatever their size (Pearson, on the normalised closes);
-    distance      how far apart they are point by point (root mean square, on the same scale).
-
-A match needs a correlation of at least MIN_CORRELATION, matches never overlap each other or the window on
-the screen, and the best MAX_MATCHES are kept. For each match the bars after it are read off: the return at
+A match needs a correlation of at least MIN_CORRELATION, matches never overlap each other, and neither a
+match nor the bars read off after it may reach into the window on the screen (otherwise the window's own
+path would be counted as "what followed"); the best MAX_MATCHES are kept. For each match the bars after it are read off: the return at
 each horizon, the best and worst along the way, and the whole path, so the chart can draw what came next
 over the end of the window on the screen.
 
@@ -45,6 +45,8 @@ HORIZONS: dict[str, tuple[tuple[int, str], ...]] = {
     "1Q": ((1, "1 quarter"), (2, "6 months"), (4, "1 year")),
 }
 MIN_CASES = 10                 # fewer matches than this: the frequencies are shown as too few to lean on
+GROUP_WORDS = {"1m": "one-minute", "5m": "five-minute", "15m": "fifteen-minute", "1h": "hourly", "1w": "weekly",
+               "1M": "monthly", "1Q": "quarterly"}   # the average range's unit in the scenario labels
 
 
 def normalise(closes: np.ndarray) -> np.ndarray | None:
@@ -83,19 +85,20 @@ def score_windows(closes: np.ndarray, shape: np.ndarray) -> tuple[np.ndarray, np
 
 
 def pick_matches(corr: np.ndarray, dist: np.ndarray, n: int, exclude: tuple[int, int] | None,
-                 min_corr: float = MIN_CORRELATION, limit: int = MAX_MATCHES) -> list[int]:
+                 min_corr: float = MIN_CORRELATION, limit: int = MAX_MATCHES, guard: int = 0) -> list[int]:
     """The start bars of the best matches: correlation at least `min_corr`, best first, none overlapping another
-    or the window `exclude` (start, end bars of the shape on the screen)."""
+    or the window `exclude` (start, end bars of the shape on the screen), and none whose `guard` bars after
+    reach into that window."""
     if len(corr) == 0:
         return []
-    score = np.where(np.isfinite(corr), corr - 0.1 * np.nan_to_num(dist, nan=9.0), -np.inf)
+    score = np.where(np.isfinite(corr), corr, -np.inf)
     order = np.argsort(-score)
     taken: list[int] = []
     for i in order:
         i = int(i)
         if not np.isfinite(corr[i]) or corr[i] < min_corr:
             break
-        if exclude is not None and i < exclude[1] + 1 and i + n - 1 > exclude[0] - 1:
+        if exclude is not None and i <= exclude[1] and i + n - 1 + guard >= exclude[0]:
             continue
         if any(abs(i - j) < n for j in taken):
             continue
@@ -112,8 +115,8 @@ def _pct(a: float, b: float) -> float:
 def search(series: pd.DataFrame, start: int, end: int, group: str, *, atr: float | None = None,
            min_corr: float = MIN_CORRELATION, limit: int = MAX_MATCHES) -> dict[str, Any]:
     """Matches for the window `series[start:end+1]` (bar positions) in the rest of `series`, and what followed
-    each. `series` has close, high and low, oldest first; `atr` is one average range in price, for the
-    scenario buckets."""
+    each. `series` has close, high and low, oldest first; `atr` is one average range of these bars in price,
+    for the scenario buckets."""
     n = end - start + 1
     closes = series["close"].to_numpy(dtype=float)
     highs = series["high"].to_numpy(dtype=float)
@@ -134,14 +137,14 @@ def search(series: pd.DataFrame, start: int, end: int, group: str, *, atr: float
     horizons = HORIZONS.get(group, HORIZONS["1d"])
     max_h = horizons[-1][0]
     corr, dist = score_windows(closes, shape)
-    starts = pick_matches(corr, dist, n, (start, end), min_corr, limit)
+    starts = pick_matches(corr, dist, n, (start, end), min_corr, limit, guard=max_h)
     outside = np.array([c for i, c in enumerate(corr) if np.isfinite(c) and (i + n - 1 < start or i > end)])
     out["best_correlation"] = float(outside.max()) if len(outside) else None
     asked = min_corr
     while not starts and min_corr - 0.1 >= FLOOR_CORRELATION - 1e-9:
         # Nothing that alike: the bar is lowered a step at a time, down to the floor, and the result says so.
         min_corr = round(min_corr - 0.1, 2)
-        starts = pick_matches(corr, dist, n, (start, end), min_corr, limit)
+        starts = pick_matches(corr, dist, n, (start, end), min_corr, limit, guard=max_h)
     out["min_correlation"] = min_corr
     out["lowered_from"] = asked if min_corr < asked and starts else None
     if not starts:
@@ -187,10 +190,11 @@ def search(series: pd.DataFrame, start: int, end: int, group: str, *, atr: float
         if atr and atr > 0:
             last_q = closes[end]
             edge = 100.0 * atr / last_q                        # one average range as a percent of the current price
+            unit = "daily range" if group == "1d" else f"{GROUP_WORDS.get(group, 'bar')} range"
             row["scenarios"] = {
-                "up_range": {"label": f"Up more than one daily range (+{edge:.1f}%)", "cases": int((arr >= edge).sum())},
-                "within": {"label": "Within one range either way", "cases": int(((arr > -edge) & (arr < edge)).sum())},
-                "down_range": {"label": f"Down more than one range (-{edge:.1f}%)", "cases": int((arr <= -edge).sum())},
+                "up_range": {"label": f"Up more than one {unit} (+{edge:.1f}%)", "cases": int((arr >= edge).sum())},
+                "within": {"label": f"Within one {unit} either way", "cases": int(((arr > -edge) & (arr < edge)).sum())},
+                "down_range": {"label": f"Down more than one {unit} (-{edge:.1f}%)", "cases": int((arr <= -edge).sum())},
             }
             for v in row["scenarios"].values():
                 v["frequency"] = v["cases"] / len(arr)

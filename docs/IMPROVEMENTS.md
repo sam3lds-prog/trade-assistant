@@ -1155,3 +1155,26 @@ similar and outlook calls), `static/chart.js` on TradingView's Lightweight Chart
 
 Not verified against the real services, which this build environment cannot reach: Tradier's timesales and
 Robinhood's bars within the day are written to their published formats.
+
+### The independent review of 2.12
+
+An independent reviewer read the change and ran reproductions. It reported 16 findings; all were fixed.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| C1 | "Top or bottom forming" never worked: the series kept only the indicator columns, the reversal engine needed the pattern columns, and the failure was swallowed | High | the enriched frame is kept whole and the engine's result cached with it; a failure is logged | `test_the_chart_covers_the_range_...` asserts the reading and its markers |
+| C2 | On live sources every call refetched the whole span: freshness was judged by the first bar held, which sits at 9:30 of a trading day, so a span's first calendar day often had none | High | `asked_from` (the span last asked) is kept in `intraday_meta` and judged instead; the lock is per symbol and interval and not held across the fetch | `test_a_live_source_is_asked_once_for_the_span_then_only_for_the_last_day` |
+| C3 | Readings said "enough" at ten cases but voted by their sources' thirty, so only the pattern reading could vote | Medium | one rule for every reading: ten cases, and its way at least 55% of the time; each reading's `frequency` is now the frequency of its own way | `test_the_outlook_reads_patterns_...` recomputes the lean from the readings |
+| C4 | A match ending just before the window had the window's own bars as "what followed" | Medium | neither a match nor the bars read after it may reach into the window | `test_a_planted_shape_is_found_...` (a shape repeated back to back) |
+| C5 | The default horizon fell through to the shortest | Medium | the third horizon (a week on daily bars) | same test as C3 |
+| C6 | Each Analyze left the last chart and its theme listener alive | Medium | one live instance: a new one disposes the last | — (page) |
+| C7 | The series cache grew without bound and keyed daily series by the range's days | Medium | keyed by the years fetched for daily and coarser bars; entries older than a minute evicted | — |
+| C8 | Two searches per press, and the horizon select ran both again | Low | the outlook carries the search; one request | — (page) |
+| C9 | Scenario labels said "daily range" on five-minute bars | Low | the unit follows the grouping | — |
+| C10 | A pre-market headline sat on the day before's bar | Low | a headline before the open goes on that day's first bar | `test_the_news_sits_on_the_bars_of_the_range` |
+| C11 | A weekend custom range or a holiday answered 502 | Low | a 400 that says to pick trading days; 1D is the last day that has bars | `test_custom_ranges_are_checked_and_honoured` |
+| C12 | Demo bars for the rest of today were already there | Low | nothing after the present moment is fetched or returned | — |
+| C13 | The outlook's headline links were not scheme-checked | Low | http(s) only, as on the chart | same test as C3 |
+| C14 | The distance was presented as a second measure though it is a function of the correlation | Low | reported, not used; the docs say so | — |
+| C15 | Tests that asserted tautologies | Low | rewritten to assert the readings, the markers, the vote rule and the lowered bar | `tests/test_chartview.py` |
+| C16 | A swing-size change left the structure panel on the old size; unused range config; a searched window stuck for later presses | Low | both reload; the config is gone; each press reads the screen afresh unless a window was selected | — |

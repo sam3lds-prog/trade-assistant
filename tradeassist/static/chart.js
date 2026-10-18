@@ -72,10 +72,13 @@ const CHARTX = (() => {
   return { clampWindow, overlayLines, scenarioRows };
 })();
 
+let CHART_ACTIVE = null;   // the one live instance: a new Analyze disposes the last (its chart and listener)
+
 function interactiveChart(symbol) {
   const lib = window.LightweightCharts;
+  if (CHART_ACTIVE) { CHART_ACTIVE.dispose(); CHART_ACTIVE = null; }
   const state_ = { range: "6m", group: null, start: "", end: "", show: { ...CHART_DEFAULTS }, swing: "2",
-    data: null, sim: null, selecting: false, selection: null, request: 0, minCorr: 0.75, horizon: null, matchesShown: 5,
+    data: null, sim: null, selecting: false, selection: null, userWindow: false, request: 0, minCorr: 0.75, horizon: null, matchesShown: 5,
     view: null };                              // the logical range to show after a draw, when not the range
   const chartBox = el("div", { class: "lw-chart" });
   const readout = el("div", { class: "small muted lw-readout", text: "Hover the chart for the bar's figures. Drag to pan, scroll to zoom." });
@@ -115,7 +118,7 @@ function interactiveChart(symbol) {
   });
   customBox.querySelector("button").addEventListener("click", () => { state_.start = startIn.value; state_.end = endIn.value; load(); });
   groupSel.addEventListener("change", () => { state_.group = groupSel.value; load(); });
-  swingSel.addEventListener("change", () => { state_.swing = swingSel.value; load(); });
+  swingSel.addEventListener("change", () => { state_.swing = swingSel.value; load(); loadStructure(); });
 
   // --- the chart ---------------------------------------------------------------------------------------------
   let chart = null, series = {}, markers = null, priceLines = [], overlaySeries = [], selectionBox = null;
@@ -138,7 +141,9 @@ function interactiveChart(symbol) {
     chart.timeScale().subscribeVisibleTimeRangeChange(() => placeSelection());
   }
   const mq = window.matchMedia("(prefers-color-scheme: dark)");
-  mq.addEventListener("change", () => { if (state_.data) draw(); });
+  const onTheme = () => { if (state_.data && panel.isConnected) draw(); };
+  mq.addEventListener("change", onTheme);
+  const dispose = () => { mq.removeEventListener("change", onTheme); if (chart) { chart.remove(); chart = null; } state_.data = null; };
 
   function bar(i) { return state_.data.bars[i]; }
   function indexOfTime(tl) {
@@ -205,7 +210,7 @@ function interactiveChart(symbol) {
         const bottom = m.side === "bottom";
         marks.push({ time: m.tl, position: bottom ? "belowBar" : "aboveBar", color: m.stage === "FAILED" ? c.muted : bottom ? c.up : c.down,
           shape: m.stage === "CONFIRMED" ? (bottom ? "arrowUp" : "arrowDown") : "square", size: m.stage === "CONFIRMED" ? 1.2 : 0.9,
-          text: `${bottom ? "Bottom" : "Top"} ${m.stage.toLowerCase()}`, _what: { kind: "reversal", m } });
+          text: `${bottom ? "Bottom" : "Top"}${m.stage === "CANDIDATE" ? "?" : m.stage === "CONFIRMED" ? " ✓" : " ✗"}`, _what: { kind: "reversal", m } });
       }
     }
     if (d.news && show.news) {
@@ -295,7 +300,7 @@ function interactiveChart(symbol) {
     if (state_.selecting) {
       if (state_.selection && state_.selection.length === 1) {
         const [a, b] = CHARTX.clampWindow(state_.selection[0], i, state_.data.bars.length, 400);
-        state_.selection = [a, b]; state_.selecting = false;
+        state_.selection = [a, b]; state_.selecting = false; state_.userWindow = true;
         selectBtn.textContent = "Select a window on the chart";
         info.replaceChildren(el("span", { text: `Window selected: ${b - a + 1} bars, ${chartWhen(bar(a).tl, state_.data.group.kind === "intraday")} to ${chartWhen(bar(b).tl, state_.data.group.kind === "intraday")}. Press Find similar patterns.` }));
       } else { state_.selection = [i]; info.replaceChildren(el("span", { text: "Now click the last bar of the window." })); }
@@ -318,8 +323,8 @@ function interactiveChart(symbol) {
   latestBtn.addEventListener("click", () => { if (state_.data) { const n = state_.data.bars.length, vr = chart.timeScale().getVisibleLogicalRange(); showView(n - 1 - (vr ? vr.to - vr.from : 130) + 4, n + 3); } });
   selectBtn.addEventListener("click", () => {
     state_.selecting = !state_.selecting;
-    if (state_.selecting) { state_.selection = null; selectBtn.textContent = "Cancel selecting"; info.replaceChildren(el("span", { text: "Click the first bar of the window." })); }
-    else { selectBtn.textContent = "Select a window on the chart"; info.replaceChildren(); }
+    if (state_.selecting) { state_.selection = null; state_.userWindow = false; selectBtn.textContent = "Cancel selecting"; info.replaceChildren(el("span", { text: "Click the first bar of the window." })); }
+    else { state_.userWindow = false; selectBtn.textContent = "Select a window on the chart"; info.replaceChildren(); }
     placeSelection();
   });
 
@@ -337,7 +342,7 @@ function interactiveChart(symbol) {
     try {
       const d = await api(`/v2/chart/${encodeURIComponent(symbol)}?${query()}`);
       if (mine !== state_.request) return;
-      state_.data = d; state_.sim = null; state_.selection = null; state_.view = null;
+      state_.data = d; state_.sim = null; state_.selection = null; state_.userWindow = false; state_.view = null;
       state_.group = d.group.key;
       groupSel.replaceChildren(...CHART_GROUPS.filter(([v]) => d.range.groups.includes(v)).map(([v, t]) => el("option", { value: v, text: t, selected: v === d.group.key })));
       toggles.find(t => t.dataset.toggle === "vwap").classList.toggle("hidden", d.group.kind !== "intraday");
@@ -384,21 +389,23 @@ function interactiveChart(symbol) {
     turnBox.replaceChildren(...kids);
   }
   async function findSimilar() {
-    if (!state_.data) return;
+    if (!state_.data || !chart) return;
     const d = state_.data;
-    let [a, b] = state_.selection && state_.selection.length === 2 ? state_.selection : (() => {
+    // The window: the one selected on the chart, else the last 40 bars on screen (each press reads the
+    // screen afresh, so panning and pressing again searches the new view).
+    let [a, b] = state_.userWindow ? state_.selection : (() => {
       const vr = chart.timeScale().getVisibleLogicalRange();
       return vr ? CHARTX.clampWindow(vr.from, vr.to, d.bars.length, 400) : [d.window.start - d.window.offset, d.window.end - d.window.offset];
     })();
-    if (!state_.selection && b - a + 1 > 40) a = b - 39;      // on screen, the last 40 bars are the shape searched
+    if (!state_.userWindow && b - a + 1 > 40) a = b - 39;
     findBtn.disabled = true;
     const p = query();
     p.set("window_start", String(a + d.window.offset)); p.set("window_end", String(b + d.window.offset));
     p.set("min_correlation", String(state_.minCorr));
     if (state_.horizon) p.set("horizon", String(state_.horizon));
     try {
-      const o = await api(`/v2/chart/${encodeURIComponent(symbol)}/outlook?${p}`);
-      const sim = await api(`/v2/chart/${encodeURIComponent(symbol)}/similar?${p}`);
+      const o = await api(`/v2/chart/${encodeURIComponent(symbol)}/outlook?${p}`);   // one search: the outlook carries the matches
+      const sim = o.similar;
       state_.sim = sim; state_.selection = [a, b];
       renderPatterns(sim); renderOutlook(o, sim);
       showProjection(a, b);
@@ -426,7 +433,7 @@ function interactiveChart(symbol) {
     const kids = [el("h3", { text: "Possible outcomes" })];
     if (o.horizons && o.horizons.length) {
       const hsel = el("select", { "aria-label": "Horizon" }, o.horizons.map(h => el("option", { value: String(h.bars), text: `${h.label} on`, selected: o.horizon && h.bars === o.horizon.bars })));
-      hsel.addEventListener("change", () => { state_.horizon = Number(hsel.value); findSimilar(); });
+      hsel.addEventListener("change", () => { state_.horizon = Number(hsel.value); findSimilar(); });   // one request
       kids.push(el("div", { class: "row" }, field("Horizon", hsel), el("span", { class: "small muted", text: `${o.matches} matches${o.price ? `; last ${money(o.price)}` : ""}` })));
       const rows = CHARTX.scenarioRows(o.horizon);
       kids.push(el("div", { class: "lw-scenarios" }, rows.map(r => el("div", { class: "lw-scenario" },
@@ -455,5 +462,6 @@ function interactiveChart(symbol) {
     notes);
   load();
   loadStructure();
-  return { panel, extras: [outlookBox, patternBox, turnBox], structure: structBox };
+  CHART_ACTIVE = { dispose };
+  return { panel, extras: [outlookBox, patternBox, turnBox], structure: structBox, dispose };
 }

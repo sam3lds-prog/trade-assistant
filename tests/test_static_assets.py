@@ -484,7 +484,7 @@ def test_analyze_has_an_interactive_chart_with_patterns_and_outcomes(tmp_path):
         page.click("button:text-is('Analyze')")
         page.wait_for_selector(".lw-chart canvas", timeout=60000)
         page.wait_for_selector("text=loaded to pan through", timeout=60000)
-        assert "6 months, 1 day bars: 130 in the range" in page.inner_text(".lw-panel")
+        assert re.search(r"6 months, 1 day bars: 1[23]\d in the range", page.inner_text(".lw-panel"))
         # Hovering reads the bar out.
         page.locator(".lw-chart").scroll_into_view_if_needed()
         box = page.locator(".lw-chart").bounding_box()

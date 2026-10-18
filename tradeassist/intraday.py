@@ -43,15 +43,15 @@ GROUPS: dict[str, dict[str, Any]] = {
 }
 # How far back the chart can reach for each range word, in calendar days, and the groups that suit it.
 RANGES: dict[str, dict[str, Any]] = {
-    "1d": {"days": 1, "label": "1 day", "default": "5m", "groups": ("1m", "5m", "15m")},
-    "5d": {"days": 7, "label": "5 days", "default": "15m", "groups": ("5m", "15m", "1h")},
-    "1m": {"days": 31, "label": "1 month", "default": "1h", "groups": ("15m", "1h", "1d")},
-    "3m": {"days": 92, "label": "3 months", "default": "1d", "groups": ("1h", "1d", "1w")},
-    "6m": {"days": 183, "label": "6 months", "default": "1d", "groups": ("1d", "1w")},
-    "1y": {"days": 366, "label": "1 year", "default": "1d", "groups": ("1d", "1w", "1M")},
-    "2y": {"days": 731, "label": "2 years", "default": "1d", "groups": ("1d", "1w", "1M")},
-    "5y": {"days": 1827, "label": "5 years", "default": "1w", "groups": ("1d", "1w", "1M", "1Q")},
-    "10y": {"days": 3653, "label": "10 years", "default": "1M", "groups": ("1w", "1M", "1Q")},
+    "1d": {"days": 1, "label": "1 day", "default": "5m"},
+    "5d": {"days": 7, "label": "5 days", "default": "15m"},
+    "1m": {"days": 31, "label": "1 month", "default": "1h"},
+    "3m": {"days": 92, "label": "3 months", "default": "1d"},
+    "6m": {"days": 183, "label": "6 months", "default": "1d"},
+    "1y": {"days": 366, "label": "1 year", "default": "1d"},
+    "2y": {"days": 731, "label": "2 years", "default": "1d"},
+    "5y": {"days": 1827, "label": "5 years", "default": "1w"},
+    "10y": {"days": 3653, "label": "10 years", "default": "1M"},
 }
 INTRADAY_COLUMNS = ["t", "open", "high", "low", "close", "volume", "vwap"]
 FRESH_SECONDS = 60            # while the market trades, the latest bars are refetched this often
@@ -184,6 +184,7 @@ class Intraday:
         self.market = market
         self.db = db
         self._lock = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
         self.last_error: dict[str, str] = {}
 
     # --- what the source can do -------------------------------------------------------------------------------
@@ -219,7 +220,8 @@ class Intraday:
         provider = self.market.provider
         if self.market.info.mode == "demo":
             daily = self.market.bars(symbol, 0.3)
-            return demo_intraday(daily, symbol)
+            made = demo_intraday(daily, symbol)
+            return made[(made["t"] >= int(start.timestamp())) & (made["t"] <= int(end.timestamp()))].reset_index(drop=True)
         fetch = getattr(provider, "intraday", None)
         if fetch is None:
             raise DataError(f"{self.market.info.label} does not provide bars within the day")
@@ -228,42 +230,51 @@ class Intraday:
 
     def bars(self, symbol: str, interval: str, days: float) -> pd.DataFrame:
         """The last `days` days of `interval` bars (a source interval: 1m or 5m), from the database when they
-        are fresh enough, else fetched and kept. Regular session only."""
+        are fresh enough, else fetched and kept. Regular session only, and nothing after this moment.
+
+        Freshness is judged by what was asked for last time (`asked_from`, kept with the bars), not by the
+        first bar held: the first bar sits at 9:30 of a trading day, so a span's first calendar day often has
+        none. One fetch runs at a time for a symbol and interval; the database lock is taken only to read
+        and write, never across the fetch."""
         interval = interval if interval in ("1m", "5m") else "5m"
         now = time.time()
-        with self._lock:
+        lock = self._lock_for(symbol, interval)
+        with lock:
             meta = self.db.one("SELECT * FROM intraday_meta WHERE symbol = ? AND interval = ?", (symbol, interval))
             trading = self._trading_now()
             reach = self.offered().get(interval, 0)
             wanted = min(days, reach) if reach else days
-            fresh = (meta is not None and meta["source"] == self.market.info.mode
-                     and now - meta["fetched_at"] < (FRESH_SECONDS if trading else QUIET_SECONDS)
-                     and meta["first_t"] <= now - wanted * 86400 + 86400)
+            held = meta is not None and meta["source"] == self.market.info.mode
+            asked_from = float(meta["asked_from"]) if held and meta["asked_from"] is not None else None
+            covers = asked_from is not None and asked_from <= now - wanted * 86400 + 3600
+            fresh = held and covers and now - meta["fetched_at"] < (FRESH_SECONDS if trading else QUIET_SECONDS)
             if not fresh:
                 if self.market.info.mode != "demo" and reach <= 0:
                     raise DataError(f"{self.market.info.label} does not offer {GROUPS[interval]['label']} bars")
                 span = min(max(days, 2), reach) if reach else days
                 end = datetime.now(timezone.utc)
                 start = end - timedelta(days=span + 1)
+                from_t = start.timestamp()
                 # Refresh only what may have changed: from the start of the last kept day when the rest is held.
-                if meta is not None and meta["source"] == self.market.info.mode and \
-                        meta["first_t"] <= start.timestamp() + 86400:
+                if held and covers:
                     start = datetime.fromtimestamp(meta["last_t"], timezone.utc).astimezone(NY).replace(
                         hour=0, minute=0, second=0, microsecond=0)
+                    from_t = min(asked_from, from_t)
                 try:
                     frame = regular_session(self._fetch(symbol, interval, start, end))
                     self.last_error.pop(f"{symbol}:{interval}", None)
                 except DataError as exc:
-                    if meta is None or meta["source"] != self.market.info.mode:
+                    if not held:
                         raise
                     self.last_error[f"{symbol}:{interval}"] = str(exc)
                     frame = None
                 if frame is not None and not frame.empty:
+                    frame = frame[frame["t"] <= int(now)]
                     rows = [(symbol, interval, int(t), o, h, lo, c, v, None if (w is None or not math.isfinite(w)) else w)
                             for t, o, h, lo, c, v, w in frame[INTRADAY_COLUMNS].itertuples(index=False, name=None)]
                     keep_from = int(now - HOLD_DAYS * 86400)
                     with self.db.tx() as cur:
-                        if meta is None or meta["source"] != self.market.info.mode:
+                        if not held:
                             cur.execute("DELETE FROM intraday_bars WHERE symbol = ? AND interval = ?", (symbol, interval))
                         cur.executemany("INSERT INTO intraday_bars (symbol, interval, t, open, high, low, close, volume, "
                                         "vwap) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(symbol, interval, t) DO "
@@ -273,20 +284,25 @@ class Intraday:
                                     (symbol, interval, keep_from))
                         first = cur.execute("SELECT MIN(t), MAX(t) FROM intraday_bars WHERE symbol = ? AND interval = ?",
                                             (symbol, interval)).fetchone()
-                        cur.execute("INSERT INTO intraday_meta (symbol, interval, source, first_t, last_t, fetched_at) "
-                                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(symbol, interval) DO UPDATE SET source = "
-                                    "excluded.source, first_t = excluded.first_t, last_t = excluded.last_t, fetched_at = "
-                                    "excluded.fetched_at", (symbol, interval, self.market.info.mode, first[0], first[1], now))
-                elif frame is not None and meta is None:
+                        cur.execute("INSERT INTO intraday_meta (symbol, interval, source, first_t, last_t, fetched_at, "
+                                    "asked_from) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(symbol, interval) DO UPDATE SET "
+                                    "source = excluded.source, first_t = excluded.first_t, last_t = excluded.last_t, "
+                                    "fetched_at = excluded.fetched_at, asked_from = excluded.asked_from",
+                                    (symbol, interval, self.market.info.mode, first[0], first[1], now, from_t))
+                elif frame is not None and not held:
                     raise DataError(f"No bars within the day came back for {symbol}")
             since = int(now - days * 86400)
             stored = self.db.query("SELECT t, open, high, low, close, volume, vwap FROM intraday_bars WHERE symbol = ? "
-                                   "AND interval = ? AND t >= ? ORDER BY t", (symbol, interval, since))
+                                   "AND interval = ? AND t >= ? AND t <= ? ORDER BY t", (symbol, interval, since, int(now)))
         df = pd.DataFrame([dict(r) for r in stored], columns=INTRADAY_COLUMNS)
         if df.empty:
             return intraday_frame([])
         df["t"] = df["t"].astype("int64")
         return df
+
+    def _lock_for(self, symbol: str, interval: str) -> threading.Lock:
+        with self._lock:
+            return self._locks.setdefault(f"{symbol}:{interval}", threading.Lock())
 
     def _trading_now(self) -> bool:
         try:
