@@ -18,6 +18,27 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.14.0
+
+**The factors count once; pinch zooms both ways; combinations and a budget.**
+
+- **A joint fit, the market first.** The factors (US market, sector, peers, Japan, Europe, China, the 10-year
+  yield, Brent, the dollar, the VIX) are fitted together in that order: each term in the model is only the part
+  of its move the factors above it do not already explain, so a sector fund's move that is mostly the market's
+  is not counted twice. The rows show the beta alone and on the factor's own part; hovering a term says what
+  was shared. Switching a factor off refits the ones that remain.
+- **Pinch zooms both axes.** Two fingers on the chart, or a trackpad pinch (ctrl+wheel), narrow the price axis
+  around the price under the fingers as well as the time axis; Fit range puts both back.
+- **A combination.** Strategies you pick, or the AI's pick (which can now be two or three), with a quantity
+  each, valued together under the scenario so hedges offset: downside, middle, upside, expected result, chance
+  of a profit, the worst tenth, what it ties up and the most it can lose.
+- **Split a budget.** Dollars plus a caution dial, a cap on any one strategy and the pool to split across: the
+  units of each strategy that maximise the expected result minus caution × the average loss in the worst tenth
+  of outcomes, with the whole's figures and the expected return on the budget. Strategies whose loss has no
+  limit are left out. One click makes the split the combination.
+
+No new settings and no migration. Models only: nothing here places an order.
+
 ## 2.13.0
 
 **What-if analysis on the chart.** A widget under the interactive chart on Analyze a stock, and a position

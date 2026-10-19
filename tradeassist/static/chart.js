@@ -69,7 +69,24 @@ const CHARTX = (() => {
     rows.push({ key: "up", label: "Higher at all", pct: 100 * h.up_frequency, low: 100 * h.low, high: 100 * h.high, cases: h.up, of: h.cases });
     return rows;
   }
-  return { clampWindow, overlayLines, scenarioRows };
+  // 2.14: vertical zoom arithmetic. A pinch's distance and middle; the price to keep still (the one under the
+  // fingers, clamped to the range); the narrowed or widened range around it.
+  function pinchOf(touches) {
+    const a = touches[0], b = touches[1];
+    return { dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), y: (a.clientY + b.clientY) / 2 };
+  }
+  function zoomCentre(price, range) {
+    if (typeof price !== "number" || !isFinite(price)) return (range.min + range.max) / 2;
+    return Math.min(range.max, Math.max(range.min, price));
+  }
+  function zoomRange(range, factor, centre) {
+    const f = Math.min(4, Math.max(0.25, factor));
+    const min = centre - (centre - range.min) / f, max = centre + (range.max - centre) / f;
+    const floor = Math.max(1e-6, centre * 0.002);
+    if (max - min < floor) return range;                                 // zoomed in as far as is readable
+    return { min, max };
+  }
+  return { clampWindow, overlayLines, scenarioRows, pinchOf, zoomCentre, zoomRange };
 })();
 
 let CHART_ACTIVE = null;   // the one live instance: a new Analyze disposes the last (its chart and listener)
@@ -80,7 +97,8 @@ function interactiveChart(symbol) {
   const state_ = { range: "6m", group: null, start: "", end: "", show: { ...CHART_DEFAULTS }, swing: "2",
     data: null, sim: null, selecting: false, selection: null, userWindow: false, request: 0, minCorr: 0.75, horizon: null, matchesShown: 5,
     view: null,                                // the logical range to show after a draw, when not the range
-    lines: {} };                               // 2.13: lines other widgets draw on the chart (the what-if paths), by key
+    lines: {},                                 // 2.13: lines other widgets draw on the chart (the what-if paths), by key
+    vzoom: null };                             // 2.14: the price range shown when zoomed vertically (null = automatic)
   const listeners = [];                        // 2.13: told when the data or the pattern search changes
   const chartBox = el("div", { class: "lw-chart" });
   const readout = el("div", { class: "small muted lw-readout", text: "Hover the chart for the bar's figures. Drag to pan, scroll to zoom." });
@@ -165,8 +183,8 @@ function interactiveChart(symbol) {
     const bars = d.bars;
     const show = state_.show;
     const price = show.candles
-      ? chart.addSeries(lib.CandlestickSeries, { upColor: c.up, downColor: c.down, borderVisible: false, wickUpColor: c.up, wickDownColor: c.down })
-      : chart.addSeries(lib.LineSeries, { color: c.accent, lineWidth: 2, priceLineVisible: true });
+      ? chart.addSeries(lib.CandlestickSeries, zoomed({ upColor: c.up, downColor: c.down, borderVisible: false, wickUpColor: c.up, wickDownColor: c.down }))
+      : chart.addSeries(lib.LineSeries, zoomed({ color: c.accent, lineWidth: 2, priceLineVisible: true }));
     price.setData(bars.map(b => show.candles ? { time: b.tl, open: b.open, high: b.high, low: b.low, close: b.close } : { time: b.tl, value: b.close }));
     series.price = price;
     if (show.volume) {
@@ -176,7 +194,7 @@ function interactiveChart(symbol) {
       series.volume = vol;
     }
     const line = (key, color, width = 1, style = 0) => {
-      const s = chart.addSeries(lib.LineSeries, { color, lineWidth: width, lineStyle: style, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+      const s = chart.addSeries(lib.LineSeries, zoomed({ color, lineWidth: width, lineStyle: style, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }));
       s.setData(bars.filter(b => isNum(b[key])).map(b => ({ time: b.tl, value: b[key] })));
       series[key] = s;
     };
@@ -196,7 +214,7 @@ function interactiveChart(symbol) {
     }
     if (st && show.trend) {
       for (const ln of st.trendlines || []) {
-        const s = chart.addSeries(lib.LineSeries, { color: ln.crossed ? c.warn : c.accent, lineWidth: 1, lineStyle: ln.crossed ? 1 : 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+        const s = chart.addSeries(lib.LineSeries, zoomed({ color: ln.crossed ? c.warn : c.accent, lineWidth: 1, lineStyle: ln.crossed ? 1 : 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }));
         s.setData([{ time: ln.tl_from, value: ln.from_price }, { time: ln.tl_to, value: ln.value_now }]);
       }
     }
@@ -260,7 +278,7 @@ function interactiveChart(symbol) {
     const c = colors();
     for (const ln of CHARTX.overlayLines(state_.sim, state_.matchesShown)) {
       const style = ln.kind === "match" ? { color: c.s4 + "88", lineWidth: 1 } : ln.kind === "median" ? { color: c.accent, lineWidth: 2 } : { color: c.accent + "99", lineWidth: 1, lineStyle: 2 };
-      const s = chart.addSeries(lib.LineSeries, { ...style, priceLineVisible: false, lastValueVisible: ln.kind === "median", crosshairMarkerVisible: false, title: ln.kind === "median" ? "median after" : "" });
+      const s = chart.addSeries(lib.LineSeries, zoomed({ ...style, priceLineVisible: false, lastValueVisible: ln.kind === "median", crosshairMarkerVisible: false, title: ln.kind === "median" ? "median after" : "" }));
       s.setData(ln.points);
       overlaySeries.push(s);
     }
@@ -274,8 +292,8 @@ function interactiveChart(symbol) {
       const pts = (ln.points || []).filter(p => p && isNum(p.time) && isNum(p.value)).sort((a, b) => a.time - b.time)
         .filter((p, i, arr) => i === 0 || p.time > arr[i - 1].time);
       if (pts.length < 2) continue;
-      const s = chart.addSeries(lib.LineSeries, { color: ln.color, lineWidth: ln.width || 2, lineStyle: ln.style || 0, priceLineVisible: false,
-        lastValueVisible: !!ln.title, crosshairMarkerVisible: false, title: ln.title || "" });
+      const s = chart.addSeries(lib.LineSeries, zoomed({ color: ln.color, lineWidth: ln.width || 2, lineStyle: ln.style || 0, priceLineVisible: false,
+        lastValueVisible: !!ln.title, crosshairMarkerVisible: false, title: ln.title || "" }));
       s.setData(pts);
       lineSeries.push(s);
     }
@@ -316,6 +334,61 @@ function interactiveChart(symbol) {
     const to = endIdx + ahead + 2;
     showView(Math.min(endIdx - 10, to - width), to);
   }
+  // --- 2.14: vertical zoom. The library zooms time only; a pinch (two fingers, or ctrl+wheel from a trackpad)
+  // also narrows the price range shown, around the price under the fingers. Every series on the main pane
+  // answers the autoscale with that range while it is set; Fit range or a new load clears it.
+  function zoomProvider(original) {
+    const r = original();
+    if (!state_.vzoom) return r;
+    return { priceRange: { minValue: state_.vzoom.min, maxValue: state_.vzoom.max }, margins: r && r.margins ? r.margins : undefined };
+  }
+  function zoomed(options) { return { ...options, autoscaleInfoProvider: zoomProvider }; }
+  function visiblePriceRange() {
+    if (state_.vzoom) return state_.vzoom;
+    // What is on the screen now: the price at the top and the bottom of the main pane.
+    try {
+      const h = chart.paneSize(0).height;
+      const top = series.price.coordinateToPrice(0), bottom = series.price.coordinateToPrice(h);
+      if (isNum(top) && isNum(bottom) && top > bottom) return { min: bottom, max: top };
+    } catch (e) { /* fall through to the bars */ }
+    const d = state_.data, vr = chart && chart.timeScale().getVisibleLogicalRange();
+    if (!d || !vr) return null;
+    const a = Math.max(0, Math.floor(vr.from)), b = Math.min(d.bars.length - 1, Math.ceil(vr.to));
+    let lo = Infinity, hi = -Infinity;
+    for (let i = a; i <= b; i++) { const x = d.bars[i]; if (x) { lo = Math.min(lo, x.low); hi = Math.max(hi, x.high); } }
+    if (!isFinite(lo) || !isFinite(hi)) return null;
+    const pad = (hi - lo) * 0.08 || hi * 0.01;
+    return { min: lo - pad, max: hi + pad };
+  }
+  function applyVZoom() {
+    if (!chart || !series.price) return;
+    series.price.applyOptions({ autoscaleInfoProvider: zoomProvider });   // a changed option makes the pane autoscale again
+    chart.priceScale("right").applyOptions({ autoScale: true });
+  }
+  // Zoom the price axis by `factor` (>1 narrows) keeping the price at pane coordinate `y` where it is.
+  function zoomPrice(factor, y) {
+    const range = visiblePriceRange();
+    if (!range || !series.price || !(factor > 0)) return;
+    const centre = CHARTX.zoomCentre(series.price.coordinateToPrice(y), range);
+    state_.vzoom = CHARTX.zoomRange(range, factor, centre);
+    applyVZoom();
+  }
+  function paneY(clientY) { return clientY - chartBox.getBoundingClientRect().top; }
+  let pinch = null;                                                       // {dist, y} of the last two-finger move
+  chartBox.addEventListener("touchstart", e => { if (e.touches.length === 2) pinch = CHARTX.pinchOf(e.touches); else pinch = null; }, { passive: true });
+  chartBox.addEventListener("touchmove", e => {
+    if (e.touches.length !== 2) return;
+    const now = CHARTX.pinchOf(e.touches);
+    if (pinch && pinch.dist > 0 && now.dist > 0) zoomPrice(now.dist / pinch.dist, paneY(now.y));
+    pinch = now;
+  }, { passive: true });
+  chartBox.addEventListener("touchend", () => { pinch = null; }, { passive: true });
+  chartBox.addEventListener("wheel", e => {
+    // A trackpad pinch arrives as a wheel with ctrlKey; the library zooms time on it, this adds the price axis.
+    if (!e.ctrlKey || !state_.data) return;
+    const dy = e.deltaY * (e.deltaMode === 1 ? 32 : e.deltaMode === 2 ? 120 : 1);   // lines and pages to pixels, as the library does
+    zoomPrice(Math.exp(-dy * 0.005), paneY(e.clientY));
+  }, { passive: true });
   function showProjection(a, b) {
     // Show the window and what the matches did next, projected past the last bar.
     const ahead = state_.sim && state_.sim.matches.length ? (state_.sim.future_times || []).length : 0;
@@ -373,7 +446,7 @@ function interactiveChart(symbol) {
     }
     info.replaceChildren(frag);
   }
-  fitBtn.addEventListener("click", () => { if (state_.data) { state_.view = null; draw(); } });
+  fitBtn.addEventListener("click", () => { if (state_.data) { state_.view = null; state_.vzoom = null; draw(); } });
   latestBtn.addEventListener("click", () => { if (state_.data) { const n = state_.data.bars.length, vr = chart.timeScale().getVisibleLogicalRange(); showView(n - 1 - (vr ? vr.to - vr.from : 130) + 4, n + 3); } });
   selectBtn.addEventListener("click", () => {
     state_.selecting = !state_.selecting;
@@ -398,6 +471,7 @@ function interactiveChart(symbol) {
       if (mine !== state_.request || !panel.isConnected) return;    // superseded, or the screen was replaced meanwhile
       state_.data = d; state_.sim = null; state_.selection = null; state_.userWindow = false; state_.view = null;
       state_.lines = {};                         // lines other widgets drew were for the old bars; they redraw their own
+      state_.vzoom = null;
       state_.group = d.group.key;
       groupSel.replaceChildren(...CHART_GROUPS.filter(([v]) => d.range.groups.includes(v)).map(([v, t]) => el("option", { value: v, text: t, selected: v === d.group.key })));
       toggles.find(t => t.dataset.toggle === "vwap").classList.toggle("hidden", d.group.kind !== "intraday");

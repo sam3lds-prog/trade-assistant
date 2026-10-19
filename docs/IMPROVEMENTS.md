@@ -1261,3 +1261,61 @@ An independent reviewer read the change and ran reproductions. It reported 18 fi
 
 Found alongside: `test_the_news_sits_on_the_bars_of_the_range` failed on a Monday before the open, because news
 since the newest bar (a weekend's) fell past the range's end. News since the newest bar now sits on that bar.
+
+## 2.14: the factors count once, two-way zoom, combinations and a budget
+
+**The request.** The impact of the variables was duplicative at times; make them mutually exclusive in the overall
+future-movement calculation. Pinching expanded the chart wide; it should zoom both horizontally and vertically.
+In the outcomes, take the user's pick of a single strategy or a combination, or the AI's pick, and calculate the
+value, the possible upside and the percentage of a win; and take a dollar amount and work out how to split it for
+the best return. Permissions taken upfront: a joint fit with the market first; a split judged by expected gain
+minus a risk dial times the worst-tenth loss, with a cap per strategy; both in the position panel; merge when done.
+
+**What was built.** `factors.py`: `aligned_returns`, `joint_fit` (sequential residualisation in the factor list's
+order), `unique_moves`, `factor_terms`; `model_path` takes the computed terms. `whatif.py`: `combo` and `allocate`
+(a greedy search in blocks then units on E[P&L] − risk × CVaR10), `_stats`, `_capital`, the AI's `combination`.
+`chart.js`: `autoscaleInfoProvider` on every main-pane series with `state_.vzoom`, touch and ctrl+wheel pinch
+handlers, `CHARTX.pinchOf/zoomCentre/zoomRange`. `whatif.js`: the combination rows and the budget split. Two
+routes and the write list.
+
+**Decisions.**
+
+- *Order over symmetry.* A joint regression without an ordering gives betas "holding the others fixed" that flip
+  sign when factors overlap heavily (the sector fund and the market); residualising in a stated order gives each
+  factor a clear meaning (its own part, given what is above it) and terms that always add up to the joint
+  prediction. The order is the economic one: the market first, then the sector, the peers, overseas, macro.
+- *A factor switched off leaves the fit.* The user's "use" tick means "model with these factors": the ones that
+  remain absorb what the missing one carried, rather than a hole where its share was.
+- *The budget split optimises a stated objective, not "the best return".* Expected P&L alone puts everything in
+  the most levered strategy; the caution dial trades it against the average loss in the worst tenth, the cap
+  keeps one strategy from taking all of it, and strategies whose loss has no limit are left out because the
+  capital they tie up is not known. The page says all of this beside the result, and that it is a model under
+  one scenario.
+- *Vertical zoom through the autoscale provider.* The library has no vertical zoom; overriding every main-pane
+  series' autoscale answer with one range is the supported way to pin the price axis, and it stays consistent
+  across redraws because the provider reads the state at draw time.
+
+**Tests.** `tests/test_whatif.py` (joint fit on a synthetic stock, the model's terms, a combination, a budget
+split, the API) and `tests/test_chartview.py` (the zoom arithmetic under Node); the Chromium flow values the AI's
+combination, splits a budget, checks the sensitivity column and pinches with ctrl+wheel.
+
+### The independent review of 2.14
+
+An independent reviewer read the change and ran reproductions. It reported 14 findings; all were fixed.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| X1 | A budget split could hand out more than the 100 contracts the builder values, so "Use this split" dropped legs or failed | High | units capped at 100 contracts (100,000 shares) in the split; `capped` names them and the note says so; the Chromium test loads a split back and counts its rows | `test_a_budget_is_split_...`, Chromium |
+| X2 | The rows' own-part beta came from an all-on fit while the model refits the factors that are on | Medium | after a model the rows carry `beta_unique_now`/`explained_now`; the page shows those, "switched off: not in the fit" otherwise | `test_the_setup_reads_...`, Chromium |
+| X3 | Near-collinear proxies (a peers basket that tracks the market) got a noisy own-part beta whose sign flips | Medium | a factor the ones above explain 95% or more of is redundant: no own part, nothing loads on it, the row says so | `test_the_joint_fit_...` |
+| X4 | One short proxy history shrank the joint sample for every factor, unseen | Medium | a proxy that would cut the shared sample below 150 days is left out and named; rows show the fit's days | `test_the_joint_fit_...` |
+| X5 | "Use the AI's pick" never enabled when the AI answered; "Use its settings" overwrote a hand-built combination | Medium | enabled on the answer; settings fill only an empty combination; the button replaces on purpose | Chromium |
+| X6 | Each leg of a combination quoted its own price, so the curves could sit on different grids | Low | one quote per combination and per split | — |
+| X7 | The greedy split ranked blocks by gain, not gain per dollar | Low | per dollar | `test_a_budget_is_split_...` |
+| X8 | Duplicate kinds doubled the cap; a short was dropped silently; an empty pool gave an empty error | Low | de-duplicated; the short is in `skipped`; its own message | `test_a_budget_is_split_...` |
+| X9 | A click on a ranking row silently added it to the combination | Low | a "+ combination" button per row; the row click only sizes | — |
+| X10 | The combination and the split kept old figures when the scenario changed | Low | both are marked "valued under an earlier scenario" | Chromium |
+| X11 | The first pinch jumped: the zoom started from the bars' range, not the screen's | Low | starts from the prices at the top and bottom of the pane | — |
+| X12 | ctrl+wheel ignored `deltaMode` | Low | lines and pages scaled to pixels as the library does | — |
+| X13 | Docs and the AI prompt still described one-at-a-time betas; the AI's combination allowed four | Low | docstring, note, prompt (with the own-part betas and the fit's days), docs; three | `test_the_ai_is_sent_...` |
+| X14 | Returns were differenced before the join, so a missing day paired a two-day move with a one-day one | Low | closes joined first | `test_the_joint_fit_...` |

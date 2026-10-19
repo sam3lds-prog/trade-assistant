@@ -553,7 +553,8 @@ def test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_posi
             return {"json": {"path_pct": [1, 2, 3, 4, 5], "low_pct": [-1, -1, -1, -1, -1], "high_pct": [3, 5, 7, 9, 11],
                              "expected_pct": 5, "confidence": 0.6, "variables": {"us_market": 2.0, "news": 0.5},
                              "include": {"oil_brent": False}, "pattern": {"use": False, "weight": 0, "why": "too few cases"},
-                             "strategy": {"kind": "bull_call_spread", "direction": "up", "why": "capped risk into earnings"},
+                             "strategy": {"kind": "bull_call_spread", "direction": "up", "why": "capped risk into earnings",
+                                          "combination": ["bull_call_spread", "shares"]},
                              "rationale": "The market lead and the upgrade carry it.", "risks": ["a probe", "the dollar"]},
                     "text": "", "usage": {"input_tokens": 100, "output_tokens": 50}, "model": "fake-gpt", "provider": "openai"}
 
@@ -577,8 +578,10 @@ def test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_posi
         page.wait_for_function("(b) => document.querySelector('.wi-summary').textContent !== b", arg=before, timeout=20000)
         assert "US market (S&P 500) +" in page.inner_text(".wi-summary")
         # The AI's scenario, drawn and applied.
+        assert page.is_disabled("button:text-is(\"Use the AI's pick\")")
         page.click("button:text-is('Ask ChatGPT')")
         page.wait_for_selector("text=The market lead and the upgrade carry it.", timeout=30000)
+        assert page.is_enabled("button:text-is(\"Use the AI's pick\")")
         ai = page.inner_text(".wi-ai")
         assert "ChatGPT (fake-gpt): +5.00%" in ai and "Risk: a probe" in ai and "Bull call spread" in ai and "us_market +2.00" in ai
         assert FakeGPT.prompts and "FACTORS" in FakeGPT.prompts[0] and "THE APP'S MODEL" in FakeGPT.prompts[0]
@@ -599,6 +602,41 @@ def test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_posi
         assert "Best by the model:" in rank and "ChatGPT's pick: Bull call spread" in rank and "Iron condor" in rank
         page.locator(".wi-pos-panel tbody tr").first.click()
         page.wait_for_timeout(800)
+        # 2.14: the AI's combination was loaded; it is valued together, then a budget is split.
+        assert page.locator(".wi-combo-row").count() >= 2
+        page.click("button:text-is('Value the combination')")
+        page.wait_for_selector("text=positions together", timeout=30000)
+        combo = page.inner_text(".wi-combo-result")
+        assert "Chance of a profit" in combo and "Worst tenth, on average" in combo and "hedges offset" in combo
+        page.fill("input[aria-label='Budget in dollars']", "20000")
+        page.click("button:text-is('Split it')")
+        page.wait_for_selector(".wi-split-result .wi-pos-head", timeout=60000)
+        split = page.inner_text(".wi-split-result")
+        assert "of $20,000" in split and "caution 1" in split and "no order is placed" in split
+        assert "Use this split" in split, "a bullish scenario with $20,000 should buy something"
+        n = page.locator(".wi-split-result tbody tr").count()
+        page.click("button:text-is('Use this split as the combination')")
+        page.wait_for_function("(n) => document.querySelectorAll('.wi-combo-row').length === n", arg=n, timeout=20000)
+        page.wait_for_function("(n) => document.querySelectorAll('.wi-combo-result tbody tr').length === n", arg=n, timeout=30000)
+        # A changed scenario (back to the model's) marks both results as valued earlier.
+        page.select_option("select[aria-label='Scenario for the position']", "model")
+        page.wait_for_selector(".wi-combo-result .wi-stale", timeout=20000)
+        assert page.locator(".wi-split-result .wi-stale").count() == 1
+        # 2.14: the sensitivity column shows the beta alone and on the factor's own part; the terms say what is shared.
+        assert "on its own part" in page.inner_text(".wi-row[data-factor='sector']")
+        page.locator("input[aria-label='Include US market (S&P 500)']").click()
+        page.wait_for_function("document.querySelector(\".wi-row[data-factor='us_market'] .wi-unique\").textContent.includes('switched off')", timeout=20000)
+        assert page.locator(".wi-term[title*='already in the factors above']").count() >= 1
+        # 2.14: a trackpad pinch (ctrl+wheel) zooms the price axis too; Fit range puts it back.
+        page.locator(".lw-chart").scroll_into_view_if_needed()
+        box = page.locator(".lw-chart").bounding_box()
+        page.mouse.move(box["x"] + box["width"] * 0.6, box["y"] + 150)
+        page.keyboard.down("Control")
+        page.mouse.wheel(0, -120)
+        page.keyboard.up("Control")
+        page.wait_for_timeout(400)
+        page.click("button:text-is('Fit range')")
+        page.wait_for_timeout(400)
         # The lines are on the chart: the model's and the AI's.
         assert page.evaluate("document.querySelectorAll('.lw-chart td canvas').length") > 0
     assert errors == []
