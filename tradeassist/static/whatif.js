@@ -33,7 +33,10 @@ const WHATIFX = (() => {
     const shares = kind === "shares" || kind === "short";
     return shares ? { quantity: qty, contracts: Math.max(1, Math.round(qty / 100)) } : { quantity: qty * 100, contracts: qty };
   }
-  return { pathLines, scenarioOf, quantities };
+  function riskWord(risk) {
+    return risk <= 0 ? "all-out" : risk < 1 ? "bold" : risk < 2 ? "balanced" : risk < 3 ? "careful" : "cautious";
+  }
+  return { pathLines, scenarioOf, quantities, riskWord };
 })();
 
 function whatIfWidget(symbol, chartApi) {
@@ -68,11 +71,34 @@ function whatIfWidget(symbol, chartApi) {
   const rankBtn = el("button", { class: "plain small-btn", text: "Rank every strategy" });
   const posBox = el("div", { class: "wi-position" });
   const rankBox = el("div");
+  // 2.14: a combination of positions, and a budget split across strategies.
+  const comboAddSel = el("select", { "aria-label": "Add a strategy to the combination" });
+  const comboAddBtn = el("button", { class: "plain small-btn", text: "Add" });
+  const comboAiBtn = el("button", { class: "plain small-btn", text: "Use the AI's pick", disabled: true });
+  const comboValueBtn = el("button", { class: "primary small-btn", text: "Value the combination" });
+  const comboRows = el("div", { class: "wi-combo-rows" });
+  const comboBox = el("div", { class: "wi-combo-result" });
+  const budgetIn = el("input", { type: "number", min: "1", step: "100", value: "10000", "aria-label": "Budget in dollars" });
+  const riskIn = el("input", { type: "range", min: "0", max: "4", step: "0.5", value: "1", "aria-label": "Caution" });
+  const riskOut = el("span", { class: "small muted", text: "balanced" });
+  const shareSel = el("select", { "aria-label": "Most in one strategy" }, [["0.25", "at most 25% in one"], ["0.5", "at most 50% in one"], ["1", "all in one allowed"]].map(([v, t]) => el("option", { value: v, text: t, selected: v === "0.5" })));
+  const poolSel = el("select", { "aria-label": "Strategies to split across" }, el("option", { value: "all", text: "every strategy with a limited loss" }), el("option", { value: "combo", text: "only the combination above" }));
+  const splitBtn = el("button", { class: "primary small-btn", text: "Split it" });
+  const splitBox = el("div", { class: "wi-split-result" });
+  riskIn.addEventListener("input", () => { riskOut.textContent = WHATIFX.riskWord(Number(riskIn.value)); });
   const position = el("div", { class: "panel wi-pos-panel" },
     el("h3", { text: "A position under the scenario" }),
     el("p", { class: "small muted", text: "Shares, a short, or an option strategy from the builder, valued at the horizon across the scenario's 10-90 range of prices. Set the quantity to see the downside and upside in dollars. A model only: no order is placed." }),
     el("div", { class: "row" }, field("Scenario", sourceSel), field("Strategy", kindSel), field("Quantity", el("span", {}, qtyIn, " ", qtyLabel)), rankBtn),
-    posBox, rankBox);
+    posBox, rankBox,
+    el("h4", { text: "A combination" }),
+    el("p", { class: "small muted", text: "Pick one or more strategies (yours, or the AI's pick) with a quantity each; they are valued together under the same scenario, so hedges offset: the value, the upside and downside, and the chance of a profit of the whole." }),
+    el("div", { class: "row" }, field("Add", el("span", {}, comboAddSel, " ", comboAddBtn)), comboAiBtn, comboValueBtn),
+    comboRows, comboBox,
+    el("h4", { text: "Split a budget" }),
+    el("p", { class: "small muted", text: "Give a budget and the split that pays best under the scenario is worked out: the expected result minus a caution weight times the average loss in the worst tenth of outcomes, with a cap on any one strategy. Only strategies whose loss has a limit take part." }),
+    el("div", { class: "row" }, field("Budget $", budgetIn), field("Caution", el("span", {}, riskIn, " ", riskOut)), field("Cap", shareSel), field("Across", poolSel), splitBtn),
+    splitBox);
 
   // --- helpers ------------------------------------------------------------------------------------------------
   const fmtReading = r => r.reading === null || r.reading === undefined ? "no reading" : `${r.reading > 0 ? "+" : ""}${num(r.reading, r.unit === "bp" ? 0 : 2)} ${r.unit}`;
@@ -137,6 +163,8 @@ function whatIfWidget(symbol, chartApi) {
     askBtn.disabled = !(chosen && chosen.configured);
     askBtn.title = chosen && !chosen.configured ? chosen.reason || "" : "";
     kindSel.replaceChildren(...Object.entries(s.strategies || {}).map(([k, t]) => el("option", { value: k, text: `${t.label}${t.group ? ` · ${t.group}` : ""}`, selected: k === st.kind })));
+    comboAddSel.replaceChildren(...Object.entries(s.strategies || {}).map(([k, t]) => el("option", { value: k, text: t.label })));
+    renderComboRows();
     // The rows: one per factor, then the non-price ones.
     const rows = [];
     for (const r of s.factors) {
@@ -147,8 +175,10 @@ function whatIfWidget(symbol, chartApi) {
       rows.push(el("div", { class: "wi-row", "data-factor": r.key, title: r.note || "" },
         el("div", { class: "wi-label" }, el("strong", { text: r.label }), r.key === "peers" && !(r.peers || []).length ? el("div", { class: "small muted", text: "Name peers above." }) : ""),
         el("div", { class: "wi-reading small" }, el("span", { text: fmtReading(r) }), el("div", { class: "muted", text: r.reading_source || "" })),
-        el("div", { class: "wi-beta small" }, isNum(r.beta) ? el("span", { text: `β ${r.beta > 0 ? "+" : ""}${num(r.beta, 2)}` }) : el("span", { class: "muted", text: "no history" }),
-          isNum(r.correlation) ? el("div", { class: "muted", text: `corr ${num(r.correlation, 2)}, ${r.beta_days} days` }) : ""),
+        el("div", { class: "wi-beta small" }, isNum(r.beta) ? el("span", { text: `β ${r.beta > 0 ? "+" : ""}${num(r.beta, 2)} alone` }) : el("span", { class: "muted", text: "no history" }),
+          isNum(r.beta) ? el("div", { class: "wi-unique", title: "Per 1% of the part of this factor's move the factors above it do not already explain, in the model's fit of the factors that are on" }, el("span", { class: "muted", text: "…" })) : "",
+          isNum(r.correlation) ? el("div", { class: "muted", text: `corr ${num(r.correlation, 2)}, ${r.beta_days} days${isNum(r.fit_days) && r.in_fit && r.fit_days !== r.beta_days ? ` (the joint fit on ${r.fit_days})` : ""}` }) : "",
+          r.fit_note ? el("div", { class: "muted", text: r.fit_note }) : ""),
         el("div", { class: "wi-input" }, input, el("span", { class: "small muted", text: ` ${r.unit}` })),
         el("div", { class: "wi-include" }, el("label", { class: "check" }, inc, "use"))));
     }
@@ -199,15 +229,30 @@ function whatIfWidget(symbol, chartApi) {
       el("div", { class: "wi-include" }, el("label", { class: "check" }, pInc, "use"))));
     rowsBox.replaceChildren(el("div", { class: "wi-head small muted" }, el("span", { text: "Factor" }), el("span", { text: "Today's reading" }), el("span", { text: "This stock's sensitivity" }), el("span", { text: "Scenario" }), el("span", { text: "" })), ...rows);
   }
+  // The own-part betas in the rows are the model's fit of the factors that are on, so they follow the ticks.
+  function renderOwnParts(m) {
+    const by = {};
+    for (const t of m.terms || []) by[t.key] = t;
+    for (const r of st.setup ? st.setup.factors : []) {
+      const cell = rowsBox.querySelector(`.wi-row[data-factor='${r.key}'] .wi-unique`);
+      if (!cell) continue;
+      const t = by[r.key];
+      if (t && t.redundant) cell.replaceChildren(el("span", { class: "muted", text: `redundant: the factors above explain ${Math.round(100 * t.explained)}% of its moves, so it has no own part` }));
+      else if (t) cell.replaceChildren(el("span", { text: `β ${t.beta_unique > 0 ? "+" : ""}${num(t.beta_unique, 2)} on its own part` }), el("span", { class: "muted", text: isNum(t.explained) && t.explained > 0.005 ? ` (${Math.round(100 * t.explained)}% of its moves follow the factors above)` : "" }));
+      else cell.replaceChildren(el("span", { class: "muted", text: !st.include[r.key] ? "switched off: not in the fit" : r.fit_note ? "left out of the fit" : "not in the fit" }));
+    }
+  }
   function renderModel(m) {
     if (!m) { summary.replaceChildren(); return; }
+    renderOwnParts(m);
     const last = m.path_pct.length - 1;
     const terms = (m.terms || []).filter(t => isNum(t.contribution_pct) && Math.abs(t.contribution_pct) >= 0.005).sort((a, b) => Math.abs(b.contribution_pct) - Math.abs(a.contribution_pct));
     summary.replaceChildren(
       el("div", { class: "wi-model" }, el("span", { class: "wi-swatch", style: `background:${WI_MODEL_COLOR}` }),
         el("strong", { text: `Model: ${signedPct(m.expected_pct, 2)} at the horizon` }),
         el("span", { class: "muted", text: ` (${money(m.expected_price)}); 10-90 range ${signedPct(m.low_pct[last], 1)} to ${signedPct(m.high_pct[last], 1)}.` })),
-      terms.length ? el("div", { class: "wi-terms small" }, terms.map(t => el("span", { class: `wi-term ${t.contribution_pct >= 0 ? "pos-text" : "neg-text"}`, text: `${t.label} ${signedPct(t.contribution_pct, 2)}` }))) : el("div", { class: "small muted", text: "Every term is zero: set a scenario value or include a factor." }),
+      terms.length ? el("div", { class: "wi-terms small" }, terms.map(t => el("span", { class: `wi-term ${t.contribution_pct >= 0 ? "pos-text" : "neg-text"}`, text: `${t.label} ${signedPct(t.contribution_pct, 2)}`,
+        title: isNum(t.unique_move_pct) ? `${t.label}: move ${signedPct(t.proxy_move_pct, 2)}, of which ${signedPct(t.shared_pct, 2)} is already in the factors above; its own part ${signedPct(t.unique_move_pct, 2)} × β ${num(t.beta_unique, 2)}` : "" }))) : el("div", { class: "small muted", text: "Every term is zero: set a scenario value or include a factor." }),
       el("p", { class: "small muted", text: m.note || "" }));
   }
   function remodel() {
@@ -224,7 +269,7 @@ function whatIfWidget(symbol, chartApi) {
       st.model = lineModel(r.model, chartApi.chartArgs());
       renderModel(r.model);
       drawModel();
-      if (st.source === "model") renderPosition();
+      if (st.source === "model") { renderPosition(); markStale(); }
     } catch (e) { if (mine === st.modelPending) err.textContent = e.message; }
   }
   horizonSel.addEventListener("change", () => { st.horizon = Number(horizonSel.value); load(false); });
@@ -251,6 +296,7 @@ function whatIfWidget(symbol, chartApi) {
       drawAI();
       renderAI(r);
       sourceSel.querySelector("option[value=ai]").disabled = false;
+      comboAiBtn.disabled = !(sc.strategy && sc.strategy.kind);
       chartApi.showAhead(st.setup.horizon);
     } catch (e) { aiBox.replaceChildren(el("p", { class: "error", text: e.message })); }
     finally { askBtn.disabled = false; }
@@ -264,6 +310,7 @@ function whatIfWidget(symbol, chartApi) {
       for (const [k, v] of Object.entries(sc.include || {})) st.include[k] = v;
       renderSetup(st.setup); remodelNow();
       if (sc.strategy && sc.strategy.kind && st.setup.strategies[sc.strategy.kind]) setKind(sc.strategy.kind);
+      if (!st.combo.length) useAiCombo();                   // a combination you built stays yours
     });
     const clearBtn = el("button", { class: "plain small-btn", text: "Clear the AI line" });
     clearBtn.addEventListener("click", () => { clearAI(); drawAI(); renderPosition(); });
@@ -273,14 +320,14 @@ function whatIfWidget(symbol, chartApi) {
         el("span", { class: "muted", text: ` (${money(sc.expected_price)}); its 10-90 range ${signedPct(sc.low_pct[last], 1)} to ${signedPct(sc.high_pct[last], 1)}; confidence ${Math.round(100 * sc.confidence)}%.` })),
       el("p", { class: "small", text: sc.rationale || "(no rationale given)" }),
       sc.risks && sc.risks.length ? el("ul", { class: "plain small" }, sc.risks.map(x => el("li", { text: `Risk: ${x}` }))) : "",
-      el("p", { class: "small" }, el("strong", { text: "Its strategy: " }), el("span", { text: `${(st.setup.strategies[sc.strategy.kind] || {}).label || sc.strategy.kind}${sc.strategy.direction ? ` (${sc.strategy.direction})` : ""}. ${sc.strategy.why || ""}` })),
+      el("p", { class: "small" }, el("strong", { text: "Its strategy: " }), el("span", { text: `${(st.setup.strategies[sc.strategy.kind] || {}).label || sc.strategy.kind}${sc.strategy.direction ? ` (${sc.strategy.direction})` : ""}${(sc.strategy.combination || []).length > 1 ? `; together with ${sc.strategy.combination.slice(1).map(k => (st.setup.strategies[k] || {}).label || k).join(" and ")}` : ""}. ${sc.strategy.why || ""}` })),
       el("p", { class: "small" }, el("strong", { text: "Its settings: " }), el("span", { class: "muted", text: vars.length ? vars.map(([k, v]) => `${k} ${isNum(v) ? (v > 0 ? "+" : "") + num(v, 2) : v}`).join(", ") + (sc.pattern ? `; pattern ${sc.pattern.use ? `weight ${num(sc.pattern.weight ?? st.scenario.pattern_weight, 2)}` : "off"}${sc.pattern.why ? ` (${sc.pattern.why})` : ""}` : "") : "none given" })),
       el("div", { class: "row" }, useBtn, clearBtn, el("span", { class: "small muted", text: `${r.usage ? `${r.usage.input_tokens + r.usage.output_tokens} tokens, ` : ""}${r.seconds}s. ${r.note || ""}` })));
   }
 
   // The AI's scenario belongs to one window and horizon; it goes when they change.
   function clearAI() {
-    st.ai = null; aiBox.replaceChildren();
+    st.ai = null; aiBox.replaceChildren(); comboAiBtn.disabled = true;
     sourceSel.querySelector("option[value=ai]").disabled = true;
     if (st.source === "ai") { st.source = "model"; sourceSel.value = "model"; }
   }
@@ -316,7 +363,13 @@ function whatIfWidget(symbol, chartApi) {
     kids.push(el("p", { class: "small muted", text: r.note }));
     return el("div", {}, ...kids);
   }
-  sourceSel.addEventListener("change", () => { st.source = sourceSel.value; renderPosition(); });
+  sourceSel.addEventListener("change", () => { st.source = sourceSel.value; renderPosition(); markStale(); });
+  // The combination and the split were valued under one scenario; when it changes they say so until pressed again.
+  function markStale() {
+    for (const box of [comboBox, splitBox]) {
+      if (box.childElementCount && !box.querySelector(".wi-stale")) box.prepend(el("p", { class: "small wi-stale", text: "Valued under an earlier scenario; press the button again to revalue." }));
+    }
+  }
   // Shares to contracts and back: 100 shares is one contract's worth.
   function setKind(kind, quantity) {
     const wasShares = st.kind === "shares" || st.kind === "short", isShares = kind === "shares" || kind === "short";
@@ -328,6 +381,116 @@ function whatIfWidget(symbol, chartApi) {
   }
   kindSel.addEventListener("change", () => setKind(kindSel.value));
   qtyIn.addEventListener("input", () => { st.quantity = Math.max(1, Math.floor(Number(qtyIn.value) || 1)); clearTimeout(st.qtyTimer); st.qtyTimer = setTimeout(renderPosition, 300); });
+  // --- the combination ---------------------------------------------------------------------------------------
+  st.combo = [];                                                            // [{kind, quantity}]
+  function renderComboRows() {
+    const S = st.setup ? st.setup.strategies : {};
+    comboRows.replaceChildren(...st.combo.map((leg, i) => {
+      const q = el("input", { type: "number", min: "1", step: "1", value: String(leg.quantity), "aria-label": `${(S[leg.kind] || {}).label || leg.kind} quantity` });
+      q.addEventListener("input", () => { leg.quantity = Math.max(1, Math.floor(Number(q.value) || 1)); });
+      const rm = el("button", { class: "plain small-btn", text: "Remove" });
+      rm.addEventListener("click", () => { st.combo.splice(i, 1); renderComboRows(); });
+      return el("div", { class: "wi-combo-row" }, el("strong", { text: (S[leg.kind] || {}).label || leg.kind }), q,
+        el("span", { class: "small muted", text: leg.kind === "shares" || leg.kind === "short" ? "shares" : "contracts" }), rm);
+    }), st.combo.length ? "" : el("p", { class: "small muted", text: "Nothing in the combination yet: add a strategy, or use the AI's pick." }));
+  }
+  function addToCombo(kind, quantity) {
+    if (!kind) return;
+    const have = st.combo.find(x => x.kind === kind);
+    if (have) have.quantity = quantity || have.quantity; else st.combo.push({ kind, quantity: quantity || (kind === "shares" || kind === "short" ? 100 : 1) });
+    renderComboRows();
+  }
+  function useAiCombo() {
+    const kinds = st.ai && st.ai.scenario.strategy ? (st.ai.scenario.strategy.combination || [st.ai.scenario.strategy.kind]) : [];
+    if (!kinds.length) return;
+    st.combo = [];
+    for (const k of kinds) if (st.setup.strategies[k]) addToCombo(k);
+    renderComboRows();
+  }
+  comboAddBtn.addEventListener("click", () => addToCombo(comboAddSel.value));
+  comboAiBtn.addEventListener("click", useAiCombo);
+  comboValueBtn.addEventListener("click", async () => {
+    const sc = scenarioNow(), a = chartApi.chartArgs();
+    if (!sc || !a || !st.setup) return;
+    if (!st.combo.length) { comboBox.replaceChildren(el("p", { class: "small muted", text: "Add a strategy first." })); return; }
+    comboValueBtn.disabled = true;
+    comboBox.replaceChildren(el("p", { class: "small muted", text: "Valuing the combination…" }));
+    try {
+      const r = await api("/v2/whatif/combo", { symbol, legs: st.combo, expected_pct: sc.expected_pct, sd_pct: sc.sd_pct, horizon_bars: st.setup.horizon, group: a.group });
+      if (st.disposed) return;
+      comboBox.replaceChildren(comboView(r, sc.label));
+    } catch (e) { comboBox.replaceChildren(el("p", { class: "error", text: e.message })); }
+    finally { comboValueBtn.disabled = false; }
+  });
+  const pl = v => el("span", { class: v >= 0 ? "pos-text" : "neg-text", text: `${v >= 0 ? "+" : "−"}${money(Math.abs(v), 0)}` });
+  function statTiles(c) {
+    return el("div", { class: "wi-ranges" },
+      ...WI_NUM_FIELDS.map(([k, lab]) => el("div", { class: "wi-range" }, el("div", { class: "small muted", text: lab }), el("div", { class: "wi-big" }, pl(c[k])))),
+      el("div", { class: "wi-range" }, el("div", { class: "small muted", text: "Expected" }), el("div", { class: "wi-big" }, pl(c.expected_pnl))),
+      el("div", { class: "wi-range" }, el("div", { class: "small muted", text: "Chance of a profit" }), el("div", { class: "wi-big", text: `${Math.round(100 * c.p_profit)}%` })),
+      el("div", { class: "wi-range" }, el("div", { class: "small muted", text: "Worst tenth, on average" }), el("div", { class: "wi-big" }, pl(-c.cvar10))));
+  }
+  function comboView(r, label) {
+    const c = r.combined;
+    return el("div", {},
+      el("div", { class: "wi-pos-head" }, el("strong", { text: `${r.rows.length} position${r.rows.length === 1 ? "" : "s"} together` }),
+        el("span", { class: "muted small", text: ` under ${label}: ${signedPct(r.scenario.expected_pct, 2)} expected from ${money(r.last)}, prices ${money(r.scenario.p10)} – ${money(r.scenario.p90)} (10th–90th) by ${r.eval_date}.` })),
+      statTiles(c),
+      el("p", { class: "small" }, el("span", { text: `Ties up ${money(c.capital, 0)}${c.cost ? ` (${money(c.cost, 0)} paid` : ""}${c.credit ? `${c.cost ? ", " : " ("}${money(c.credit, 0)} received` : ""}${c.cost || c.credit ? ")" : ""}. Most it can lose across the scenario's range: ${c.unlimited_loss ? "no limit" : money(c.max_loss, 0)}${isNum(c.return_on_capital) ? `; expected ${signedPct(100 * c.return_on_capital, 1)} on the capital` : ""}.` })),
+      table([
+        { label: "Position", cell: x => el("span", { text: `${x.label} × ${x.quantity}` }) },
+        { label: "Cost", num: true, cell: x => money(x.cost, 0) },
+        { label: "Downside (10th)", num: true, cell: x => pl(x.pnl_p10) }, { label: "Middle", num: true, cell: x => pl(x.pnl_p50) },
+        { label: "Upside (90th)", num: true, cell: x => pl(x.pnl_p90) }, { label: "Expected", num: true, cell: x => pl(x.expected_pnl) },
+        { label: "Chance of profit", num: true, cell: x => `${Math.round(100 * x.p_profit)}%` },
+        { label: "Most it can lose", num: true, cell: x => x.unlimited_loss ? "no limit" : money(x.max_loss, 0) },
+      ], r.rows),
+      r.failed.length ? el("p", { class: "small muted", text: `Could not value: ${r.failed.map(f => `${f.kind} (${f.error})`).join("; ")}` }) : "",
+      el("p", { class: "small muted", text: r.note }));
+  }
+
+  // --- the budget split --------------------------------------------------------------------------------------
+  splitBtn.addEventListener("click", async () => {
+    const sc = scenarioNow(), a = chartApi.chartArgs();
+    if (!sc || !a || !st.setup) return;
+    const budget = Number(budgetIn.value);
+    if (!(budget >= 1)) { splitBox.replaceChildren(el("p", { class: "error", text: "Enter a budget in dollars." })); return; }
+    const kinds = poolSel.value === "combo" ? st.combo.map(x => x.kind) : null;
+    if (poolSel.value === "combo" && !kinds.length) { splitBox.replaceChildren(el("p", { class: "small muted", text: "The combination is empty; add strategies to it or split across every strategy." })); return; }
+    splitBtn.disabled = true;
+    splitBox.replaceChildren(el("p", { class: "small muted", text: "Working out the split…" }));
+    try {
+      const r = await api("/v2/whatif/allocate", { symbol, budget, risk: Number(riskIn.value), max_share: Number(shareSel.value), kinds,
+        expected_pct: sc.expected_pct, sd_pct: sc.sd_pct, horizon_bars: st.setup.horizon, group: a.group });
+      if (st.disposed) return;
+      splitBox.replaceChildren(splitView(r, sc.label));
+    } catch (e) { splitBox.replaceChildren(el("p", { class: "error", text: e.message })); }
+    finally { splitBtn.disabled = false; }
+  });
+  function splitView(r, label) {
+    const c = r.combined;
+    const useBtn = el("button", { class: "plain small-btn", text: "Use this split as the combination" });
+    useBtn.addEventListener("click", () => { st.combo = r.rows.map(x => ({ kind: x.kind, quantity: x.units })); renderComboRows(); comboValueBtn.click(); });
+    return el("div", {},
+      el("div", { class: "wi-pos-head" }, el("strong", { text: c ? `${money(r.spent, 0)} of ${money(r.budget, 0)} put to work, ${money(r.left, 0)} kept` : `Nothing worth buying at this caution: the ${money(r.budget, 0)} stays in cash` }),
+        el("span", { class: "muted small", text: ` under ${label}, ${WHATIFX.riskWord(r.risk)} (caution ${r.risk}), ${Math.round(100 * r.max_share)}% cap.` })),
+      c ? statTiles(c) : "",
+      c ? el("p", { class: "small", text: `Expected ${signedPct(100 * c.return_on_budget, 1)} on the budget by ${r.eval_date}; most it can lose across the scenario's range ${money(c.max_loss, 0)}.` }) : "",
+      r.rows.length ? table([
+        { label: "Strategy", cell: x => el("span", { text: x.label }) },
+        { label: "Units", num: true, cell: x => `${x.units.toLocaleString()} ${x.units === 1 ? x.unit.replace(/s$/, "") : x.unit}` },
+        { label: "Dollars", num: true, cell: x => money(x.dollars, 0) },
+        { label: "Share", num: true, cell: x => `${Math.round(100 * x.share)}%` },
+        { label: "Expected", num: true, cell: x => pl(x.expected_pnl) },
+        { label: "Chance of profit", num: true, cell: x => `${Math.round(100 * x.p_profit)}%` },
+        { label: "Legs", cell: x => el("span", { class: "small muted", text: (x.legs_text || []).join("; ") || "—" }) },
+      ], r.rows) : "",
+      r.rows.length ? useBtn : "",
+      r.skipped.length ? el("p", { class: "small muted", text: `Left out: ${r.skipped.map(x => `${(st.setup.strategies[x.kind] || {}).label || x.kind} (${x.why})`).join("; ")}.` }) : "",
+      r.capped && r.capped.length ? el("p", { class: "small muted", text: `${r.capped.join(", ")} stopped at the most the builder values (100 contracts).` }) : "",
+      el("p", { class: "small muted", text: r.note }));
+  }
+
   rankBtn.addEventListener("click", async () => {
     const sc = scenarioNow(), a = chartApi.chartArgs();
     if (!sc || !a || !st.setup) return;
@@ -342,7 +505,7 @@ function whatIfWidget(symbol, chartApi) {
       const rows = r.rows.slice().sort((x, y) => (x.rank || 99) - (y.rank || 99));
       rankBox.replaceChildren(
         el("h4", { text: `Every strategy under ${sc.label}` }),
-        el("p", { class: "small muted", text: `${r.best ? `Best by the model: ${(st.setup.strategies[r.best] || {}).label || r.best}.` : ""} ${r.ai_pick ? `${st.ai.label}'s pick: ${(st.setup.strategies[r.ai_pick] || {}).label || r.ai_pick}.` : ""} ${r.note} Click a row to size it.` }),
+        el("p", { class: "small muted", text: `${r.best ? `Best by the model: ${(st.setup.strategies[r.best] || {}).label || r.best}.` : ""} ${r.ai_pick ? `${st.ai.label}'s pick: ${(st.setup.strategies[r.ai_pick] || {}).label || r.ai_pick}.` : ""} ${r.note} Click a row to size it above, or add it to the combination.` }),
         table([
           { label: "#", num: true, cell: x => x.rank ? el("span", { text: `${x.rank}${x.kind === r.best ? " ★" : ""}${x.kind === r.ai_pick ? " AI" : ""}` }) : "—" },
           { label: "Strategy", cell: x => el("span", { text: `${x.label} × ${x.quantity}` }) },
@@ -353,6 +516,7 @@ function whatIfWidget(symbol, chartApi) {
           { label: "Chance of profit", num: true, cell: x => `${Math.round(100 * x.p_profit)}%` },
           { label: "Most it can lose", num: true, cell: x => x.unlimited_loss ? "no limit" : money(x.max_loss, 0) },
           { label: "Expected per $ at risk", num: true, cell: x => isNum(x.score) ? num(x.score, 2) : "n/a" },
+          { label: "", cell: x => { const b = el("button", { class: "plain small-btn", text: "+ combination" }); b.addEventListener("click", e => { e.stopPropagation(); addToCombo(x.kind, x.quantity); }); return b; } },
         ], rows, { onRow: x => setKind(x.kind, x.quantity) }),
         r.failed.length ? el("p", { class: "small muted", text: `Could not value: ${r.failed.map(f => `${f.kind} (${f.error})`).join("; ")}` }) : "");
     } catch (e) { rankBox.replaceChildren(el("p", { class: "error", text: e.message })); }

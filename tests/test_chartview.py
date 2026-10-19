@@ -421,10 +421,17 @@ def test_the_pages_helpers_clamp_windows_build_overlays_and_lay_out_scenarios():
                        "down_range": {"label": "Down", "frequency": 0.2, "low": 0.05, "high": 0.5, "cases": 2}}}
     done = subprocess.run(["node", "-e", RUNNER, str(STATIC / "chart.js"), json.dumps([
         ["clampWindow", [10.2, 50.9, 40, 400]], ["clampWindow", [30, 10, 100, 400]], ["clampWindow", [0, 999, 1000, 400]],
-        ["overlayLines", [sim, 5]], ["scenarioRows", [h]], ["scenarioRows", [None]]])],
+        ["overlayLines", [sim, 5]], ["scenarioRows", [h]], ["scenarioRows", [None]],
+        ["pinchOf", [[{"clientX": 0, "clientY": 0}, {"clientX": 30, "clientY": 40}]]],
+        ["zoomCentre", [None, {"min": 10, "max": 20}]], ["zoomCentre", [25, {"min": 10, "max": 20}]],
+        ["zoomRange", [{"min": 10, "max": 20}, 2, 15]], ["zoomRange", [{"min": 10, "max": 20}, 0.5, 10]],
+        ["zoomRange", [{"min": 10, "max": 10.001}, 2, 10.0005]]])],
         capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
-    a, b, c, lines, rows, none = [x["ok"] for x in json.loads(done.stdout)]
+    a, b, c, lines, rows, none, pinch, c1, c2, z_in, z_out, z_floor = [x["ok"] for x in json.loads(done.stdout)]
+    # 2.14: the vertical zoom's arithmetic: a pinch's distance and middle, the still point, the range around it.
+    assert pinch == {"dist": 50, "y": 20} and c1 == 15 and c2 == 20
+    assert z_in == {"min": 12.5, "max": 17.5} and z_out == {"min": 10, "max": 30} and z_floor == {"min": 10, "max": 10.001}
     assert a == [10, 39] and b == [10, 30] and c == [600, 999]
     kinds = [ln["kind"] for ln in lines]
     assert kinds == ["match", "match", "median", "p25", "p75"]

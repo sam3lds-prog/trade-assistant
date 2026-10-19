@@ -542,3 +542,11 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .wi-pos-head { margin-top: 6px; }
 @media (max-width: 820px) { .wi-head { display: none; } .wi-row { grid-template-columns: 1fr 1fr; } .wi-row .wi-label { grid-column: 1 / -1; } }
 .wi-pos-panel td:nth-child(2) { white-space: nowrap; }
+/* 2.14: the combination and the budget split */
+.wi-pos-panel h4 { margin: 18px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+.wi-combo-rows { margin: 8px 0; }
+.wi-combo-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 5px 0; border-bottom: 1px dashed var(--line); }
+.wi-combo-row input[type="number"] { width: 6.5em; min-height: 0; padding: 3px 6px; }
+.wi-pos-panel input[type="range"] { width: 120px; vertical-align: middle; }
+.wi-combo-result, .wi-split-result { margin-top: 8px; }
+.wi-stale { color: var(--warn, #b26a00); font-style: italic; }

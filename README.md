@@ -87,6 +87,22 @@ Every trade opens to the statement rows it was built from, so each figure can be
 against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
 orders and holdings through the Robinhood connection, read-only.
 
+Version 2.14 makes the what-if factors count once, zooms the chart both ways, and sizes combinations and
+a budget.
+
+- **No double counting.** The factors are fitted jointly, the US market first, then the sector, the peers,
+  the overseas markets and the macro factors: each term is only the part of that factor's move the factors
+  above it do not already explain (a sector fund's move is mostly the market's). The rows show the beta alone
+  and the beta on the factor's own part; hovering a term says how much of its move was already counted.
+- **Pinch zooms both axes.** Two fingers, or a trackpad pinch (ctrl+wheel), narrow the price axis around the
+  price under the fingers as well as the time axis. Fit range puts both back.
+- **A combination.** Pick any strategies (or the AI's pick, which can now be a combination) with a quantity
+  each; they are valued together under the scenario, so hedges offset: the value, the upside and downside,
+  the chance of a profit, and the worst tenth of outcomes.
+- **Split a budget.** Give a dollar amount and a caution dial: the split across strategies that maximises
+  the expected result minus caution × the average loss in the worst tenth of outcomes, with a cap on any one
+  strategy and only strategies whose loss has a limit. One click makes the split the combination.
+
 Version 2.13 adds **what-if analysis** under the chart on Analyze a stock.
 
 - **A model you can steer.** Overseas markets (Nikkei, DAX, Hang Seng), the US market, the 10-year yield,
@@ -795,8 +811,10 @@ contract opens Price an option on it with the limit ladder ready.
    any the data allows: 1, 5 or 15 minutes, an hour, a day, a week, a month or a quarter. Bars within the
    day reach back about 40 days on Tradier and a week on Robinhood; the chart says what it loaded and how
    much more it can pan through.
-2. **Move about.** Drag to pan, scroll or pinch to zoom, drag the time axis to stretch it. **Fit range**
-   returns to the range; **Latest** jumps to the newest bar. Hover and the bar's open, high, low, close,
+2. **Move about.** Drag to pan, scroll to zoom the time axis, pinch with two fingers or a trackpad
+   (ctrl+wheel) to zoom both axes around the price under the fingers (2.14), drag the time or price axis to
+   stretch it. **Fit range** returns to the range and lets the price axis fit again; **Latest** jumps to the
+   newest bar. Hover and the bar's open, high, low, close,
    volume and indicators read out underneath.
 3. **Indicators.** Tick what to draw: candles or a close line, volume, 20-bar EMA, 50- and 200-bar
    averages, Bollinger bands, VWAP (within the day), support and resistance (with the number of touches),
@@ -842,9 +860,13 @@ chart).
    scenario starts at no further move and the readings stand beside it for reference. stooq's readings are
    from the session's open; the funds' are against their previous close. **Reset to the defaults** restores
    them; **Refresh readings** fetches them again. Your values survive a change of horizon or peers.
-3. **The model.** The expected move at each bar of the horizon is the sum of beta times scenario over the
-   factors ticked (landing on the first bar, as overnight news is priced at the open), plus the pattern's
-   median path times its weight, plus the news and analyst terms spread over the first bars. The band is
+3. **The model.** The expected move at each bar of the horizon is the sum, over the factors ticked, of each
+   factor's own part of its move times the stock's beta to that part (2.14: the factors are fitted together
+   in the order listed, the US market first, so a sector fund's move that the market already explains is not
+   counted again; the row shows the beta alone and on the factor's own part, and hovering a term in the
+   model line says how much was shared), landing on the first bar as overnight news is priced at the open,
+   plus the pattern's median path times its weight, plus the news and analyst terms spread over the first
+   bars. The band is
    ±1.28 of the stock's own realised volatility scaled to the bars so far: a 10-90 range that says nothing
    about direction. The orange line and band on the chart redraw as you type; the terms are listed under
    the model with their sizes. The horizon is the outlook's (a week on daily bars to start) and can be
@@ -867,6 +889,16 @@ chart).
    breakevens, with the legs. **Rank every strategy** values all eighteen under the same scenario, orders
    them by expected result per dollar at risk, marks the best (★) and the AI's pick (AI), and a click on a
    row sizes it. The quantity converts between shares and contracts (100 shares to one contract).
+6. **A combination (2.14).** Add strategies (or press *Use the AI's pick*, which may be two or three) with a
+   quantity each and press *Value the combination*: every position's figures and the whole's, valued together
+   across the same range of prices so hedges offset: downside, middle and upside, expected result, chance of a
+   profit, the average loss in the worst tenth of outcomes, what it ties up and the most it can lose.
+7. **Split a budget (2.14).** Enter dollars, set the caution dial (all-out to cautious), a cap on any one
+   strategy and whether to split across every strategy with a limited loss or only the combination, then
+   *Split it*: units of each strategy, dollars and share, the whole's figures and the expected return on the
+   budget. The split maximises the expected result minus caution × the average loss in the worst tenth;
+   strategies whose loss has no limit are left out, since the capital they tie up is not known. *Use this split
+   as the combination* loads it above.
 
 What this is not. The model is arithmetic on the assumptions in the boxes: a beta is what a year of daily
 returns showed, not a law, and eight factors with overlapping moves do not add independently. The AI's
@@ -1031,6 +1063,22 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
 
   Not checked against the real services, which this build environment cannot reach: stooq.com's quotes
   and OpenAI's API are written to their published formats.
+- 2.14 (the joint fit, the combination, the budget split, the two-way zoom):
+  - a synthetic stock that follows the market and a sector that is mostly the market gets a joint fit of
+    1.0 and 0.5 (the one-at-a-time betas would double count); a sector move the market implies adds nothing;
+    with the market off the sector carries its whole move; returns are aligned on shared days;
+  - a combination of shares and a put is valued together: the put caps the loss and narrows both tails; a
+    short makes the whole unlimited; bad kinds and an empty list are refused;
+  - a budget split stays within the budget and the cap, adds up, leaves out strategies with no loss limit,
+    puts more at risk all-out than cautiously, and fills one strategy when that is all that is allowed;
+  - the zoom arithmetic (a pinch's distance and middle, the still point, the range around it, the floor) is
+    tested under Node; in Chromium the AI's pick button enables when the AI answers, its combination is
+    valued, a $20,000 budget is split, loaded back as the combination and valued row for row, a changed
+    scenario marks both results as valued earlier, the sensitivity column follows the ticks, and a ctrl+wheel
+    pinch then Fit range leaves no errors;
+  - a near-duplicate factor (a peers basket that tracks the market) is marked redundant with no own part, a
+    short proxy history is left out of the joint fit and named, a missing day never pairs a two-day move with a
+    one-day one, options in a budget split stop at the builder's 100 contracts and the note says so.
 - 2.11 (news search):
   - Google News search feeds and Brave results are read from their published shapes; a feed carrying a
     DOCTYPE or ENTITY declaration anywhere is refused, a feed that does not read is a failed check (never

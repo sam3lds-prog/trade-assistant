@@ -34,7 +34,7 @@ import numpy as np
 from . import similar as similar_engine
 from .ai import AIError, BASE_SYSTEM, extract_json
 from .chartview import RequestError
-from .factors import NON_PRICE_FACTORS, Factors, earnings_days, model_path
+from .factors import NON_PRICE_FACTORS, Factors, earnings_days, factor_terms, model_path
 from .optionmath import NY
 from .options.evaluator import horizon_date
 from .options.strategies import TEMPLATES, Strategies, StrategyError
@@ -52,6 +52,8 @@ DOWNGRADE_WORDS = ("downgrade", "downgrades", "downgraded", "cuts price target",
                    "lowers target", "underperform", "underweight", "to sell", "to hold", "to neutral")
 STRATEGY_KINDS = ["shares", "short"] + list(TEMPLATES)
 SETUP_TTL = 120.0
+MAX_SHARES = 100_000
+MAX_CONTRACTS = 100            # the strategy builder's limit
 PEER_TICKER = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
 
 AI_SYSTEM = BASE_SYSTEM + (
@@ -66,6 +68,10 @@ def _num(v: Any, default: float | None = None) -> float | None:
     except (TypeError, ValueError):
         return default
     return f if math.isfinite(f) else default
+
+
+def money_text(v: float) -> str:
+    return f"${v:,.0f}"
 
 
 def horizon_label(bars: int, group: str) -> str:
@@ -129,6 +135,7 @@ class WhatIf:
         self.chatgpt = chatgpt
         self._setup_cache: dict[tuple, tuple[float, list[dict[str, Any]]]] = {}
         self._full_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
+        self._returns: dict[tuple, dict[str, Any] | None] = {}      # the aligned daily returns the joint fit uses
 
     # --- providers -----------------------------------------------------------------------------------------------
     def providers(self) -> list[dict[str, Any]]:
@@ -149,9 +156,15 @@ class WhatIf:
         if hit and not refresh and time.time() - hit[0] < SETUP_TTL:
             return [dict(r) for r in hit[1]]
         rows = self.factors.readings(symbol, peers)
-        self.factors.betas(symbol, rows)
+        self._returns[key] = self.factors.betas(symbol, rows)
         self._setup_cache[key] = (time.time(), [dict(r) for r in rows])
         return rows
+
+    def _returns_for(self, symbol: str, peers: list[str]) -> dict[str, Any] | None:
+        key = (symbol, tuple(peers), self.svc.market.info.mode)
+        if key not in self._returns:
+            self._factor_rows(symbol, peers)
+        return self._returns.get(key)
 
     def _vol(self, symbol: str) -> dict[str, Any]:
         out: dict[str, Any] = {"daily_vol": None, "atr_pct": None, "iv30": None, "event_move_pct": None, "last": None}
@@ -234,7 +247,8 @@ class WhatIf:
                          "analysts": calls["net"], "pattern_weight": pattern["default_weight"]})
         include = {r["key"]: bool(r["on"]) for r in rows}
         include.update({"news": bool(items), "analysts": calls["net"] != 0, "pattern": pattern["available"]})
-        model = self._model(rows, scenario, include, chosen, g, pattern, vol, news, earnings, last, sim_times)
+        model = self._model(rows, scenario, include, chosen, g, pattern, vol, news, earnings, last, sim_times,
+                            self._returns_for(symbol, peers))
         return {"symbol": symbol, "group": g, "price": last, "horizon": chosen, "horizon_label": horizon_label(chosen, g),
                 "horizons": [{"bars": h, "label": horizon_label(h, g)} for h in horizons],
                 "factors": rows, "non_price_factors": NON_PRICE_FACTORS,
@@ -246,7 +260,8 @@ class WhatIf:
                 "providers": self.providers(), "strategies": self.strategy_choices(),
                 "stooq": {"enabled": self.factors.stooq.enabled, "last_error": self.factors.stooq.last_error},
                 "window": found["window"], "data_source": self.svc.market.info.mode,
-                "note": ("The model is arithmetic on the assumptions shown: each factor's move times how much this stock "
+                "note": ("The model is arithmetic on the assumptions shown: each factor's own part of its move (what the factors "
+                         "above it do not already explain) times how much this stock "
                          "has moved with it, plus the pattern's path and the news record. Change any number and the line "
                          "moves. It is not a forecast, and no order is placed.")}
 
@@ -310,9 +325,19 @@ class WhatIf:
     # --- the model ----------------------------------------------------------------------------------------------
     def _model(self, rows: list[dict[str, Any]], scenario: dict[str, Any], include: dict[str, Any], horizon: int,
                group: str, pattern: dict[str, Any], vol: dict[str, Any], news: dict[str, Any], earnings: dict | None,
-               last: float, times: list[int]) -> dict[str, Any]:
+               last: float, times: list[int], returns: dict[str, Any] | None) -> dict[str, Any]:
         for r in rows:
             r["on"] = bool(include.get(r["key"], r.get("on"))) and r.get("beta") is not None
+        # The factor terms: a joint fit of the factors that are on, in the list's order, so each counts only the
+        # part of its move the factors above it do not already explain (2.14).
+        shocks = factor_terms(rows, scenario, returns)
+        by_key = {t["key"]: t for t in shocks}
+        for r in rows:
+            t = by_key.get(r["key"])
+            r["in_model"] = t is not None
+            r["beta_unique_now"] = t["beta_unique"] if t else None
+            r["explained_now"] = t["explained"] if t else None
+            r["redundant_now"] = t["redundant"] if t else None
         bar_days = BAR_DAYS[group]
         daily_vol = vol.get("daily_vol") or 0.02
         bar_vol = daily_vol * math.sqrt(bar_days)
@@ -339,9 +364,10 @@ class WhatIf:
         e_in = None
         if earnings and earnings.get("trading_days") is not None and bar_days > 0:
             e_in = int(math.ceil(earnings["trading_days"] / bar_days)) if earnings["trading_days"] >= 0 else None
-        out = model_path(horizon=horizon, factors=rows, scenario=scenario, pattern=p_path, pattern_weight=weight,
+        out = model_path(horizon=horizon, shocks=shocks, pattern=p_path, pattern_weight=weight,
                          daily_vol=bar_vol, atr_pct=atr_bar, news_term_pct=news_term, analyst_net=analysts or 0.0,
-                         earnings_in=e_in, event_move_pct=vol.get("event_move_pct") if include.get("earnings", True) else None)
+                         earnings_in=e_in, event_move_pct=vol.get("event_move_pct") if include.get("earnings", True) else None,
+                         news_tone=tone)
         out["low_pct"], out["high_pct"] = lognormal_band(out["path_pct"], out["sd_pct"])
         out.update(self._in_prices(out, last, times))
         out["pattern_weight"] = weight
@@ -365,7 +391,8 @@ class WhatIf:
         inc = {**base["include"], **{k: bool(v) for k, v in (include or {}).items()}}
         model = self._model(base["factors"], merged, inc, base["horizon"], base["group"], base["pattern"],
                             base["volatility"], {**base["news"], **base["news"]["record"]},
-                            base["earnings"], base["price"], base["future_times"])
+                            base["earnings"], base["price"], base["future_times"],
+                            self._returns_for(base["symbol"], self._peers(base["symbol"], peers)))
         return {"symbol": symbol, "group": base["group"], "horizon": base["horizon"], "scenario": merged, "include": inc,
                 "model": model, "price": base["price"], "future_times": base["future_times"]}
 
@@ -374,11 +401,23 @@ class WhatIf:
         g = s["group"]
         lines = [f"Stock: {s['symbol']}. Last price {s['price']:.2f}. Chart bars: {g}. Horizon: {s['horizon']} bars "
                  f"({s['horizon_label']})." + (" The data is demo data, made up." if s["data_source"] == "demo" else ""),
-                 "", "FACTORS (today's reading; beta = this stock's % move per 1% of the proxy over the last year; "
-                 "corr = correlation of daily returns):"]
+                 "", "FACTORS, in the order they are fitted (the US market first; each factor's term in the app's model is "
+                 "only the part of its move the factors above it do not already explain, so nothing is counted twice). "
+                 "beta alone = this stock's % move per 1% of the proxy over the last year; beta own = per 1% of the factor's "
+                 "own part given the factors above it; explained = how much of its moves follow the factors above:"]
         for r in s["factors"]:
             rd = "no reading" if r.get("reading") is None else f"{r['reading']:+.2f} {r['unit']} ({r.get('reading_source')})"
-            b = "no beta" if r.get("beta") is None else f"beta {r['beta']:+.2f}, corr {r.get('correlation', 0):+.2f} over {r.get('beta_days')} days"
+            if r.get("beta") is None:
+                b = "no beta"
+            else:
+                b = f"beta alone {r['beta']:+.2f}, corr {r.get('correlation', 0):+.2f} over {r.get('beta_days')} days"
+                bu = r.get("beta_unique_now") if r.get("in_model") else None
+                if bu is not None:
+                    b += f"; beta own {bu:+.2f}, explained {r.get('explained_now', 0):.0%}" + (" (redundant: no own part)" if r.get("redundant_now") else "")
+                elif not r.get("on"):
+                    b += "; switched off"
+                elif r.get("fit_note"):
+                    b += f"; {r['fit_note']}"
             lines.append(f"- {r['key']}: {r['label']}: {rd}; {b}")
         lines += ["", f"NEWS (last 36 hours, tone -1..+1): average tone {s['news'].get('tone')}; {s['news'].get('text') or ''}"]
         for it in s["news"]["items"][:10]:
@@ -402,8 +441,10 @@ class WhatIf:
             lines.append("Median path after the matches, % from the last close, bar by bar: "
                          + ", ".join("?" if x is None else f"{x:+.2f}" for x in p["path_pct"][:s["horizon"]]))
         m = current
-        lines += ["", f"THE APP'S MODEL at the current settings (sum of beta x scenario, plus pattern x weight {m.get('pattern_weight')}, "
-                  f"plus news and analyst terms): expected {m['expected_pct']:+.2f}% at the horizon; path "
+        lines += ["", f"THE APP'S MODEL at the current settings (the joint fit's terms: each factor's own part of its move x its beta "
+                  f"own, plus pattern x weight {m.get('pattern_weight')}, plus news and analyst terms; fitted on "
+                  f"{(m['terms'][0].get('fit_days') if m.get('terms') and m['terms'][0].get('fit_days') else 'n/a')} shared days): "
+                  f"expected {m['expected_pct']:+.2f}% at the horizon; path "
                   + ", ".join(f"{x:+.2f}" for x in m["path_pct"]) + "; 10-90 band at the horizon "
                   f"{m['low_pct'][-1]:+.2f}% to {m['high_pct'][-1]:+.2f}%.",
                   "Current scenario values: " + json.dumps({k: (round(v, 3) if isinstance(v, float) else v) for k, v in s["scenario"].items()}),
@@ -417,6 +458,7 @@ class WhatIf:
                   '  "include": an object keyed the same way with true/false for which factors matter here;',
                   '  "pattern": {"use": true/false, "weight": 0..1, "why": "..."};',
                   '  "strategy": {"kind": one of the strategy keys above or "shares" or "short", "direction": "up"/"down"/"flat", '
+                  '"combination": up to three strategy keys that work together (the kind first; omit if one is enough), '
                   '"why": "..."}; pick what fits your path and band best (defined risk when the band is wide);',
                   '  "rationale": 3 to 6 plain sentences on why, naming the inputs that matter most;',
                   '  "risks": a list of 2 to 5 short strings.',
@@ -487,13 +529,17 @@ class WhatIf:
         kind = str(strat.get("kind") or strat.get("template") or "").lower()
         if kind not in STRATEGY_KINDS:
             kind = "shares" if path_pct[-1] >= 0 else "long_put"
+        combination = [str(k).lower() for k in strat.get("combination") or [] if isinstance(k, str)] \
+            if isinstance(strat.get("combination"), list) else []
+        combination = [k for k in dict.fromkeys([kind] + combination) if k in STRATEGY_KINDS][:3]
         risks = [str(x)[:200] for x in (p.get("risks") or []) if isinstance(x, (str, int, float))][:6] \
             if isinstance(p.get("risks"), list) else []
         out = {"path_pct": path_pct, "low_pct": low, "high_pct": high, "sd_pct": sd, "expected_pct": path_pct[-1],
                "confidence": float(np.clip(_num(p.get("confidence"), 0.5) or 0.5, 0, 1)),
                "rationale": str(p.get("rationale") or "")[:2000], "risks": risks, "variables": variables, "include": include,
                "pattern": {"use": include.get("pattern", True), "weight": variables.get("pattern_weight"), "why": str(pat.get("why") or "")[:400]},
-               "strategy": {"kind": kind, "direction": str(strat.get("direction") or "")[:10], "why": str(strat.get("why") or "")[:600]}}
+               "strategy": {"kind": kind, "combination": combination, "direction": str(strat.get("direction") or "")[:10],
+                            "why": str(strat.get("why") or "")[:600]}}
         out.update(self._in_prices(out, s["price"], s["future_times"]))
         return out
 
@@ -510,13 +556,18 @@ class WhatIf:
                  group: str, last: float | None = None, dte: int | None = None) -> dict[str, Any]:
         """One position valued at the horizon under the scenario: P&L at the 10th, 50th and 90th percentile prices,
         the expected P&L, the chance of a profit, the most it can lose, and what it costs."""
+        return self._public(self._position(symbol, kind=kind, quantity=quantity, expected_pct=expected_pct, sd_pct=sd_pct,
+                                           horizon_bars=horizon_bars, group=group, last=last, dte=dte))
+
+    def _position(self, symbol: str, *, kind: str, quantity: int, expected_pct: float, sd_pct: float, horizon_bars: int,
+                  group: str, last: float | None = None, dte: int | None = None) -> dict[str, Any]:
         symbol = self.svc._symbol(symbol)
         kind = (kind or "").lower()
         if kind not in STRATEGY_KINDS:
             raise RequestError(f"kind must be one of {', '.join(STRATEGY_KINDS)}")
         quantity = int(quantity or 1)
-        if not 1 <= quantity <= (100000 if kind in ("shares", "short") else 100):
-            raise RequestError("quantity must be between 1 and 100,000 shares, or 1 and 100 contracts")
+        if not 1 <= quantity <= (MAX_SHARES if kind in ("shares", "short") else MAX_CONTRACTS):
+            raise RequestError(f"quantity must be between 1 and {MAX_SHARES:,} shares, or 1 and {MAX_CONTRACTS} contracts")
         if group not in BAR_DAYS:
             raise RequestError("group is not a bar size")
         sd_pct = max(0.05, float(sd_pct))
@@ -564,7 +615,7 @@ class WhatIf:
                         "unlimited_loss": built["unlimited_loss"], "max_gain": built["max_gain"],
                         "unlimited_gain": built["unlimited_gain"], "breakevens": built["breakevens"], "expiration": built["expiration"],
                         "dte": built["dte"], "strikes": built["strikes"], "legs": built["legs"],
-                        "legs_text": [l.get("role", "") + f" {l['strike']:g} {l['option_type']} {l['expiration']}" for l in built["legs"]],
+                        "legs_text": [f"{'buy' if l['side'] == 'buy' else 'sell'} {l['strike']:g} {l['option_type']} {l['expiration']}" for l in built["legs"]],
                         "risk_check": built.get("risk_check"), "notes": built.get("notes") or [],
                         "p_profit_at_expiry": built.get("p_profit_at_expiry")})
         out["expected_pnl"] = float((weights * pnl).sum())
@@ -582,7 +633,193 @@ class WhatIf:
         out["pnl_curve"] = {"prices": [float(x) for x in prices[::8]], "pnl": [float(x) for x in pnl[::8]]}
         out["note"] = ("P&L at the horizon under the scenario's 10-90 range of prices (a lognormal around the expected move), "
                        "options valued by the simulator at the midpoint. Not advice; no order is placed.")
+        out["_grid"] = (prices, weights, np.asarray(pnl, dtype=float))     # for combinations; stripped from replies
         return out
+
+    @staticmethod
+    def _public(row: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in row.items() if not k.startswith("_")}
+
+    @staticmethod
+    def _stats(prices: np.ndarray, weights: np.ndarray, pnl: np.ndarray, p10: float, p50: float, p90: float) -> dict[str, Any]:
+        """The figures of one P&L curve under the scenario: the percentile P&Ls, the expected P&L, the chance of
+        a profit, and the average loss in the worst tenth of outcomes (CVaR 10%, a positive number)."""
+        order = np.argsort(pnl)
+        cum = np.cumsum(weights[order])
+        tail = order[cum <= 0.10 + 1e-12]
+        if len(tail) == 0:
+            tail = order[:1]
+        tail_w = weights[tail]
+        cvar = -float((pnl[tail] * tail_w).sum() / tail_w.sum())
+        return {"pnl_p10": float(np.interp(p10, prices, pnl)), "pnl_p50": float(np.interp(p50, prices, pnl)),
+                "pnl_p90": float(np.interp(p90, prices, pnl)), "expected_pnl": float((weights * pnl).sum()),
+                "p_profit": float(weights[pnl > 0].sum()), "cvar10": max(0.0, cvar),
+                "worst_in_range": float(-pnl.min()), "best_in_range": float(pnl.max())}
+
+    def combo(self, symbol: str, *, legs: list[dict[str, Any]], expected_pct: float, sd_pct: float, horizon_bars: int,
+              group: str) -> dict[str, Any]:
+        """A combination of positions (each a kind and a quantity) valued together under the scenario: every
+        position's own figures, and the combination's P&L at the percentiles, its expected result, its chance
+        of a profit, its cost and the most it can lose."""
+        symbol = self.svc._symbol(symbol)
+        if not 1 <= len(legs) <= 6:
+            raise RequestError("A combination has one to six positions")
+        rows, failed, total = [], [], None
+        prices = weights = None
+        last = self._live_price(symbol)                        # one price for every leg, so the curves share a grid
+        for leg in legs:
+            try:
+                r = self._position(symbol, kind=str(leg.get("kind") or ""), quantity=int(leg.get("quantity") or 1), expected_pct=expected_pct,
+                                  sd_pct=sd_pct, horizon_bars=horizon_bars, group=group, last=last)
+            except (RequestError, DataError, ValueError) as exc:
+                failed.append({"kind": leg.get("kind"), "error": str(exc)[:200]})
+                continue
+            prices, weights, pnl = r["_grid"]
+            total = pnl.copy() if total is None else total + pnl
+            rows.append(self._public(r))
+        if not rows:
+            raise RequestError("None of the positions could be valued: " + "; ".join(f["error"] for f in failed))
+        sc = rows[0]["scenario"]
+        stats = self._stats(prices, weights, total, sc["p10"], sc["p50"], sc["p90"])
+        defined = all(not r.get("unlimited_loss") for r in rows)
+        cost = float(sum(r["cost"] for r in rows if not r.get("credit")))
+        credit = float(sum(r["cost"] for r in rows if r.get("credit")))
+        capital = float(sum(self._capital(r) for r in rows))
+        return {"symbol": symbol, "rows": rows, "failed": failed, "scenario": sc, "last": rows[0]["last"],
+                "eval_date": rows[0]["eval_date"], "combined": {**stats, "cost": cost, "credit": credit, "capital": capital,
+                                                                 "defined_risk": defined,
+                                                                 "max_loss": stats["worst_in_range"] if defined else None,
+                                                                 "unlimited_loss": not defined,
+                                                                 "return_on_capital": stats["expected_pnl"] / capital if capital > 0 else None},
+                "note": ("The positions are valued together across the same range of prices, so hedges offset. The most it can "
+                         "lose is the worst point of the combined curve across the scenario's range when every position has a "
+                         "limit, else there is none. Not advice; no order is placed.")}
+
+    def _live_price(self, symbol: str) -> float:
+        q = self.svc.market.quote(symbol)
+        last = float(q.get("last") or q.get("close") or 0)
+        if not last or last <= 0:
+            raise RequestError(f"No price for {symbol}")
+        return last
+
+    @staticmethod
+    def _capital(r: dict[str, Any]) -> float:
+        """The money a position ties up: what it costs for a debit or shares, the most it can lose for a credit."""
+        if r["kind"] == "short":
+            return float(r["cost"])                                        # the short's proceeds stand in for its margin
+        if r.get("credit"):
+            return float(r["max_loss"] or 0) or float(r["cost"])
+        return float(r["cost"])
+
+    def allocate(self, symbol: str, *, budget: float, risk: float, expected_pct: float, sd_pct: float, horizon_bars: int, group: str,
+                 kinds: list[str] | None = None, max_share: float = 0.5) -> dict[str, Any]:
+        """Split a budget across strategies under the scenario: the units of each that maximise the expected P&L
+        minus `risk` times the average loss in the worst tenth of outcomes (CVaR 10%), with no strategy over
+        `max_share` of the budget and only strategies whose loss has a limit (so the capital each unit ties up is
+        known). A greedy search in blocks, then single units."""
+        symbol = self.svc._symbol(symbol)
+        if not 1 <= budget <= 10_000_000:
+            raise RequestError("budget must be between $1 and $10,000,000")
+        if not 0 <= risk <= 10:
+            raise RequestError("risk must be between 0 (all-out) and 10 (very cautious)")
+        max_share = float(np.clip(max_share, 0.05, 1.0))
+        asked = list(dict.fromkeys(k for k in (kinds or STRATEGY_KINDS) if k in STRATEGY_KINDS))
+        if kinds is not None and not asked:
+            raise RequestError("None of the strategies asked for is known")
+        units_of, skipped = [], []
+        if "short" in asked:
+            skipped.append({"kind": "short", "why": "its loss has no limit, so the capital it ties up is not known"})
+        wanted = [k for k in asked if k != "short"]
+        prices = weights = None
+        last = self._live_price(symbol)
+        for k in wanted:
+            try:
+                r = self._position(symbol, kind=k, quantity=1, expected_pct=expected_pct, sd_pct=sd_pct, horizon_bars=horizon_bars, group=group,
+                                   last=last)
+            except (RequestError, DataError, ValueError) as exc:
+                skipped.append({"kind": k, "why": str(exc)[:160]})
+                continue
+            if r.get("unlimited_loss"):
+                skipped.append({"kind": k, "why": "its loss has no limit, so the capital it ties up is not known"})
+                continue
+            capital = self._capital(r)
+            if capital <= 0 or capital > budget * max_share:
+                skipped.append({"kind": k, "why": f"one unit ties up {money_text(capital)}, more than {max_share:.0%} of the budget"})
+                continue
+            prices, weights, pnl = r["_grid"]
+            # Units are capped as the position panel caps them (the strategy builder's 100 contracts).
+            most = MAX_SHARES if k == "shares" else MAX_CONTRACTS
+            units_of.append({"row": self._public(r), "capital": capital, "pnl": pnl, "units": 0, "most": most, "capped": False})
+        if not units_of:
+            raise RequestError("Nothing fits the budget: " + ("; ".join(f"{x['kind']}: {x['why']}" for x in skipped[:4]) or "no strategy to split across"))
+        lam = float(risk)
+
+        def objective(total: np.ndarray) -> float:
+            order = np.argsort(total)
+            cum = np.cumsum(weights[order])
+            tail = order[cum <= 0.10 + 1e-12]
+            if len(tail) == 0:
+                tail = order[:1]
+            cvar = max(0.0, -float((total[tail] * weights[tail]).sum() / weights[tail].sum()))
+            return float((weights * total).sum()) - lam * cvar
+
+        total = np.zeros_like(weights)
+        spent = 0.0
+        best_obj = objective(total)
+        blocks = [max(1, int(0.10 * budget / u["capital"])) for u in units_of]
+        steps = 0
+        while steps < 4000:
+            steps += 1
+            # The block that improves the objective most per dollar it spends; blocks differ in size.
+            best_i, best_rate, best_gain, best_block = None, 1e-12, 0.0, 0
+            for i, u in enumerate(units_of):
+                b = blocks[i]
+                if b < 1:
+                    continue
+                if u["units"] + b > u["most"]:
+                    u["capped"] = u["units"] >= u["most"]
+                    continue
+                if spent + b * u["capital"] > budget + 1e-9 or (u["units"] + b) * u["capital"] > max_share * budget + 1e-9:
+                    continue
+                gain = objective(total + b * u["pnl"]) - best_obj
+                rate = gain / (b * u["capital"])
+                if gain > 1e-9 and rate > best_rate:
+                    best_i, best_rate, best_gain, best_block = i, rate, gain, b
+            if best_i is None:
+                if all(b <= 1 for b in blocks):
+                    break
+                blocks = [max(1, b // 2) if b > 1 else 1 for b in blocks]   # finer steps before giving up
+                continue
+            u = units_of[best_i]
+            u["units"] += best_block
+            total = total + best_block * u["pnl"]
+            spent += best_block * u["capital"]
+            best_obj += best_gain
+        capped = [u["row"]["label"] for u in units_of if u["units"] >= u["most"]]
+        sc = units_of[0]["row"]["scenario"]
+        stats = self._stats(prices, weights, total, sc["p10"], sc["p50"], sc["p90"]) if spent > 0 else None
+        rows = []
+        for u in units_of:
+            if u["units"] <= 0:
+                continue
+            r = u["row"]
+            dollars = u["units"] * u["capital"]
+            rows.append({"kind": r["kind"], "label": r["label"], "units": int(u["units"]),
+                         "unit": "shares" if r["kind"] == "shares" else "contracts", "capital_per_unit": u["capital"],
+                         "dollars": dollars, "share": dollars / budget, "cost_label": r["cost_label"],
+                         "expected_pnl": float((weights * (u["units"] * u["pnl"])).sum()),
+                         "p_profit": float(weights[u["units"] * u["pnl"] > 0].sum()),
+                         "legs_text": r.get("legs_text") or [], "expiration": r.get("expiration")})
+        rows.sort(key=lambda x: -x["dollars"])
+        return {"symbol": symbol, "budget": budget, "risk": lam, "max_share": max_share, "rows": rows, "skipped": skipped, "capped": capped,
+                "spent": spent, "left": budget - spent, "combined": {**stats, "return_on_budget": stats["expected_pnl"] / budget,
+                                                                    "max_loss": stats["worst_in_range"]} if stats else None,
+                "scenario": sc, "last": units_of[0]["row"]["last"], "eval_date": units_of[0]["row"]["eval_date"],
+                "note": (f"The split that maximises the expected P&L minus {lam:g} times the average loss in the worst tenth of "
+                         f"outcomes, with no strategy over {max_share:.0%} of the budget and only strategies whose loss has a "
+                         "limit (a credit spread ties up the most it can lose)."
+                         + (f" {', '.join(capped)} stopped at {MAX_CONTRACTS} contracts, the most the builder values." if capped else "")
+                         + " A model under one scenario, not advice; no order is placed.")}
 
     def rank(self, symbol: str, *, quantity: int, expected_pct: float, sd_pct: float, horizon_bars: int, group: str,
              last: float | None = None, kinds: list[str] | None = None, ai_pick: str | None = None,
@@ -594,10 +831,11 @@ class WhatIf:
         for k in wanted:
             qty = quantity if k in ("shares", "short") else (contracts or max(1, min(100, quantity // 100 or 1)))
             try:
-                rows.append(self.position(symbol, kind=k, quantity=qty, expected_pct=expected_pct, sd_pct=sd_pct,
+                rows.append(self._position(symbol, kind=k, quantity=qty, expected_pct=expected_pct, sd_pct=sd_pct,
                                           horizon_bars=horizon_bars, group=group, last=last))
             except (RequestError, DataError, ValueError) as exc:
                 failed.append({"kind": k, "error": str(exc)[:200]})
+        rows = [self._public(r) for r in rows]
         scored = [r for r in rows if r.get("score") is not None]
         scored.sort(key=lambda r: (-(r["score"]), -(r["p_profit"] or 0)))
         for i, r in enumerate(scored, 1):

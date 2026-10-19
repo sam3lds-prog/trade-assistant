@@ -325,6 +325,32 @@ class WhatIfPosition(Strict):
     group: str = Field("1d", max_length=4)
 
 
+class WhatIfLeg(Strict):
+    kind: str = Field(..., min_length=1, max_length=24)
+    quantity: int = Field(1, ge=1, le=100000)
+
+
+class WhatIfCombo(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    legs: list[WhatIfLeg] = Field(..., min_length=1, max_length=6)
+    expected_pct: float = Field(..., ge=-90, le=300)
+    sd_pct: float = Field(..., ge=0, le=200)
+    horizon_bars: int = Field(..., ge=1, le=400)
+    group: str = Field("1d", max_length=4)
+
+
+class WhatIfAllocate(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    budget: float = Field(..., ge=1, le=10_000_000)
+    risk: float = Field(1.0, ge=0, le=10)
+    max_share: float = Field(0.5, ge=0.05, le=1.0)
+    kinds: list[Annotated[str, Field(max_length=24)]] | None = Field(None, max_length=24)
+    expected_pct: float = Field(..., ge=-90, le=300)
+    sd_pct: float = Field(..., ge=0, le=200)
+    horizon_bars: int = Field(..., ge=1, le=400)
+    group: str = Field("1d", max_length=4)
+
+
 class WhatIfRank(Strict):
     symbol: str = Field(..., min_length=1, max_length=12)
     quantity: int = Field(100, ge=1, le=100000)
@@ -1134,6 +1160,20 @@ def build_router(svc: Any) -> APIRouter:
         """One position (shares, a short, or an option strategy) valued at the horizon under the scenario."""
         return whatif_call(lambda: whatif.position(req.symbol, kind=req.kind, quantity=req.quantity, expected_pct=req.expected_pct,
                                                    sd_pct=req.sd_pct, horizon_bars=req.horizon_bars, group=req.group))
+
+    @router.post("/whatif/combo")
+    def whatif_combo(req: WhatIfCombo):
+        """A combination of positions valued together under the scenario (2.14). Models only; no order is placed."""
+        return whatif_call(lambda: whatif.combo(req.symbol, legs=[l.model_dump() for l in req.legs], expected_pct=req.expected_pct,
+                                                sd_pct=req.sd_pct, horizon_bars=req.horizon_bars, group=req.group))
+
+    @router.post("/whatif/allocate")
+    def whatif_allocate(req: WhatIfAllocate):
+        """A budget split across strategies under the scenario (2.14): the units that maximise the expected P&L minus
+        a risk weight times the worst-tenth loss. Models only; no order is placed."""
+        return whatif_call(lambda: whatif.allocate(req.symbol, budget=req.budget, risk=req.risk, max_share=req.max_share, kinds=req.kinds,
+                                                   expected_pct=req.expected_pct, sd_pct=req.sd_pct, horizon_bars=req.horizon_bars,
+                                                   group=req.group))
 
     @router.post("/whatif/rank")
     def whatif_rank(req: WhatIfRank):
