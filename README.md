@@ -87,6 +87,23 @@ Every trade opens to the statement rows it was built from, so each figure can be
 against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
 orders and holdings through the Robinhood connection, read-only.
 
+Version 2.13 adds **what-if analysis** under the chart on Analyze a stock.
+
+- **A model you can steer.** Overseas markets (Nikkei, DAX, Hang Seng), the US market, the 10-year yield,
+  Brent, the dollar, the VIX, the stock's sector fund and foreign peers you name, each with today's reading
+  (real indexes from stooq.com when it answers, the funds that track them otherwise) and this stock's
+  sensitivity to it from a year of daily bars; the last 36 hours of news and their tone; analyst upgrades
+  and downgrades in a week of headlines; earnings ahead; and the similar-pattern path. Change any value,
+  switch any factor off, and the model's path and 10-90 band redraw on the chart in orange.
+- **An AI's scenario, in purple.** ChatGPT (new `OPENAI_API_KEY`) or Claude (`ANTHROPIC_API_KEY`), picked in
+  the widget, gets every input and the model's path and answers with its own path and band, the variable
+  settings it would use, whether to lean on the pattern, a strategy and its reasons. One click applies its
+  settings to the model. Both share the daily AI limit.
+- **A position under the scenario.** Shares, a short, or any of the sixteen option strategies from the
+  builder, valued at the horizon across the scenario's range of prices for the quantity you set: the
+  downside and upside (10th and 90th percentile), the expected result, the chance of a profit, the most it
+  can lose. Rank every strategy and the best by the model and the AI's pick are marked. Models only.
+
 Version 2.12 makes **Analyze a stock** interactive.
 
 - **The chart** is drawn with TradingView's Lightweight Charts (Apache-2.0, served by the app, no CDN):
@@ -805,6 +822,57 @@ What this is not. A shape that looked the same before had other news and another
 eight matches say little: with 8 cases the interval runs from about 15% to 85%. These are frequencies on
 one stock's own past, never forecasts, and nothing places an order.
 
+**What if? (2.13).** Under the chart, with `FEATURE_WHAT_IF=1` (the default; it needs the interactive
+chart).
+
+1. **The factors.** One row each: Japan (Nikkei), Europe (DAX), China (Hang Seng), the US market (SPY),
+   the 10-year Treasury yield (in basis points), oil (Brent), the US dollar, volatility (the VIX), the
+   stock's sector fund, and foreign peers you type in (US-listed shares of overseas companies in the same
+   business, say TSM and ASML for a chip maker). Each shows **today's reading** and where it came from (the
+   real index from stooq.com, about 15 minutes late, when it answers; else the fund that tracks it: EWJ,
+   VGK, FXI, IEF, BNO, UUP, VIXY; the VIX reads in the index's terms, VIXY moving about half as much), **this stock's sensitivity** (the beta of its daily returns to the
+   proxy's over the last year, with the correlation and the day count), a **scenario** box and a **use**
+   tick. Then the news of the last 36 hours with its tone (a slider from -1 to +1) and this stock's record
+   of moves with news behind them, the analyst upgrades and downgrades found in a week of headlines (net
+   calls, half an average range each over the first bars), earnings ahead (which widens the band by the
+   move option prices imply when the report falls inside the horizon), and the similar-pattern path with a
+   weight from 0 to 1.
+2. **Before the open and after.** Before 9:30 New York the readings are the starting scenario: the stock
+   has not priced them yet. Once it trades, or after the close, they are already in its price, so the
+   scenario starts at no further move and the readings stand beside it for reference. stooq's readings are
+   from the session's open; the funds' are against their previous close. **Reset to the defaults** restores
+   them; **Refresh readings** fetches them again. Your values survive a change of horizon or peers.
+3. **The model.** The expected move at each bar of the horizon is the sum of beta times scenario over the
+   factors ticked (landing on the first bar, as overnight news is priced at the open), plus the pattern's
+   median path times its weight, plus the news and analyst terms spread over the first bars. The band is
+   ±1.28 of the stock's own realised volatility scaled to the bars so far: a 10-90 range that says nothing
+   about direction. The orange line and band on the chart redraw as you type; the terms are listed under
+   the model with their sizes. The horizon is the outlook's (a week on daily bars to start) and can be
+   changed.
+4. **Ask ChatGPT, or ask Claude.** Pick the one you have a key for (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`;
+   both share `AI_DAILY_REQUESTS`). It is sent every reading, beta, headline, the analyst calls, earnings,
+   the volatility figures, the pattern's record and median path, the model's own path and the list of
+   strategies, and answers as JSON: its path and 10-90 band (purple, dashed, on the chart), its confidence,
+   a rationale, risks, the scenario values it would set, whether to use the pattern and at what weight, and
+   a strategy with its reasons. **Use its settings** applies all of that to the model (and selects its
+   strategy below); **Clear the AI line** removes it. Its answer is what a language model wrote from those
+   inputs: check it against them.
+5. **A position under the scenario.** Choose the scenario (the model's or the AI's), a strategy (buy
+   shares, short shares, or any of the sixteen option strategies, built from the listed chain at the
+   midpoint with an expiration a little past the horizon) and the quantity (shares, or contracts). The
+   position is valued at the horizon date from the live price (the scenario's move is applied from there,
+   even when the chart's window ended earlier) across a lognormal range of prices around the scenario's
+   expected move with the band's spread: the profit or loss at the 10th, 50th and 90th percentile prices,
+   the expected result, the chance of a profit, the most it can lose (or "no limit"), the cost and the
+   breakevens, with the legs. **Rank every strategy** values all eighteen under the same scenario, orders
+   them by expected result per dollar at risk, marks the best (★) and the AI's pick (AI), and a click on a
+   row sizes it. The quantity converts between shares and contracts (100 shares to one contract).
+
+What this is not. The model is arithmetic on the assumptions in the boxes: a beta is what a year of daily
+returns showed, not a law, and eight factors with overlapping moves do not add independently. The AI's
+scenario is a language model's reading of the same inputs. The position figures are simulator values at
+the midpoint under a made-up distribution. None of it is a forecast or advice, and nothing places an order.
+
 **Trend reversals (2.1).** On the Analyze screen, a section reads both sides at once: is a
 fall ending in a bottom, or a rise in a top? Exhaustion (a long move, RSI at an extreme, a
 stretch from the 20-day average, divergences, a climax day, reversal candles) and
@@ -937,6 +1005,32 @@ Checked by the automated tests (`python -m pytest`) and an independent review:
 
   Not checked against the real services, which this build environment cannot reach: Tradier's timesales and
   Robinhood's bars within the day are written to their published formats.
+- 2.13 (what-if analysis):
+  - the beta of a synthetic stock built as 1.5 times its proxy comes back as 1.5 with a correlation over
+    0.9; too few days or a proxy that never moves gives none;
+  - the model adds beta times scenario (a yield in basis points through the bond fund's inverse), the
+    pattern's path at its weight (held when it runs out), the news term over three bars, the analyst term
+    capped at two calls, and widens the band by the implied earnings move only inside the horizon;
+  - stooq's CSV is read from its published shape (N/D rows skipped), the real index replaces the fund's
+    reading and a yield reads in basis points, a failed request falls back to the funds and is not retried
+    for five minutes, and demo data never asks stooq;
+  - before the open the readings are the starting scenario and once trading they are not; a factor switched
+    off leaves the model; the setup is cached for two minutes and the cached copy is not shared;
+  - a fake ChatGPT and a fake Claude get a prompt naming every input, and their answers are checked: paths
+    padded to the horizon and clipped, unknown variables dropped, an unusable strategy replaced, risks that
+    are not strings dropped; ChatGPT's real client sends the key only to api.openai.com, asks for JSON,
+    records the model in `ai_usage`, shares the daily limit with Claude, and never shows the key in an
+    error;
+  - shares and shorts are valued at the scenario's percentiles exactly and mirror each other; a bull call
+    spread is built from the demo chain with an expiration past the horizon; the ranking numbers every
+    strategy, marks the AI's pick, and prefers the bearish side under a falling scenario; bad kinds and
+    quantities are refused; the feature flag switches the routes off;
+  - the widget's helpers are tested under Node, and in Chromium the widget lists the factors, remodels as a
+    value changes, asks a fake ChatGPT and shows its scenario, applies its settings, sizes a spread under the
+    AI's scenario and ranks every strategy.
+
+  Not checked against the real services, which this build environment cannot reach: stooq.com's quotes
+  and OpenAI's API are written to their published formats.
 - 2.11 (news search):
   - Google News search feeds and Brave results are read from their published shapes; a feed carrying a
     DOCTYPE or ENTITY declaration anywhere is refused, a feed that does not read is a failed check (never
@@ -1126,6 +1220,9 @@ tradeassist/
   intraday.py              bars within the day (Tradier, Robinhood, demo), kept in SQLite, grouped by hour/week/month (2.12)
   similar.py               similar patterns in the stock's own past, and what followed them (2.12)
   chartview.py             the interactive chart: bars, structure, tops and bottoms, news, similar, outlook (2.12)
+  factors.py               what-if factors: proxy funds and stooq readings, betas, the model's arithmetic (2.13)
+  whatif.py                what-if analysis: the setup, the model, the AI's scenario, a position and its ranking (2.13)
+  chatgpt.py               ChatGPT (OpenAI Chat Completions) sharing the AI daily limit (2.13)
   morning_email.py         the plan rendered as the 7:00 email, text and HTML (2.8)
   mailer.py                SMTP over verified STARTTLS; the password scrubbed from every error (2.8)
   background.py            the shared background-job slot used by Trade ideas and the Morning plan (2.8)
@@ -1139,10 +1236,11 @@ tradeassist/
   static/                  the web page: flow.js (2.5 pure helpers, tested under Node), app.js classic screens,
                            v2.js version 2 screens, lab.js 2.4 screens, decide.js Today and Decide (2.5),
                            trades.js My trades (2.6), ideas.js Trade ideas (2.7), morning.js Morning plan (2.8),
-                           live.js Live news (2.10), chart.js the interactive chart (2.12), lwcharts.js
-                           TradingView Lightweight Charts 5.2.1 (Apache-2.0; LICENSE-lightweight-charts.txt)
+                           live.js Live news (2.10), chart.js the interactive chart (2.12), whatif.js the
+                           what-if widget (2.13), lwcharts.js TradingView Lightweight Charts 5.2.1
+                           (Apache-2.0; LICENSE-lightweight-charts.txt)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
-docs/IMPROVEMENTS.md       the 2.1.1 to 2.12 engineering record: defects found, tests, reports
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.13 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```

@@ -602,7 +602,15 @@ function renderAnalysis(d) {
   // 2.12: the interactive chart when its feature is on (and its library loaded), else the fixed chart.
   const tech = featureOn("analyze_interactive") && typeof interactiveChart === "function" && window.LightweightCharts
     ? interactiveChart(d.symbol) : techPanel(d.symbol);
-  frag.append(tech.panel, ...(tech.extras || []), tech.structure);
+  frag.append(tech.panel);
+  // 2.13: the what-if widget and the position under its scenario, between the chart and its readings.
+  if (tech.setLines && featureOn("what_if") && typeof whatIfWidget === "function") {
+    const wi = whatIfWidget(d.symbol, tech);
+    frag.append(wi.widget, wi.position);
+    const chartDispose = CHART_ACTIVE && CHART_ACTIVE.dispose;
+    if (chartDispose) CHART_ACTIVE = { dispose: () => { chartDispose(); wi.dispose(); } };   // the widget goes with its chart
+  }
+  frag.append(...(tech.extras || []), tech.structure);
   return frag;
 }
 

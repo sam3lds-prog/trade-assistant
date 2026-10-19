@@ -79,7 +79,9 @@ function interactiveChart(symbol) {
   if (CHART_ACTIVE) { CHART_ACTIVE.dispose(); CHART_ACTIVE = null; }
   const state_ = { range: "6m", group: null, start: "", end: "", show: { ...CHART_DEFAULTS }, swing: "2",
     data: null, sim: null, selecting: false, selection: null, userWindow: false, request: 0, minCorr: 0.75, horizon: null, matchesShown: 5,
-    view: null };                              // the logical range to show after a draw, when not the range
+    view: null,                                // the logical range to show after a draw, when not the range
+    lines: {} };                               // 2.13: lines other widgets draw on the chart (the what-if paths), by key
+  const listeners = [];                        // 2.13: told when the data or the pattern search changes
   const chartBox = el("div", { class: "lw-chart" });
   const readout = el("div", { class: "small muted lw-readout", text: "Hover the chart for the bar's figures. Drag to pan, scroll to zoom." });
   const info = el("div", { class: "small lw-info" });
@@ -121,7 +123,7 @@ function interactiveChart(symbol) {
   swingSel.addEventListener("change", () => { state_.swing = swingSel.value; load(); loadStructure(); });
 
   // --- the chart ---------------------------------------------------------------------------------------------
-  let chart = null, series = {}, markers = null, priceLines = [], overlaySeries = [], selectionBox = null;
+  let chart = null, series = {}, markers = null, priceLines = [], overlaySeries = [], selectionBox = null, lineSeries = [];
   const colors = () => chartColors();
   function makeChart() {
     if (chart) { chart.remove(); chart = null; }
@@ -241,8 +243,9 @@ function interactiveChart(symbol) {
       chart.panes()[pane].setHeight(80);
       pane += 1;
     }
-    // The pattern overlay.
+    // The pattern overlay, then the lines other widgets asked for.
     if (show.overlay && state_.sim) drawOverlay();
+    drawLines();
     // Show the range the request covered, or the view asked for. The range is set in the same tick the chart
     // is built, which the library lays out exactly; a range set on a chart already drawn is applied a frame
     // late and measured against the old data edge, so any change of view redraws the chart.
@@ -261,6 +264,57 @@ function interactiveChart(symbol) {
       s.setData(ln.points);
       overlaySeries.push(s);
     }
+  }
+  function drawLines() {
+    for (const s of lineSeries) { try { chart.removeSeries(s); } catch (e) { /* already gone */ } }
+    lineSeries = [];
+    if (!chart) return;
+    for (const ln of Object.values(state_.lines)) {
+      // Times unique and ascending: the library's production build does not check and mis-indexes otherwise.
+      const pts = (ln.points || []).filter(p => p && isNum(p.time) && isNum(p.value)).sort((a, b) => a.time - b.time)
+        .filter((p, i, arr) => i === 0 || p.time > arr[i - 1].time);
+      if (pts.length < 2) continue;
+      const s = chart.addSeries(lib.LineSeries, { color: ln.color, lineWidth: ln.width || 2, lineStyle: ln.style || 0, priceLineVisible: false,
+        lastValueVisible: !!ln.title, crosshairMarkerVisible: false, title: ln.title || "" });
+      s.setData(pts);
+      lineSeries.push(s);
+    }
+  }
+  // 2.13: draw (or replace) a set of lines by key; `lines` is [{key, points:[{time,value}], color, width, style, title}].
+  // Keys that start with `prefix` and are not in the new set are removed. Drawn in place, without a rebuild.
+  function setLines(prefix, lines) {
+    for (const k of Object.keys(state_.lines)) if (k.startsWith(prefix)) delete state_.lines[k];
+    for (const ln of lines || []) state_.lines[ln.key] = ln;
+    if (chart && state_.data) drawLines();
+  }
+  function notify(what) { for (const fn of listeners) { try { fn(what, chartArgs()); } catch (e) { console.error(e); } } }
+  // 2.13: the chart's current question, for widgets that ask the server about the same window.
+  function chartArgs() {
+    const d = state_.data;
+    if (!d) return null;
+    const out = { symbol, range: state_.range, group: state_.group || d.group.key, start: state_.range === "custom" ? state_.start : null,
+      end: state_.range === "custom" ? state_.end || null : null, min_correlation: state_.minCorr, horizon: state_.horizon,
+      window_start: null, window_end: null, last_close: null, last_time: null, future_times: [], group_kind: d.group.kind, group_label: d.group.label };
+    const sel = state_.sim ? [state_.sim.window.start, state_.sim.window.end] : state_.userWindow && state_.selection && state_.selection.length === 2
+      ? [state_.selection[0] + d.window.offset, state_.selection[1] + d.window.offset] : null;
+    if (sel) { out.window_start = sel[0]; out.window_end = sel[1]; }
+    // The path starts at the window's last bar (a custom range can end in the past), never the newest bar loaded.
+    const endBar = bar((sel ? sel[1] : d.window.end) - d.window.offset);
+    if (endBar) { out.last_close = endBar.close; out.last_time = endBar.tl; }
+    out.future_times = state_.sim && state_.sim.future_times ? state_.sim.future_times : d.future_times || [];
+    out.sim = state_.sim;
+    return out;
+  }
+  // 2.13: make sure `ahead` bars past the window's end are on the screen.
+  function showAhead(ahead) {
+    if (!chart || !state_.data) return;
+    const d = state_.data;
+    const endIdx = (state_.sim ? state_.sim.window.end : d.window.end) - d.window.offset;
+    const vr = chart.timeScale().getVisibleLogicalRange();
+    if (vr && vr.to >= endIdx + ahead + 1) return;
+    const width = vr ? vr.to - vr.from : 130;
+    const to = endIdx + ahead + 2;
+    showView(Math.min(endIdx - 10, to - width), to);
   }
   function showProjection(a, b) {
     // Show the window and what the matches did next, projected past the last bar.
@@ -343,12 +397,14 @@ function interactiveChart(symbol) {
       const d = await api(`/v2/chart/${encodeURIComponent(symbol)}?${query()}`);
       if (mine !== state_.request || !panel.isConnected) return;    // superseded, or the screen was replaced meanwhile
       state_.data = d; state_.sim = null; state_.selection = null; state_.userWindow = false; state_.view = null;
+      state_.lines = {};                         // lines other widgets drew were for the old bars; they redraw their own
       state_.group = d.group.key;
       groupSel.replaceChildren(...CHART_GROUPS.filter(([v]) => d.range.groups.includes(v)).map(([v, t]) => el("option", { value: v, text: t, selected: v === d.group.key })));
       toggles.find(t => t.dataset.toggle === "vwap").classList.toggle("hidden", d.group.kind !== "intraday");
       draw();
       renderNotes(d);
       renderTurns(d);
+      notify("load");
       patternBox.replaceChildren(el("h3", { text: "Similar patterns" }), el("p", { class: "muted small", text: `Press Find similar patterns to search this stock's ${d.history_bars.toLocaleString()} ${d.group.label} bars for the shape on the screen.` }));
       outlookBox.replaceChildren(el("h3", { text: "Possible outcomes" }), el("p", { class: "muted small", text: "The outcomes are read from the pattern search: press Find similar patterns." }));
     } catch (e) {
@@ -409,6 +465,7 @@ function interactiveChart(symbol) {
       state_.sim = sim; state_.selection = [a, b];
       renderPatterns(sim); renderOutlook(o, sim);
       showProjection(a, b);
+      notify("similar");
     } catch (e) { patternBox.replaceChildren(el("h3", { text: "Similar patterns" }), el("p", { class: "error", text: e.message })); }
     finally { findBtn.disabled = false; }
   }
@@ -463,5 +520,6 @@ function interactiveChart(symbol) {
   load();
   loadStructure();
   CHART_ACTIVE = { dispose };
-  return { panel, extras: [outlookBox, patternBox, turnBox], structure: structBox, dispose };
+  return { panel, extras: [outlookBox, patternBox, turnBox], structure: structBox, dispose,
+    setLines, chartArgs, showAhead, subscribe: fn => { listeners.push(fn); }, redraw: () => { if (state_.data) draw(); } };
 }

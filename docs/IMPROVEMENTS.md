@@ -1180,3 +1180,84 @@ An independent reviewer read the change and ran reproductions. It reported 16 fi
 | C16 | A swing-size change left the structure panel on the old size; unused range config; a searched window stuck for later presses | Low | both reload; the config is gone; each press reads the screen afresh unless a window was selected | — |
 
 Its second look confirmed all sixteen and found two more, both fixed: the `asked_from` column had been added to migration 15 after that migration could have run (now migration 16), and a series too short for the window plus its after-bars said "lower the bar" when no window was eligible at all (it now says the history is too short, and `eligible_windows` is reported).
+
+## 2.13: what-if analysis
+
+**The request.** A widget on the chart to do what-if analysis: besides the similar patterns, pick other variables
+that bear on the outcome (news and press releases, how overseas markets are trading before the open, the 10-year
+yield, Brent, the sector overseas, sector-specific variables, analyst upgrades and downgrades, anything else
+useful), model the outcome on the chart from the best combination, and let the user reconfigure the variables
+and remodel; consult an AI such as ChatGPT with all the data collected and draw its line in another colour; let
+the widget choose or change the pattern; and below the chart pick the best option by the simulation for a
+chosen quantity of shares, shorts or options, with the upside and downside range, a strategy selector with an AI
+first pass and the user's override. Permissions were taken upfront: both ChatGPT (new `OPENAI_API_KEY`) and
+Claude, picked in the widget; ETF proxies plus stooq.com for the real indexes; merge when done.
+
+**What was built.** `factors.py` (the factor set, readings from the proxy funds and stooq, betas, the model's
+arithmetic), `chatgpt.py` (OpenAI Chat Completions sharing the Anthropic client's daily accounting),
+`whatif.py` (the setup, the model, the AI prompt and the reading of its answer, the position and the ranking),
+five `/v2/whatif` routes behind `what_if`, `static/whatif.js` with hooks in `chart.js` (`setLines`, `chartArgs`,
+`subscribe`, `showAhead`), settings `OPENAI_API_KEY`, `OPENAI_MODEL`, `STOOQ_QUOTES`, `FEATURE_WHAT_IF`.
+
+**Decisions.**
+
+- *One beta at a time.* A joint regression of eight correlated factors on 250 days is noise with the wrong
+  signs; a one-at-a-time beta is honest about what each factor alone has carried, and the widget says that
+  the factors overlap. The model adds them because the user asked for a model they can steer, not for a
+  forecast; every term is listed with its size.
+- *Readings before and after the open.* Overnight readings are what the stock has yet to price, so before
+  9:30 New York they are the starting scenario; once the stock trades (or after the close) they are already
+  in the price and the scenario starts at no further move, with the readings shown for reference. The status
+  line says which it is.
+- *Real indexes when free, funds otherwise.* stooq.com's CSV quotes need no key but are unofficial and about
+  15 minutes late; one request covers every symbol, failures fall back to the funds for five minutes, and
+  demo data never asks (the test suite must not reach the network). Each reading names its source.
+- *The AI answers as JSON and is checked.* Paths are padded and clipped, the band is made at least the path,
+  variables are limited to known keys, a strategy outside the list is replaced, and the prompt says the
+  model's path is one input, not the answer. ChatGPT and Claude share the one daily limit through the same
+  `ai_usage` reservation; a ChatGPT row records the OpenAI model.
+- *The position is valued under the scenario, not at expiry, from the live price.* Each strategy is built by the
+  existing builder and valued by the existing simulator at the horizon date across a lognormal range of prices
+  around the scenario's expected move with the band's spread, applied from the live quote (the chart's window
+  can end in the past; the chain and the simulator's axis are laid out around the live price); the chance of a profit is the weight of prices with a
+  positive P&L. The ranking's score is the expected result per dollar at risk, with "the most it can lose"
+  as the risk for defined-risk positions and the worse tail loss otherwise, and the page says a rank is not
+  a recommendation.
+
+**Tests.** `tests/test_whatif.py` (17: betas on a synthetic stock, the model's arithmetic, stooq parsing,
+fallback and the demo rule, readings and betas on demo data, the setup's defaults and cache, the model's
+response to a change and an exclusion, a fake ChatGPT's and a fake Claude's prompts and checked answers, the
+real ChatGPT client against a fake session with the shared limit and a redacted key, shares and shorts at the
+percentiles, a spread built from the chain and the ranking, the API and its flag, the page's helpers under
+Node), `tests/test_static_assets.py::test_analyze_has_a_what_if_widget_...` (Chromium: the rows, remodelling,
+the fake AI's scenario drawn and applied, the position under it, the ranking) and `test_api.py`'s write list.
+
+### The independent review of 2.13
+
+An independent reviewer read the change and ran reproductions. It reported 18 findings; all were fixed, and a
+19th (found by the full suite) with them.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| W1 | The position and the ranking were anchored at the chart window's close while the chain and the simulator's axis sit at the live price: with a window that ended earlier every option was valued at its maximum loss | High | the server always values from the live quote and the API no longer takes a price; the panel says "from the last price" | `test_shares_and_shorts_...` (the live quote by default), the API test (a sent price is refused) |
+| W2 | Earnings days were calendar days divided by trading bars, so a report a week out missed a one-week horizon | Medium | `trading_days` by `np.busday_count`, then bars | `test_the_setup_reads_every_factor_...` |
+| W3 | The yield's proxy TLT has about twice the sensitivity the 0.08 scale said; the VIX beta was fitted on VIXY (half the index's move) but applied to the index | Medium | IEF with scale 0.075 (its duration); `index_scale` 0.5 for the VIX in both directions | `test_readings_use_the_real_index_...` |
+| W4 | The stooq cache was bypassed whenever a symbol came back N/D, so every setup hit stooq; a daily-limit page read as "no error" | Medium | cached by the set asked; a reply with no quotes is a failure | `test_stooq_quotes_are_read_...` |
+| W5 | Lines stayed on the chart after it loaded new bars; the AI's line was never tied to its window or horizon | Medium | the chart clears foreign lines on load; the AI's scenario is keyed by window and horizon and cleared when they change | Chromium test |
+| W6 | Every reload wiped the user's scenario | Low | values survive a horizon or peers change; a new grouping, a refresh or the reset button start over | — |
+| W7 | The news row called a snap-back record "moves with news kept going", and the model used it as a continuation edge | Low | the record is used only when it is the with-news record; the label says which; "latest N of 36 hours" | — |
+| W8 | `risk_basis` said "the loss at the worse tail" when the cost had won | Low | the cost is no longer a floor; the text says what stood in | `test_shares_and_shorts_...` |
+| W9 | stooq readings are from the open while the funds' are against the previous close | Low | labelled "from the open" | — |
+| W10 | Peers were sent to the data source unchecked | Low | each peer must read as a ticker (`PEER_TICKER`); the query is capped | the API test |
+| W11 | Stale replies to the model, the position and the AI could land after a new question | Low | pending counters bumped on load; an AI reply for a changed chart is dropped with a note | — |
+| W12 | "Back to today's readings" restored zeros after the open | Low | "Reset to the defaults" | — |
+| W13 | The analysts note said one range per call; the code uses half | Low | note corrected | — |
+| W14 | A test assertion that could not fail | Low | parenthesised | — |
+| W15 | The widget's timers outlived its chart | Low | disposed with the chart | — |
+| W16 | The prompt named the broker | Low | only "demo data, made up" is said of the source | `test_the_ai_is_sent_every_input_...` |
+| W17 | Without a window, the pattern term came from a search of the whole range that the chart does not show | Low | unavailable until a window was given; the row says to press Find similar patterns | `test_the_setup_reads_every_factor_...` |
+| W18 | The event move looked at four expirations only | Low | the lab's default eight | — |
+| W19 | On a custom range ending in the past the model's path started at the newest bar loaded and ran back to June: the library threw "Value is null" | Medium | the path starts at the window's last bar; lines are sorted and de-duplicated by time | the 2.12 Chromium test (page errors) |
+
+Found alongside: `test_the_news_sits_on_the_bars_of_the_range` failed on a Monday before the open, because news
+since the newest bar (a weekend's) fell past the range's end. News since the newest bar now sits on that bar.

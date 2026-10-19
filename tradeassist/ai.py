@@ -260,9 +260,10 @@ class AIClient:
                 "remaining_today": max(s.ai_daily_requests - used["requests"], 0), "last_error": self._last_error,
                 "provider": "Anthropic Messages API"}
 
-    def _reserve(self, purpose: str) -> int:
+    def _reserve(self, purpose: str, model: str | None = None) -> int:
         """Count a call against today's limit before it is made, so requests that overlap cannot pass
-        the limit together. The row is filled in when the call ends."""
+        the limit together. The row is filled in when the call ends. `model` names another model when the
+        call goes elsewhere (ChatGPT, 2.13, shares this limit)."""
         with _reserve_lock:
             if self.used_today()["requests"] >= self.settings.ai_daily_requests:
                 raise AIError(f"Today's AI limit of {self.settings.ai_daily_requests} requests is used up "
@@ -270,7 +271,7 @@ class AIClient:
             with self.db.tx() as cur:
                 cur.execute("INSERT INTO ai_usage (at, day, purpose, model, ok, error) VALUES (?, ?, ?, ?, 0, ?)",
                             (datetime.now(timezone.utc).isoformat(timespec="seconds"), self._today(), purpose,
-                             self.settings.ai_model, IN_PROGRESS))
+                             model or self.settings.ai_model, IN_PROGRESS))
                 return int(cur.lastrowid)
 
     def _settle(self, row: int, usage: dict[str, int], ok: bool, error: str | None = None) -> None:

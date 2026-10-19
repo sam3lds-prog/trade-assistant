@@ -44,6 +44,8 @@ V2_WRITES = {
     "/v2/ai/market-brief",
     "/v2/ai/brief/{symbol}",
     "/v2/ai/tone",
+    # 2.13: the what-if widget. Models only; /ask calls the AI (usage counts); nothing is recorded, no orders.
+    "/v2/whatif/model", "/v2/whatif/ask", "/v2/whatif/position", "/v2/whatif/rank",
 }
 
 THESIS = "Expect a bounce from the low end of the range within three weeks; wrong below the recent low."

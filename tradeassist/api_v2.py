@@ -7,9 +7,9 @@ it (see versions.py). Areas behind a feature flag answer 404 when the flag is of
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 import logging
@@ -290,6 +290,51 @@ class ReversalOptions(Strict):
     expirations: list[str] | None = Field(None, max_length=6)
     earnings_date: str | None = None
     contracts_to_score: list[ContractRef] | None = Field(None, min_length=1, max_length=8)
+
+
+class ChartArgs(Strict):
+    """Which chart window the what-if (2.13) reads its pattern from: the same arguments as GET /v2/chart."""
+    range: str = Field("6m", max_length=12)
+    group: str | None = Field(None, max_length=4)
+    start: str | None = Field(None, max_length=32)
+    end: str | None = Field(None, max_length=32)
+    window_start: int | None = Field(None, ge=0)
+    window_end: int | None = Field(None, ge=0)
+    min_correlation: float = Field(0.75, ge=0.3, le=0.99)
+
+
+class WhatIfModel(ChartArgs):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    horizon: int = Field(..., ge=1, le=400)
+    scenario: dict[str, float] = Field(default_factory=dict)
+    include: dict[str, bool] = Field(default_factory=dict)
+    peers: list[Annotated[str, Field(max_length=12)]] = Field(default_factory=list, max_length=6)
+
+
+class WhatIfAsk(WhatIfModel):
+    provider: Literal["chatgpt", "claude"] = "chatgpt"
+
+
+class WhatIfPosition(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    kind: str = Field(..., min_length=1, max_length=24)
+    quantity: int = Field(100, ge=1, le=100000)
+    expected_pct: float = Field(..., ge=-90, le=300)
+    sd_pct: float = Field(..., ge=0, le=200)
+    horizon_bars: int = Field(..., ge=1, le=400)
+    group: str = Field("1d", max_length=4)
+
+
+class WhatIfRank(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    quantity: int = Field(100, ge=1, le=100000)
+    contracts: int | None = Field(None, ge=1, le=100)
+    expected_pct: float = Field(..., ge=-90, le=300)
+    sd_pct: float = Field(..., ge=0, le=200)
+    horizon_bars: int = Field(..., ge=1, le=400)
+    group: str = Field("1d", max_length=4)
+    kinds: list[Annotated[str, Field(max_length=24)]] | None = Field(None, max_length=24)
+    ai_pick: str | None = Field(None, max_length=24)
 
 
 class Scenario(Strict):
@@ -1039,6 +1084,63 @@ def build_router(svc: Any) -> APIRouter:
             return clean(briefs.headline_tone(req.symbol))
         except AIError as exc:
             raise ai_error(exc) from exc
+
+    # --- what-if analysis on the chart (2.13): a factor model, an AI scenario, a position under it --------------
+    from .chatgpt import ChatGPT
+    from .whatif import WhatIf
+    chatgpt = svc.chatgpt if getattr(svc, "chatgpt", None) else ChatGPT(svc.settings, ai)
+    whatif = svc.whatif if getattr(svc, "whatif", None) else WhatIf(svc, chart_view, chatgpt=chatgpt)
+    svc.chatgpt, svc.whatif = chatgpt, whatif
+
+    def whatif_call(fn):
+        need("what_if")
+        need("analyze_interactive")
+        try:
+            return clean(fn())
+        except (ChartRequestError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except AIError as exc:
+            raise ai_error(exc) from exc
+
+    def chart_kwargs(req: ChartArgs) -> dict[str, Any]:
+        return {"range_key": req.range, "group": req.group, "start": req.start, "end": req.end,
+                "window_start": req.window_start, "window_end": req.window_end, "min_corr": req.min_correlation}
+
+    @router.get("/whatif/{symbol}")
+    def whatif_setup(symbol: str, range: str = "6m", group: str | None = None, start: str | None = None,
+                     end: str | None = None, window_start: int | None = None, window_end: int | None = None,
+                     horizon: int | None = None, min_correlation: float = 0.75, peers: str = Query("", max_length=120),
+                     refresh: bool = False):
+        """The factors with today's readings and betas, the news, analyst calls, earnings, the pattern's record,
+        and the model at its default settings."""
+        return whatif_call(lambda: whatif.setup(symbol, range_key=range, group=group, start=start, end=end,
+                                                window_start=window_start, window_end=window_end, horizon=horizon,
+                                                min_corr=min_correlation, peers=peers.split(","), refresh=refresh))
+
+    @router.post("/whatif/model")
+    def whatif_model(req: WhatIfModel):
+        """The model again with the settings in the widget. A model, nothing recorded."""
+        return whatif_call(lambda: whatif.model(req.symbol, scenario=req.scenario, include=req.include, horizon=req.horizon,
+                                                peers=req.peers, **chart_kwargs(req)))
+
+    @router.post("/whatif/ask")
+    def whatif_ask(req: WhatIfAsk):
+        """ChatGPT's or Claude's scenario from the same inputs. Calls the AI; usage counts, nothing recorded."""
+        return whatif_call(lambda: whatif.ask_ai(req.symbol, provider=req.provider, scenario=req.scenario, include=req.include,
+                                                 horizon=req.horizon, peers=req.peers, **chart_kwargs(req)))
+
+    @router.post("/whatif/position")
+    def whatif_position(req: WhatIfPosition):
+        """One position (shares, a short, or an option strategy) valued at the horizon under the scenario."""
+        return whatif_call(lambda: whatif.position(req.symbol, kind=req.kind, quantity=req.quantity, expected_pct=req.expected_pct,
+                                                   sd_pct=req.sd_pct, horizon_bars=req.horizon_bars, group=req.group))
+
+    @router.post("/whatif/rank")
+    def whatif_rank(req: WhatIfRank):
+        """Every strategy under the scenario, ranked. Models only; no order is placed."""
+        return whatif_call(lambda: whatif.rank(req.symbol, quantity=req.quantity, contracts=req.contracts, expected_pct=req.expected_pct,
+                                               sd_pct=req.sd_pct, horizon_bars=req.horizon_bars, group=req.group,
+                                               kinds=req.kinds, ai_pick=req.ai_pick))
 
     # --- portfolio risk ------------------------------------------------------------------------
     @router.get("/portfolio/risk")

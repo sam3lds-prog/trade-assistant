@@ -280,6 +280,9 @@ class ChartView:
         t = frame["t"].to_numpy(dtype="int64")
         tl = frame["tl"].to_numpy(dtype="int64")
         lo, hi = int(t[i0]), int(t[i1]) + max(int(g["seconds"]) or 86400, 1)
+        if i1 == len(t) - 1:
+            # The range ends at the newest bar: news since it (a weekend's, a pre-market morning's) sits on that bar.
+            hi = max(hi, int(time.time()))
         span_days = (hi - lo) / 86400
         items: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -356,7 +359,7 @@ class ChartView:
             m["tl_start"], m["tl_end"] = int(tl[m["start"]]), int(tl[m["end"]])
             m["date_start"] = datetime.fromtimestamp(int(t[m["start"]]), NY).isoformat(timespec="minutes")
             m["date_end"] = datetime.fromtimestamp(int(t[m["end"]]), NY).isoformat(timespec="minutes")
-        found["window"].update({"tl_start": int(tl[ws]), "tl_end": int(tl[we])})
+        found["window"].update({"tl_start": int(tl[ws]), "tl_end": int(tl[we]), "last_close": float(frame["close"].iloc[we])})
         found["window_times"] = [int(x) for x in tl[ws:we + 1]]
         found["future_times"] = self._future_times(frame, we, r["group"], len((found.get("overlay") or {}).get("median") or [])
                                                    or max(h for h, _ in similar_engine.HORIZONS.get(r["group"], similar_engine.HORIZONS["1d"])))

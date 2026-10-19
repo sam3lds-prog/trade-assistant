@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -312,7 +313,7 @@ def test_custom_ranges_are_checked_and_honoured(view):
 def test_the_news_sits_on_the_bars_of_the_range(view):
     c = view.chart("AAPL", "1m")
     lo = c["bars"][c["window"]["start"] - c["window"]["offset"]]["t"]
-    hi = c["bars"][c["window"]["end"] - c["window"]["offset"]]["t"] + 3600
+    hi = max(c["bars"][c["window"]["end"] - c["window"]["offset"]]["t"] + 3600, int(time.time()))   # news since the newest bar sits on it
     assert c["news"]["items"], "demo headlines are dated inside the month"
     for n in c["news"]["items"]:
         assert lo <= n["t"] <= hi and n["headline"] and n["tl"] in {b["tl"] for b in c["bars"]}
@@ -330,7 +331,9 @@ def test_similar_takes_the_window_on_the_screen_and_future_times_continue_the_gr
     c = view.chart("AAPL", "6m")
     we = c["window"]["end"]
     sim = view.similar("AAPL", "6m", None, None, None, we - 39, we, min_corr=0.6)
-    assert sim["window"] == {"start": we - 39, "end": we, "bars": 40, "tl_start": sim["window_times"][0], "tl_end": sim["window_times"][-1]}
+    assert sim["window"] == {"start": we - 39, "end": we, "bars": 40, "tl_start": sim["window_times"][0], "tl_end": sim["window_times"][-1],
+                             "last_close": sim["window"]["last_close"]}
+    assert sim["window"]["last_close"] == c["bars"][we - c["window"]["offset"]]["close"]        # 2.13: what the what-if path starts from
     assert len(sim["window_times"]) == 40 and len(sim["future_times"]) == 20
     days = [datetime.fromtimestamp(t, timezone.utc) for t in sim["future_times"]]
     assert all(d.weekday() < 5 for d in days) and days[0] > datetime.fromtimestamp(sim["window_times"][-1], timezone.utc)
