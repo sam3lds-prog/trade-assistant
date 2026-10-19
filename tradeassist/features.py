@@ -30,6 +30,7 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "morning": True,
     "live_news": True,
     "analyze_interactive": True,
+    "what_if": True,
     "options_backtest": False,
 }
 

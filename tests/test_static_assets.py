@@ -22,7 +22,7 @@ import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
 SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js",
-           "lwcharts.js", "chart.js")   # in the order index.html loads them; lwcharts.js is the vendored chart library
+           "lwcharts.js", "chart.js", "whatif.js")   # in the order index.html loads them; lwcharts.js is the vendored chart library
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -86,8 +86,9 @@ def _browser():
 
 
 @contextmanager
-def demo_page(tmp_path, features=None):
-    """The app on demo data in a real Chromium page; yields (page, script errors). `features` overrides flags."""
+def demo_page(tmp_path, features=None, prepare=None):
+    """The app on demo data in a real Chromium page; yields (page, script errors). `features` overrides flags;
+    `prepare(svc)` runs before the app is built (to wire a fake in, say)."""
     import uvicorn
     from playwright.sync_api import sync_playwright
 
@@ -100,6 +101,8 @@ def demo_page(tmp_path, features=None):
     from tradeassist.features import FEATURE_DEFAULTS
     settings = Settings(data_mode="demo", db_path=tmp_path / "t.db", features={**FEATURE_DEFAULTS, **(features or {})})
     svc = TradeAssistant(settings, provider=DemoData(), db=Database(tmp_path / "t.db"))
+    if prepare:
+        prepare(svc)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -530,6 +533,74 @@ def test_analyze_has_an_interactive_chart_with_patterns_and_outcomes(tmp_path):
         if "Go there" in patterns:
             page.locator(".lw-patterns button:text-is('Go there')").first.click()
             page.wait_for_timeout(500)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_position(tmp_path):
+    """2.13: the widget lists the factors with readings and betas, remodels as a value changes (the orange line),
+    asks a (fake) ChatGPT and draws its line in purple, applies its settings, sizes shares and a spread, and ranks
+    every strategy under the scenario."""
+    class FakeGPT:
+        configured = True
+        prompts: list = []
+
+        def status(self):
+            return {"configured": True, "reason": None, "model": "fake-gpt"}
+
+        def ask_json(self, *, purpose, prompt, system, max_tokens):
+            self.prompts.append(prompt)
+            return {"json": {"path_pct": [1, 2, 3, 4, 5], "low_pct": [-1, -1, -1, -1, -1], "high_pct": [3, 5, 7, 9, 11],
+                             "expected_pct": 5, "confidence": 0.6, "variables": {"us_market": 2.0, "news": 0.5},
+                             "include": {"oil_brent": False}, "pattern": {"use": False, "weight": 0, "why": "too few cases"},
+                             "strategy": {"kind": "bull_call_spread", "direction": "up", "why": "capped risk into earnings"},
+                             "rationale": "The market lead and the upgrade carry it.", "risks": ["a probe", "the dollar"]},
+                    "text": "", "usage": {"input_tokens": 100, "output_tokens": 50}, "model": "fake-gpt", "provider": "openai"}
+
+    def prepare(svc):
+        svc.chatgpt = FakeGPT()
+    with demo_page(tmp_path, prepare=prepare) as (page, errors):
+        page.goto(page.base + "#analyze")
+        page.wait_for_selector("button:text-is('Analyze')", timeout=30000)
+        page.click("button:text-is('Analyze')")
+        page.wait_for_selector(".wi-row[data-factor='pattern']", timeout=60000)
+        page.wait_for_selector(".wi-model", timeout=60000)
+        page.wait_for_selector(".wi-ranges", timeout=60000)
+        text = page.inner_text(".wi-panel")
+        for word in ("Japan (Nikkei)", "10-year Treasury yield", "Sector fund (XLK", "News and press releases", "Analyst upgrades",
+                     "Earnings ahead", "Similar patterns", "Model:", "at the horizon", "β"):
+            assert word in text, word
+        assert "demo data, made up" in text
+        before = page.inner_text(".wi-summary")
+        # A bigger market move remodels the line.
+        page.fill("input[aria-label='US market (S&P 500) scenario']", "4")
+        page.wait_for_function("(b) => document.querySelector('.wi-summary').textContent !== b", arg=before, timeout=20000)
+        assert "US market (S&P 500) +" in page.inner_text(".wi-summary")
+        # The AI's scenario, drawn and applied.
+        page.click("button:text-is('Ask ChatGPT')")
+        page.wait_for_selector("text=The market lead and the upgrade carry it.", timeout=30000)
+        ai = page.inner_text(".wi-ai")
+        assert "ChatGPT (fake-gpt): +5.00%" in ai and "Risk: a probe" in ai and "Bull call spread" in ai and "us_market +2.00" in ai
+        assert FakeGPT.prompts and "FACTORS" in FakeGPT.prompts[0] and "THE APP'S MODEL" in FakeGPT.prompts[0]
+        page.click("button:text-is(\"Use ChatGPT's settings\")")
+        page.wait_for_function("document.querySelector(\"input[aria-label='US market (S&P 500) scenario']\").value === '2'", timeout=20000)
+        assert not page.is_checked("input[aria-label='Include Oil (Brent)']")
+        page.wait_for_selector(".wi-pos-head:has-text('Bull call spread')", timeout=30000)
+        assert page.locator("select[aria-label='Quantity']").count() == 0
+        assert page.input_value("input[aria-label='Quantity']") == "1"                 # 100 shares became one contract
+        # The position under the AI's scenario, then every strategy ranked.
+        page.select_option("select[aria-label='Scenario for the position']", "ai")
+        page.wait_for_selector(".wi-pos-head:has-text(\"under ChatGPT's scenario\")", timeout=30000)
+        pos = page.inner_text(".wi-position")
+        assert "Downside (10th pct)" in pos and "Chance of a profit" in pos and "no order is placed" in pos
+        page.click("button:text-is('Rank every strategy')")
+        page.wait_for_selector("text=Every strategy under ChatGPT's scenario", timeout=60000)
+        rank = page.inner_text(".wi-pos-panel")
+        assert "Best by the model:" in rank and "ChatGPT's pick: Bull call spread" in rank and "Iron condor" in rank
+        page.locator(".wi-pos-panel tbody tr").first.click()
+        page.wait_for_timeout(800)
+        # The lines are on the chart: the model's and the AI's.
+        assert page.evaluate("document.querySelectorAll('.lw-chart td canvas').length") > 0
     assert errors == []
 
 

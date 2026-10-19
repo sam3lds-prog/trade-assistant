@@ -18,6 +18,34 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.13.0
+
+**What-if analysis on the chart.** A widget under the interactive chart on Analyze a stock, and a position
+panel under it.
+
+- **The factors.** Japan (Nikkei), Europe (DAX), China (Hang Seng), the US market, the 10-year yield (basis
+  points), Brent, the dollar, the VIX, the stock's sector fund and foreign peers you name. Each with today's
+  reading (the real index from stooq.com's free quotes when it answers, else the fund that tracks it through
+  your data source: EWJ, VGK, FXI, IEF, BNO, UUP, VIXY), this stock's beta to it over the last year with the
+  correlation, a scenario value and a tick to include it. Then the news of the last 36 hours and its tone,
+  analyst upgrades and downgrades in a week of headlines, earnings ahead, and the similar-pattern path with a
+  weight. Before the open the readings are the starting scenario; once the stock trades they are already in
+  its price and the scenario starts at no further move.
+- **The model.** Beta times scenario over the factors ticked, plus the pattern's median path at its weight,
+  plus news and analyst terms, with a 10-90 band from the stock's own realised volatility (widened by the
+  implied earnings move inside the horizon). Drawn in orange on the chart and redrawn as you type.
+- **An AI's scenario.** ChatGPT (`OPENAI_API_KEY`, new) or Claude (`ANTHROPIC_API_KEY`), picked in the widget,
+  gets every input and the model's path and answers with its own path and band (purple, dashed), confidence,
+  rationale, risks, the settings it would use, the pattern's weight and a strategy. **Use its settings** applies
+  them. Both count against `AI_DAILY_REQUESTS`; requests are billed to your own keys.
+- **A position under the scenario.** Shares, a short, or any option strategy from the builder, for a quantity,
+  valued at the horizon from the live price across the scenario's range of prices: P&L at the 10th, 50th and 90th percentiles, the
+  expected result, the chance of a profit, the most it can lose, the cost, breakevens and legs. **Rank every
+  strategy** values all eighteen, marks the best and the AI's pick, and a click sizes one.
+
+New settings: `OPENAI_API_KEY`, `OPENAI_MODEL` (gpt-4.1-mini), `STOOQ_QUOTES` (1), `FEATURE_WHAT_IF` (1). No
+migration. Models only: nothing here places an order.
+
 ## 2.12.0
 
 **Analyze a stock, interactive.** The chart at the foot of Analyze a stock is new.

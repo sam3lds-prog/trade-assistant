@@ -102,6 +102,11 @@ class Settings:
     ai_model: str = "claude-sonnet-5-5"
     ai_web_search: bool = True
     ai_daily_requests: int = 40
+    # 2.13: ChatGPT for the what-if widget, sharing the daily limit above. The key never leaves the server.
+    openai_api_key: str = field(default="", repr=False)
+    openai_model: str = "gpt-4.1-mini"
+    # 2.13: real overseas indexes, yields and oil from stooq.com's free quotes (unofficial; funds are used otherwise).
+    stooq_quotes: bool = True
     finnhub_api_key: str = field(default="", repr=False)
 
     # Robinhood data connection (DATA_MODE=robinhood)
@@ -207,6 +212,9 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         ai_model=(os.getenv("AI_MODEL") or "").strip() or "claude-sonnet-5-5",
         ai_web_search=(os.getenv("AI_WEB_SEARCH") or "1").strip().lower() not in ("0", "false", "no", "off"),
         ai_daily_requests=max(_int("AI_DAILY_REQUESTS", 40), 0),
+        openai_api_key=_clean_token(os.getenv("OPENAI_API_KEY")),
+        openai_model=(os.getenv("OPENAI_MODEL") or "").strip() or "gpt-4.1-mini",
+        stooq_quotes=_flag("STOOQ_QUOTES", True),
         finnhub_api_key=_clean_token(os.getenv("FINNHUB_API_KEY")),
         watchlist=watchlist,
         robinhood_callback_port=_int("ROBINHOOD_CALLBACK_PORT", 8421),
