@@ -18,6 +18,30 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.16.0
+
+**Live news: the five steps and the replay. News-to-trade intelligence, and the evidence on whether a sub-second
+feed is worth paying for.**
+
+- **The five steps.** Every item that opens a signal is now judged on the quote in hand, at the first price and at
+  each later check: **Detected** (the kind of announcement, from RTPR's event type, the 8-K item codes or the
+  headline, with a severity; major at 60), **Tradable** (price, spread, a halt suspected when a liquid stock has not
+  printed in 90 seconds of regular hours, a stale quote, under $5, too thin, or the market closed), **Effect** (the
+  way the news should push the price, how far such news usually moves a stock, and whether the move is pinned,
+  drifts, fades or is mixed after its first minute), **Priced in** (the move already made as a share of the usual
+  one, from the app's first quote in the session or from the last close outside it) and the **Signal**: enter, wait
+  or pass, with the reason written out. Pills on each opportunity and on the watching list; the full text under
+  *The five steps in full*. The feed table shows each item's kind.
+- **The replay.** From the trade prints around each headline the feed collected (or events typed in), what a
+  marketable order would have met 100 ms, 500 ms, 1 s, 5 s and 30 s after the app received it, after the feed's
+  latency, half the spread (estimated from the prints, or set), slippage and any halt, and what the trade made held
+  to a minute, five, fifteen, thirty, an hour and the close. Two verdicts: whether sub-second entry beat entry at
+  30 seconds by enough to pay for a feed, and whether a second leg has been there to take; a table by kind of news.
+  Prints are stamped to the second, so the two sub-second rows are measured at the next whole second and the
+  screen says so. The record feeds the fifth step.
+- Tradier gives about five days of prints; Robinhood uses its Tradier fallback; demo prints are made up.
+- Migration 18: the `news_replays` table and `live_signals.intel_json`.
+
 ## 2.15.0
 
 **Opportunities end to end: the morning ranked, news digests, budget splits across stocks, Analyze opportunity, and

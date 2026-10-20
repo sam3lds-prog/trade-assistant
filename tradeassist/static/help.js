@@ -18,6 +18,8 @@ const HELP = {
   live: { lead: "Stock-moving news as it arrives, the price's answer, and every so often a ranked digest of the opportunities the news has made.",
     items: [
       ["Start listening", "Press releases (RTPR), 8-K filings (SEC) and headlines (Finnhub), as they arrive. Each one's stock is watched for a few minutes; when the price confirms the news, it becomes an opportunity with a trade card."],
+      ["The five steps", "Each item on a stock is judged on the quote in hand: what kind of announcement it is and how major; whether the stock can be traded right now (price, spread, a halt suspected when a liquid stock has not printed in a minute and a half); the way the news should push it and what such moves do after their first minute; how much of the usual move is already in the price; and the signal: enter, wait or pass, with the reason."],
+      ["The replay", "What price an order could really have got 100 ms to 30 s after each headline the feed collected, from the trade prints, after latency, spread, slippage and halts; and whether a second leg was there to take. Its record feeds the fifth step."],
       ["The digest", "Every 15, 30 or 60 minutes (or over the whole session so far) the confirmed news and the movers with news found are ranked as day trades, each scored on the reaction's size, speed, tone, volume and the rest-of-the-day record."],
       ["Set budget", "Split money across the digest's best with the blend optimizer, and take one or the blend to Analyze opportunity or to paper trading."],
       ["Why is it moving?", "Stocks that moved with nothing in the feed are searched for news; a big move with no news found is flagged."],
@@ -92,6 +94,7 @@ const HELP_BITS = {
   fill: "How paper orders fill. Realistic: shares cross the spread, an option waits for the ask to reach its limit. Conservative: options buy at the ask at once. Midpoint: everything at the midpoint (optimistic).",
   rotate: "Automated portfolios sell a position whose opportunity has faded when a fresher one scores at least 15 points higher.",
   replay: "Runs a stored list over a past horizon on price history: entries at the open of the first bar after the run (the next session's open on daily bars), stops and targets on bars, options valued by the model.",
+  newsreplay: "From the trade prints around each headline: the price a marketable order would have met 100 ms, 500 ms, 1 s, 5 s and 30 s after the app received it (feed latency, half the spread, slippage and halts paid), and what the trade made held to each horizon. Prints are stamped to the second, so the two sub-second rows are measured at the next whole second. The record feeds each item's fifth step.",
 };
 
 let INFO_UID = 0;

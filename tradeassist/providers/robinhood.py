@@ -714,6 +714,23 @@ class RobinhoodData:
         return {"1m": 0, "5m": 7, "note": "Robinhood gives about a week of 5-minute bars; add a Tradier token to "
                                           ".env for 40 days."}
 
+    # --- trade prints (2.16: the news replay) -----------------------------
+    def tick_reach(self) -> dict[str, Any]:
+        """Trade-by-trade prints come from Tradier's timesales when a token is set; Robinhood's tools give bars,
+        never prints."""
+        fallback = getattr(self.history_fallback, "tick_reach", None)
+        if callable(fallback):
+            return fallback()
+        return {"days": 0, "resolution_s": None,
+                "note": "Robinhood gives no trade prints; add a Tradier token to .env to replay news."}
+
+    def ticks(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+        fallback = getattr(self.history_fallback, "ticks", None)
+        if callable(fallback):
+            return fallback(symbol, start, end)
+        raise DataError("Robinhood gives no trade prints; the news replay needs a Tradier token (TRADIER_LIVE_TOKEN "
+                        "or TRADIER_SANDBOX_TOKEN) in .env")
+
     def intraday(self, symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
         """5-minute bars of the last week from Robinhood's price history, with their times kept; Tradier's
         timesales instead when a token is set, since they reach further back."""

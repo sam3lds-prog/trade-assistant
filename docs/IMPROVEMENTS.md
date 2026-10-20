@@ -1490,3 +1490,60 @@ decision recorded above and in V2.md.
 | X19 | With `FEATURE_OPPORTUNITY_BLEND=0` the Morning plan and Live news still offered Set budget | Low | hidden with the flag (the card's "Add to the blend" too); `/v2/prefs` serves the morning settings and the digest is part of Live news (behind `FEATURE_LIVE_NEWS`), so they stay | Chromium |
 | X20 | Smaller paper defects: an expired option settled at the next day's price; any text was accepted as an expiration; a missing quote left positions open in a closed portfolio; the replay chart was never disposed | Low | settles at the expiration session's close (16:00 or an early close); a date is required; the end closes at the last valuation, said so; disposed before the next replay | `test_an_expired_option_settles_on_its_expiration_days_close`, `test_the_end_closes_at_the_last_valuation_...` |
 | X21 | Docs: buying power, the digest "while Live news is listening", replay entries, each trade's horizon and drift, "within your limits" | Low | V2.md, README and the release notes describe the code as it now is | — |
+
+## 2.16: the five steps on Live news, and the news replay
+
+**The question.** Whether to pay for a sub-second news feed, and whether the trade worth building is the first
+second or the second leg. The answer needs two things the app did not have: a judgement of each item that runs
+beside the price watch (what the news is, whether the stock is tradable now, which way it should push, how much is
+already in the price) and a measurement of what price an order could really have got after a headline.
+
+**Design.**
+
+- `newsintel.py` is pure arithmetic on text and quotes (`classify`, `tradability`, `priced_in`, `second_leg`,
+  `assess`), so every rule is tested alone. The kinds of news are a table with a direction, a typical move, a
+  persistence and a severity; the headline rules are tried sharpest first; the sources' own words (RTPR's event type,
+  the 8-K item codes) come before the headline, and RTPR's direction before the kind's.
+- The assessment is stored on the signal (`live_signals.intel_json`, migration 18) at the first price and at every
+  later check, from the quote the check already holds: no extra request, and a failure in it never stops a check.
+  The price the feed judged with is passed in, because on demo data the quote does not carry the made-up move.
+- `newsreplay.py` measures executable prices from trade prints, not bars: the fill is the first print certainly not
+  earlier than `published + latency + offset` (the next whole second on second-stamped prints, said so on the row and
+  in a verdict), paying half the spread (Roll's measure on the half hour before the headline, or set) plus slippage
+  each way; a gap with no prints in regular hours is a halt and an order sent into it fills at the reopening. Each
+  event is traded the way the news should push it, decided before the price moved, never the way the price went.
+- The replay runs as the app's one-job background pattern (`OneJob`), keeps a row per event (`news_replays`, 60
+  days, a re-run replaces an event's rows) and the summary in `kv_cache`; `record_for(kind)` feeds the live fifth
+  step, so the screen's own measurements inform its signals.
+- Prints come from Tradier's timesales (`interval=tick`, `session_filter=all`, about five days); Robinhood through
+  its Tradier fallback, else a plain refusal; demo prints are made up around the last close for any moment, so the
+  screen can be learned on a weekend.
+
+**Tests** (`tests/test_news_intel.py`, `tests/test_news_replay.py`, one Chromium test in `tests/test_static_assets.py`):
+
+| What | Test |
+| --- | --- |
+| Sixteen headline kinds; the sources' words first; RTPR's direction wins; severity blends | `test_headlines_are_sorted_into_kinds`, `test_the_sources_own_words_come_before_the_headline`, `test_direction_and_severity` |
+| Tradability: ok, closed, a halt suspected on a liquid stock with no print in 3 minutes (just thin on an illiquid one), an empty book, wide spreads by session, under $5 before the spread, stale after hours, no price, holdings noted | `test_tradability_reads_the_quote` |
+| Priced in: fresh, partly, mostly, full, against; the day's move outside the session; the record's median jump as the usual move | `test_priced_in_measures_the_move_against_the_usual_one` |
+| The second leg: unproven, exploitable, gone | `test_the_second_leg_verdicts` |
+| The signal: a takeover target passed, a guidance raise entered (unproven, then proven by a record); wait when closed, no direction, nothing moved; pass for a halt, a move more than made, a record that says gone, a minor item | `test_a_takeover_target_is_passed_and_a_guidance_raise_entered`, `test_waiting_and_passing_for_the_right_reasons` |
+| On the feed: the steps at the first price and at the confirmation, the kind on each item, the JSON on the row; a failed assessment never stops a check | `test_each_signal_carries_the_five_steps_and_each_item_its_kind`, `test_a_failed_assessment_never_stops_a_price_check` |
+| Prints cleaned and ordered; resolution; Roll's spread from a random bounce (none from a trend or constant changes); halt gaps in regular hours | `test_prints_are_cleaned_and_kept_in_order`, `test_the_spread_is_read_from_the_bounce_and_halts_from_the_gaps` |
+| One event: the reference print, the jump, the next-whole-second fills (100 ms and 500 ms on one print), costs on the fill, captured shares, net by horizon, the close, a short's costs | `test_one_event_the_executable_price_at_each_delay_and_what_it_made` |
+| A halt fills at the reopening; no prints or none before the headline skipped; a bad direction refused; the spread's fallback and estimate | `test_a_halt_fills_at_the_reopening_and_thin_data_is_skipped` |
+| The table and the verdicts: a second leg found, speed buying nothing, no second leg, too few, resolution and skipped notes | `test_the_table_across_events_and_its_verdicts` |
+| Demo prints for any moment with the move in the first second | `test_demo_prints_are_made_for_any_moment_with_the_move_landing_in_the_first_second` |
+| The harness: the feed's items as events (one a stock per half hour), a run on demo data, rows kept, the record by kind, a re-run replacing rows, the record reaching the live assessment | `test_the_feed_s_items_are_replayed_and_the_record_feeds_the_assessment` |
+| Status, defaults, an empty run refused; the API on typed-in events (a bare time is New York; unreadable and future times refused; 404 with the flag off) | `test_status_defaults_and_an_empty_run_is_refused`, `test_the_api_runs_a_replay_on_typed_in_events` |
+| The screen: the kind on the feed, the five pills and the signal on the opportunity, the full steps with the record, the replay run from the panel with its table | `test_live_news_shows_the_five_steps_and_runs_the_replay` |
+
+**Known limits, said on the screen.** Tradier stamps prints to the second, so the 100 ms and 500 ms rows cannot be
+told apart there; a millisecond-stamped feed would be needed for that. The spread before a headline is estimated,
+not quoted: Tradier gives no historical NBBO. Halts are read from gaps in the prints, which is their shape, not a
+halt flag. Four tests failed on the untouched 2.15 tree in this environment before any of this change, and are
+unrelated to it: two Chromium tests of the Analyze screen (`test_analyze_has_an_interactive_chart_with_patterns_and_outcomes`,
+`test_analyze_has_a_what_if_widget_...`) and two of the chart view (`test_the_chart_covers_the_range_...`,
+`test_similar_takes_the_window_...`), all demo-data expectations tied to the calendar date. `test_every_cap_and_limit_holds`
+(the blend) failed once in a full run and passed on every rerun, alone, in its file and in suite order; nothing in
+this change touches the blend.

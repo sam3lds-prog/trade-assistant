@@ -87,6 +87,12 @@ Every trade opens to the statement rows it was built from, so each figure can be
 against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
 orders and holdings through the Robinhood connection, read-only.
 
+Version 2.16 adds news-to-trade intelligence to Live news: each item is judged in five steps (what it is, whether
+its stock can be traded right now, the way the news should push it, how much of that push is already in the price,
+and only then a signal), and a replay measures, from trade prints, what price an order could really have got 100 ms
+to 30 s after a headline, so that paying for a sub-second feed is a decision made on evidence. See
+[Live news: the five steps and the replay (2.16)](#live-news-the-five-steps-and-the-replay-216).
+
 Version 2.15 joins the screens into one path from opportunity to result, and adds paper trading.
 
 - **The Morning plan reads the 250 largest US stocks** before the open and through the morning session, with the
@@ -646,6 +652,77 @@ price's answer to it within seconds, with the risk worked out:
 - for news on stocks you hold.
 
 Nothing here places an order. Switch the screen off with `FEATURE_LIVE_NEWS=0`.
+
+## Live news: the five steps and the replay (2.16)
+
+**Why.** Large firms read the wires with machines, so the first move on a big release is usually over within a
+second. Before paying for sub-second headline delivery, the question is whether *your* broker and execution can
+capture anything repeatable from it, and whether the better trade is the second leg: the drift after the first
+move, on the kinds of news that keep going. 2.16 builds both halves into the Live news screen.
+
+**The five steps.** Every item that opens a signal is judged on the quote in hand, at the first price and at each
+later check, and each step is shown as a pill (hover for the detail; open *The five steps in full*):
+
+1. **Detected.** The kind of announcement, read from RTPR's event type, the 8-K item codes or the headline:
+   to be acquired, buying a company, earnings, guidance raised or cut, FDA approval or setback, an offering, a
+   buyback, a contract, an executive change, bankruptcy, a lawsuit or probe, a listing notice, a halt, a
+   scheduled call, or other. Each has a severity from 0 to 100 (RTPR's impact score is blended in when it sends
+   one); 60 and above is **major**. The feed table shows the kind on every row.
+2. **Tradable.** From the quote: a usable price, the spread in basis points (over 50 in regular hours, 150
+   outside them, is too wide), how old the last trade is (a stock that trades $20 million a day with no print
+   for 90 seconds in regular hours is most likely **halted**, and reopens with an auction), a stale quote
+   outside regular hours, under $5, too thin, or the market closed. What you hold is noted.
+3. **Effect.** The way the news should push the price (the kind's own direction, else RTPR's, else the
+   headline's tone), how far such news usually moves a stock, and what the move does after its first minute:
+   **pinned** (a takeover target moves to the deal price and stays there), **drift** (earnings, guidance,
+   offerings, bankruptcies keep going for days), **fade** (contract wins and analyst calls give it back) or
+   **mixed**.
+4. **Priced in.** The move already made as a share of the usual one: during the session from the app's first
+   quote (which already holds whatever moved in the seconds before it arrived; the delay is shown), outside the
+   session from the last close. *Not yet*, *partly*, *mostly*, *fully* (an overshoot can snap back) or *the other
+   way*. With enough replays of the kind, the usual move is the replays' median first-minute jump.
+5. **Signal.** **Enter** long or short only when the stock is tradable, the direction is known, the move is not
+   fully made, the kind keeps going after its first minute and the record (below) does not say the move was
+   over; **wait** when the market is closed, the headline gives no direction, the price went the other way or
+   has not answered major news yet; **pass** for a halt, a wide spread, a takeover target, a move already more
+   than fully made, a minor item, or a kind whose replays say there was nothing left. The reason is always
+   written out. Live news's own confirmation (the reaction rule) still decides what becomes an opportunity; the
+   steps say what the opportunity is worth entering.
+
+**The replay** (the panel at the foot of the screen) answers the feed question with data. For each headline the
+feed collected in the last few days (as far as the prints reach: about five days on Tradier), or events you type
+in (`SYMBOL, time, headline, LONG or SHORT`, one a line; a bare time is New York time), it reads the trade prints
+of the half hour before and the hour after, and measures what a marketable order would have met:
+
+- **after the feed's latency** (set it: RTPR about a second; the feed's own delay is on every item) and the
+  **offset** of the order, 100 ms, 500 ms, 1 s, 5 s and 30 s after receipt;
+- **paying half the spread** (estimated from the bid-ask bounce of the prints before the headline, Roll's
+  measure, or set in basis points) and **slippage** (5 bps unless set), each on the way in and again out;
+- **through halts**: a gap with no prints in regular hours is a halt, and an order sent into it fills at the
+  reopening, not at the last print before it;
+- **at the prints' resolution**: Tradier stamps prints to the second, so an offset under a second is measured
+  at the first print that is certainly not earlier (the next whole second), and the 100 ms and 500 ms rows
+  usually agree. Telling them apart needs a feed stamped to the millisecond; the screen says so rather than
+  pretending.
+
+Each event is traded the way the news should push it (step 3), decided before the price moved, never the way
+the price turned out to go, and held to a minute, five, fifteen, thirty, an hour and the close. The table shows,
+per offset, the fill against the pre-news price, the share of the first minute's move still ahead of the fill,
+the fill's lag, the halts, and per horizon the median result after costs with how often it was positive. Two
+verdicts in words: **sub-second entry** (the gap between the 100 ms row and the 30 s row at 30 minutes: half a
+point an event or more is an edge worth a feed; under 0.15 is nothing) and **the second leg** (the 30 s row at
+30 minutes: positive and up more than half the time means a second leg has been there to take). A *by kind*
+table says which kinds of news had one. At least 8 events are needed before anything is called.
+
+The replays are kept (`news_replays`, 60 days; a re-run replaces an event's older rows) and feed step 5: *the
+record* under each item is what entering at 30 s and holding 30 minutes has made on that kind of news. On demo
+data the prints are made up and the made-up move lands mostly in the first second, so the demo's verdicts are
+about the demo. `GET /v2/live/replay`, `POST /v2/live/replay`, `POST /v2/live/replay/stop`.
+
+**What to do with it.** If the sub-second verdict is *nothing* and the second-leg verdict is positive, the
+feed money is better spent on execution, and the trade to build is the drift after the first move on the kinds
+that drift; the five steps then tell you, item by item, whether that drift is still ahead. Nothing here places
+an order.
 
 ## Opportunities, budgets and paper trading (2.15)
 
@@ -1342,7 +1419,9 @@ tradeassist/
   paper.py                 paper trading: portfolios, fills, marks, automation, catch-up and replay (2.15)
   clockwork.py             the timed work: paper marks and steps, the morning rescans, the digest (2.15)
   livenews.py              live news: RTPR stream, SEC 8-K and Finnhub polling, price reactions, signals (2.10);
-                           the "why is it moving?" movers scan (2.11)
+                           the "why is it moving?" movers scan (2.11); the five steps on each signal (2.16)
+  newsintel.py             news-to-trade intelligence: the kind of news, tradable now, the effect, priced in, the signal (2.16)
+  newsreplay.py            the news replay: executable prices at each delay after a headline, from trade prints (2.16)
   searchnews.py            news found by searching: Google News search feeds and capped Brave news search (2.11)
   intraday.py              bars within the day (Tradier, Robinhood, demo), kept in SQLite, grouped by hour/week/month (2.12)
   similar.py               similar patterns in the stock's own past, and what followed them (2.12)
@@ -1368,7 +1447,7 @@ tradeassist/
                            (Apache-2.0; LICENSE-lightweight-charts.txt); blend.js the budget split, basket.js
                            Analyze opportunity's basket, paper.js Paper trading, help.js the info icons (2.15)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
-docs/IMPROVEMENTS.md       the 2.1.1 to 2.15 engineering record: defects found, tests, reports
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.16 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```

@@ -698,3 +698,38 @@ def paper_tables(cur: sqlite3.Cursor) -> None:
         modelled     INTEGER NOT NULL DEFAULT 0,  -- 1 when an option in it was valued by the model, not a quote
         PRIMARY KEY (portfolio_id, at)
     )""")
+
+
+@migration(18, "news replays and the intelligence chain on live signals")
+def news_intelligence_tables(cur: sqlite3.Cursor) -> None:
+    """2.16: what was really available after a headline. One row per replayed news event: the executable price at
+    each delay after the headline (feed latency, spread, slippage and halts accounted for) and what the trade made
+    at each horizon after it. The record feeds the live assessment (the "second leg" step). Live signals also keep
+    the five-step assessment made at each price check. Records only; nothing here can place an order."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS news_replays (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        mode           TEXT NOT NULL,                  -- live, sandbox, robinhood or demo: records never mix
+        run_id         INTEGER NOT NULL,
+        symbol         TEXT NOT NULL,
+        news_id        INTEGER,                        -- the live_news item, when the event came from the feed
+        published_at   TEXT NOT NULL,
+        headline       TEXT NOT NULL DEFAULT '',
+        source         TEXT NOT NULL DEFAULT '',
+        catalyst       TEXT NOT NULL,                  -- the kind of news (newsintel.CATALYSTS)
+        direction      INTEGER NOT NULL,               -- +1 traded long, -1 short
+        feed_latency_s REAL NOT NULL,
+        spread_bps     REAL,
+        slippage_bps   REAL NOT NULL,
+        ref_price      REAL,                           -- the last print before publication
+        jump_1m_pct    REAL,                           -- the move from it to the print a minute after
+        halted         INTEGER NOT NULL DEFAULT 0,
+        resolution_s   REAL,                           -- how finely the prints are stamped (1 = whole seconds)
+        skipped        TEXT,                           -- why the event could not be replayed, else NULL
+        result_json    TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        UNIQUE (mode, symbol, published_at, run_id)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_news_replays_kind ON news_replays (mode, catalyst, id)")
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(live_signals)").fetchall()}
+    if "intel_json" not in columns:
+        cur.execute("ALTER TABLE live_signals ADD COLUMN intel_json TEXT")

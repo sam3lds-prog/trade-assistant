@@ -446,6 +446,50 @@ def test_live_news_listens_shows_the_feed_and_turns_a_confirmed_move_into_a_card
 
 
 @pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_live_news_shows_the_five_steps_and_runs_the_replay(tmp_path, monkeypatch):
+    """2.16: each item carries its kind and the five-step chain with a signal, and the replay panel runs on the
+    feed's own items and reports what was available after the headline."""
+    import tradeassist.livenews as live_mod
+    import tradeassist.morning as morning_mod
+    monkeypatch.setattr(morning_mod, "live_universe", lambda watchlist: ["AAPL", "MSFT", "NVDA"])
+    monkeypatch.setattr(live_mod, "DEMO_TEMPLATES", (("{s} raises full-year outlook", 0.05),))
+    monkeypatch.setattr(live_mod, "CHECK_DELAYS", (1, 1, 1, 1, 1, 1))
+    monkeypatch.setattr(live_mod, "DEMO_MOVE_SECONDS", 1.0)
+    monkeypatch.setattr(live_mod, "LOOP_SECONDS", 0.3)
+    from datetime import timedelta
+
+    def older_item(svc):                                      # a headline from two hours ago, so every horizon exists
+        item = live_mod.make_item("Demo", "old-1", ["NVDA"], "NVDA raises full-year outlook (made up)",
+                                  published=live_mod.now_utc() - timedelta(hours=2), kind="press_release")
+        item["extra"]["demo_move"] = 0.05
+        live_mod.store_item(svc.db, item)
+    with demo_page(tmp_path, prepare=older_item) as (page, errors):
+        page.goto(page.base + "#live")
+        page.wait_for_selector("button:text-is('Start listening'):visible", timeout=20000)
+        page.click("button:text-is('Start listening')")
+        page.wait_for_selector("text=raises full-year outlook (made up)", timeout=30000)
+        feed = page.locator("text=News as it arrived").locator("xpath=ancestor::div[contains(@class,'panel')]").first.inner_text()
+        assert "Guidance raised · major" in feed
+        page.wait_for_selector(".live-opp .intel-strip", timeout=60000)
+        strip = page.locator(".live-opp .intel-strip").first.inner_text()
+        assert all(word in strip for word in ("Detected", "Tradable", "Effect", "Priced in", "Signal"))
+        opp = page.locator(".live-opp").first.inner_text()
+        assert "Enter long:" in opp or "Pass:" in opp or "Wait:" in opp
+        page.click("summary:has-text('The five steps in full')")
+        assert "The record:" in page.locator(".live-opp .intel-list").first.inner_text()
+        page.click("summary:has-text('The replay: what was really available')")
+        page.wait_for_selector("text=1 event in the feed can be replayed", timeout=20000)
+        page.click("button:text-is('Run the replay')")
+        page.wait_for_selector("text=Median result after costs", timeout=60000)
+        panel = page.locator("text=Median result after costs").locator("xpath=ancestor::details").first.inner_text()
+        assert "100 ms after receipt" in panel and "30 s after receipt" in panel and "too few" in panel
+        assert "1 fill" in panel and "Held to 30 min" in panel and "Every event (1)" in panel
+        page.click("button:text-is('Stop')")
+        page.wait_for_selector("button:text-is('Start listening'):visible", timeout=20000)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
 def test_live_news_lists_movers_with_the_news_search_found(tmp_path, monkeypatch):
     """2.11: "Why is it moving?" lists the stocks that moved, the news search found for each (or that none was
     found), and opens Decide from the row. The scan's rows are fixed here; the scan itself is tested in

@@ -163,6 +163,38 @@ class TradierData:
         from ..intraday import intraday_frame
         return intraday_frame(rows)
 
+    # --- trade prints (2.16: the news replay) ----------------------------
+    def tick_reach(self) -> dict[str, Any]:
+        """How many days back trade-by-trade prints reach on Tradier's timesales (about five, from Tradier's
+        documentation), and how finely they are stamped: whole seconds, so two prints in one second cannot be
+        told apart in time, only in order."""
+        return {"days": 5, "resolution_s": 1.0,
+                "note": "Tradier keeps about five days of trade prints, stamped to the second."}
+
+    def ticks(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+        """Every trade print between two moments, all sessions (pre-market and after hours included, since most
+        press releases cross the wire outside regular hours), as a frame of `t` (UTC seconds, whole), `price`
+        and `volume`, in the order Tradier gives them within a second."""
+        fmt = "%Y-%m-%d %H:%M"
+        body = self._get("/markets/timesales", {"symbol": api_symbol(symbol), "interval": "tick",
+                                                "start": start.astimezone(NY).strftime(fmt),
+                                                "end": end.astimezone(NY).strftime(fmt), "session_filter": "all"})
+        series = body.get("series") or {}
+        rows = []
+        for raw in dicts(series.get("data") if isinstance(series, dict) else None):
+            stamp = num(raw.get("timestamp"))
+            if stamp is None and raw.get("time"):
+                try:
+                    stamp = datetime.fromisoformat(str(raw["time"])).replace(tzinfo=NY).timestamp()
+                except ValueError:
+                    stamp = None
+            price = num(raw.get("price"))
+            if stamp is None or price is None or price <= 0:
+                continue
+            rows.append({"t": float(stamp), "price": price, "volume": num(raw.get("volume")) or 0.0})
+        from ..newsreplay import prints_frame
+        return prints_frame(rows)
+
     def expirations(self, symbol: str) -> list[str]:
         body = self._get("/markets/options/expirations", {"symbol": api_symbol(symbol),
                                                           "includeAllRoots": "true"})
