@@ -99,7 +99,8 @@ def test_a_new_database_has_every_table_and_takes_no_backup(tmp_path):
     assert db.backup_before_migration is None and db.schema_version() == latest()
     names = {r["name"] for r in db.query("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"trades", "attempts", "positions", "executions", "option_contracts", "position_snapshots",
-            "signal_occurrences", "schema_migrations"} <= names
+            "signal_occurrences", "schema_migrations", "opportunity_runs", "paper_portfolios", "paper_positions",
+            "paper_events", "paper_marks"} <= names
     assert not (tmp_path / "backups").exists()
     db.close()
     mem = Database(":memory:")

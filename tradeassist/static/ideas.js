@@ -1,10 +1,10 @@
 "use strict";
-/* Trade Assistant 2.7: Trade ideas. The best-graded trades to buy and to short across up to 200 large
+/* Trade Assistant 2.7: Trade ideas. The best-graded trades to buy and to short across up to 250 large
    companies, and a simulation of any one of them: how often its stop and targets are reached on paths at
    the volatility option prices imply, and what each outcome makes or loses, with shares and with a
    contract. Nothing here places an order. Loaded last. */
 
-const IDEA_UNIVERSES = [["top200", "200 largest US companies"], ["large_caps", "100 large US companies"], ["watchlist", "Your watchlist"]];
+const IDEA_UNIVERSES = [["top250", "250 largest US companies"], ["top200", "200 largest US companies"], ["large_caps", "100 large US companies"], ["watchlist", "Your watchlist"]];
 const IDEA_SHOWN = 10;
 // How each way out of a trade reads: in profit, at a loss, or wherever the horizon left it.
 // Part out at a target and part elsewhere reads as "other": it can end either way.
@@ -24,8 +24,16 @@ function simButton(r, onPick) {
   return b;
 }
 
-function ideaTable(rows, onPick) {
-  const wrap = table([
+// 2.15: an idea as an opportunity (its key matches the server's), for Analyze opportunity and the blend.
+function ideaOpportunity(r, day) {
+  return { key: `ideas:${day}:${r.symbol}:${r.direction}`, source: "ideas", symbol: r.symbol, direction: r.direction,
+    setup: "idea", setup_label: `Grade ${r.grade} ${r.direction === "LONG" ? "buy" : "short"}`, horizon: "swing", horizon_days: 20,
+    entry: r.entry, stop: r.stop, target_1: r.target_1, target_2: r.target_2, atr: r.atr, score: r.score };
+}
+
+function ideaTable(rows, onPick, extra = {}) {
+  const lead = extra.picked ? [{ label: "", cell: r => pickBox(extra.picked, extra.keyOf(r)) }] : [];
+  const wrap = table([...lead,
     { label: "Stock", cell: r => el("div", {}, el("strong", { text: r.symbol }), el("div", { class: "small" }, trendTag(r.trend.state)),
       r.earnings_in_horizon ? el("div", { class: "small warn-text", text: `Earnings ${shortDate(r.earnings.date)}${r.earnings.estimated ? " (est.)" : ""}` }) : null) },
     { label: "Grade", cell: r => el("span", { class: "nowrap" }, gradeChip(r.grade, r.score), el("span", { class: "small muted", text: ` ${num(r.score, 0)}` })) },
@@ -36,13 +44,14 @@ function ideaTable(rows, onPick) {
       : el("span", { class: "small muted", title: "One share risks more than your per-trade limit", text: "too large" }) },
     { label: "If target 1 is reached", num: true, cell: r => isNum(r.at_target_1) ? el("span", { class: "pos-text", text: signedMoney(r.at_target_1, 0) }) : "n/a" },
     { label: "If stopped", num: true, cell: r => isNum(r.at_stop) ? el("span", { class: "neg-text", text: signedMoney(r.at_stop, 0) }) : "n/a" },
-    { label: "", cell: r => simButton(r, onPick) }],
+    { label: "", cell: r => el("div", { class: "row nowrap" }, simButton(r, onPick),
+      extra.day && state.openOpportunity && featureOn("trend_engine_v2") ? analyzeButton(ideaOpportunity(r, extra.day)) : "") }],
   rows, { onRow: r => onPick(r) });
   wrap.classList.add("idea-table");
   return wrap;
 }
 
-function ideaPanel(rows, side, onPick) {
+function ideaPanel(rows, side, onPick, extra = {}) {
   const word = side === "LONG" ? "buy" : "short";
   let all = false;
   const body = el("div");
@@ -50,7 +59,7 @@ function ideaPanel(rows, side, onPick) {
     const list = all ? rows : rows.slice(0, IDEA_SHOWN);
     const more = rows.length > IDEA_SHOWN ? el("button", { class: "plain small-btn", text: all ? `Show the top ${IDEA_SHOWN}` : `Show all ${rows.length}` }) : null;
     if (more) more.addEventListener("click", () => { all = !all; draw(); });
-    body.replaceChildren(list.length ? ideaTable(list, onPick) : el("p", { class: "muted small", text: `No stock leans ${side === "LONG" ? "long" : "short"} with a grade better than AVOID right now.` }), more || "");
+    body.replaceChildren(list.length ? ideaTable(list, onPick, extra) : el("p", { class: "muted small", text: `No stock leans ${side === "LONG" ? "long" : "short"} with a grade better than AVOID right now.` }), more || "");
   };
   draw();
   return el("div", { class: "panel" }, el("h3", { text: `Highest-graded trades to ${word}${rows.length > IDEA_SHOWN ? ` (top ${IDEA_SHOWN} of ${rows.length})` : rows.length ? ` (${rows.length})` : ""}` }), body);
@@ -232,7 +241,7 @@ function renderTradeSim(s) {
     frag.append(actions);
   }
   if (state.openDecide && featureOn("trend_engine_v2")) {
-    const b = el("button", { class: "plain", text: "Open the thesis on Decide" });
+    const b = el("button", { class: "plain", text: "Analyze opportunity" });
     b.addEventListener("click", () => {
       state.thesis = FLOW.thesis({ symbol: s.symbol, direction: s.direction, entry: s.entry, invalidation: s.stop, target1: s.target_1, target2: s.target_2, horizonDays: s.horizon_days, contracts: spec ? spec.contracts : 1 });
       state.openDecide(s.symbol, s.direction);
@@ -313,15 +322,26 @@ function buildIdeas() {
   const sim = simPanel();
   let timer = null, shownJob = undefined, running = false, failures = 0;
 
+  const picked = new Set();
+  const blend = featureOn("opportunity_blend") ? blendPanel({ source: "ideas", collapsed: true, horizon: "swing",
+    title: "Split a budget across the best ideas", keys: () => [...picked],
+    intro: "Each idea is a 20-day swing trade. The optimizer walks them together on 4,000 paths and picks how much of each to buy for the goal; an idea's only drift is the signal history's record for its trend score (none without the signal history), after costs and pulled toward zero when the record is short." }) : null;
+  const budgetBtn = el("button", { class: "plain", text: "Set budget" });
+  budgetBtn.addEventListener("click", () => blend && blend.toggle());
+  if (!blend) budgetBtn.classList.add("hidden");
   const render = d => {
     const frag = el("div");
     for (const n of d.notes) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
-    frag.append(ideasSummary(d), ideaPanel(d.long, "LONG", sim.open), ideaPanel(d.short, "SHORT", sim.open), ideasRest(d, sim.open));
+    const day = String(d.checked_at || "").slice(0, 10);
+    const extra = blend ? { picked, keyOf: r => `ideas:${day}:${r.symbol}:${r.direction}`, day } : { day };
+    frag.append(ideasSummary(d), ideaPanel(d.long, "LONG", sim.open, extra), ideaPanel(d.short, "SHORT", sim.open, extra));
+    if (blend) frag.append(blend);
+    frag.append(ideasRest(d, sim.open));
     out.replaceChildren(frag);
   };
   const empty = () => out.replaceChildren(el("div", { class: "panel" },
     el("p", {}, "Not scanned yet. Pick the stocks and press ", el("strong", { text: "Scan" }), "."),
-    el("p", { class: "small muted", text: "Each stock's trend, reversal and trade grade are read in turn. On demo data the 200 largest take about two minutes. With live data the first scan of the day also fetches each stock's price history, spaced out so the other screens keep working, which takes several minutes; later scans reuse it. You can keep using the app meanwhile." })));
+    el("p", { class: "small muted", text: "Each stock's trend, reversal and trade grade are read in turn. On demo data the 250 largest take about two and a half minutes. With live data the first scan of the day also fetches each stock's price history, spaced out so the other screens keep working, which takes several minutes; later scans reuse it. You can keep using the app meanwhile." })));
   // The latest status: the progress while a scan runs, and the result once there is a new one.
   async function paint(st) {
     const job = st.job;
@@ -367,8 +387,8 @@ function buildIdeas() {
   }));
   stopBtn.addEventListener("click", () => withBusy(stopBtn, err, async () => { await paint(await api("/v2/ideas/stop", {})); poll(); }));
   const view = el("section", {}, el("h2", { text: "Trade ideas" }),
-    el("p", { class: "lede", text: "The highest-graded trades to buy and to short across up to 200 large companies, each with its stop, targets, size, and what it makes or loses if the price gets there. Simulate any one to see how often each happens." }),
-    el("div", { class: "panel" }, el("div", { class: "row" }, field("Stocks", uni), scan, stopBtn), progress, done, err), out, sim);
+    el("p", { class: "lede", text: "The highest-graded trades to buy and to short across up to 250 large companies, each with its stop, targets, size, and what it makes or loses if the price gets there. Simulate any one to see how often each happens, analyze it, or split a budget across the best." }),
+    el("div", { class: "panel" }, el("div", { class: "row" }, field("Stocks", uni), scan, stopBtn, budgetBtn), progress, done, err), out, sim);
   view.onShow = () => {
     uni.options[2].textContent = `Your watchlist (${((state.status && state.status.watchlist) || []).length})`;
     poll();

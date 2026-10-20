@@ -281,7 +281,11 @@ function show(name) {
   for (const btn of document.querySelectorAll(".rail button.nav")) {
     if (btn.dataset.view === name) btn.setAttribute("aria-current", "page"); else btn.removeAttribute("aria-current");
   }
-  if (!state.views[name]) { state.views[name] = BUILDERS[name](); main.append(state.views[name]); }
+  if (!state.views[name]) {
+    state.views[name] = BUILDERS[name]();
+    main.append(state.views[name]);
+    if (typeof attachHelp === "function") attachHelp(name, state.views[name]);   // 2.15: the info icon (help.js)
+  }
   for (const [key, node] of Object.entries(state.views)) node.classList.toggle("hidden", key !== name);
   if (name === "journal") state.refreshJournal();
   if (state.views[name].onShow) state.views[name].onShow();

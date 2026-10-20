@@ -54,6 +54,15 @@ NEXT_100 = (
 ).split()
 TOP_200 = tuple(LARGE_CAPS) + tuple(NEXT_100)
 
+# 2.15: the next 50, so TOP_200 + NEXT_50 is close to the 250 largest US companies by market value in mid-2026:
+# the Morning plan's universe. Fixed like the others, and not updated when companies grow, shrink or leave.
+NEXT_50 = (
+    "IBKR PWR VRT MRVL RCL MMC CVNA RBLX AXON NET SNOW MSTR ALNY WDC STX URI CMI PAYX FAST CPRT "
+    "MSCI AFL PRU NSC TFC PCAR CHTR EA TTWO RDDT OKE BKR FANG D XEL PEG ED NUE VMC MLM "
+    "PSA O KDP KMB SYY HSY IDXX DAL EBAY GEHC"
+).split()
+TOP_250 = TOP_200 + tuple(NEXT_50)
+
 MAX_TECHNICAL_SYMBOLS = 120
 MAX_FLOW_SYMBOLS = 30
 MAX_FLOW_EXPIRATIONS = 6
@@ -82,7 +91,9 @@ def universe(name: str | None, watchlist: Sequence[str], symbols: Iterable[str] 
         return "large_caps", list(LARGE_CAPS)
     if key in ("top200", "top_200"):
         return "top200", list(TOP_200)
-    raise ValueError("universe must be watchlist, large_caps or top200, or give symbols")
+    if key in ("top250", "top_250"):
+        return "top250", list(TOP_250)
+    raise ValueError("universe must be watchlist, large_caps, top200 or top250, or give symbols")
 
 
 def _f(x: Any) -> float | None:

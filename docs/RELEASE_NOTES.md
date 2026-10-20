@@ -18,6 +18,58 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.15.0
+
+**Opportunities end to end: the morning ranked, news digests, budget splits across stocks, Analyze opportunity, and
+paper trading.**
+
+- **Morning plan: the 250 largest, before the open and through the morning session.** The plan now reads the 250
+  largest US stocks (plus your watchlist) and the markets: overseas (Nikkei, Hang Seng, Shanghai, KOSPI, ASX, DAX,
+  FTSE, CAC, Euro Stoxx, from stooq or the funds that track them), SPY, QQQ, IWM and DIA, and the sector funds.
+  Every stock is ranked as an opportunity with a score from 0 to 100 (hover it for the points behind it): its move
+  in its own daily ranges, its own part beyond what SPY explains, volume, news for the biggest movers, the setup,
+  and the past record of the same trade. In the session the sharpest swings since the open are judged by a
+  rest-of-the-day record from 5-minute bars, with VWAP and the opening range. **Refresh in the morning session**
+  rescans every 5, 10, 15 or 30 minutes until 11:30 (or the time you set). Trades are day trades (out by 15:55) or,
+  if you choose, five-day swings. The best 20 get trade cards.
+- **The edge, honestly.** Each trade's edge is the past average of the same kind of trade, after the round trip's
+  cost, pulled toward zero when its record is short (a record of 100 cases counts for half). With no record, no
+  edge is assumed.
+- **Set budget: a split across several stocks.** On the Morning plan, Live news, Trade ideas and Analyze
+  opportunity: a budget, a goal (Most dollars; Best return for the risk, the worst tenth of outcomes kept within a
+  share of the budget; Lowest risk) and limits. The optimizer walks the stocks together on 4,000 paths (their own
+  volatility, last year's correlation, each trade's stop and target) and picks how much of each, as shares, a short,
+  a call or a put. You see the expected result and its range, the chance of a profit, the worst tenth, the loss if
+  every stop is hit, sectors, how the stocks move together and what a market drop would do. Your real-money limits
+  always apply (only a paper portfolio may lift them). Units you edit by hand are checked against the budget, the
+  caps and your limits, and anything they break is named. When no record beats its costs it keeps the cash and
+  shows an equal-risk split for study.
+- **Live news digests.** Every 15, 30 or 60 minutes (or over the whole session) the news's confirmed moves and the
+  movers with news found are ranked as day trades, with cards for the best and the budget split.
+- **Trade ideas**: an **Analyze** button on every row, tick boxes, and the budget split; the 250 largest US
+  companies are now a choice of stocks (and the first one).
+- **Analyze opportunity** (was Analyze a stock): one stock or a basket. Chips for each stock open its full analysis
+  with its levels filled in; the **Blend** chip shows the split, its fan of outcomes, risk, correlations and stress,
+  with units you can edit and evaluate, and a button to paper trade it.
+- **Paper trading** (new, under Hold): pretend money only, in tables of its own. **Automated** portfolios take the best
+  opportunities from the Morning plan, the news digest, Trade ideas or all three, split the budget, trade, rotate out
+  of what fades and put idle cash to work, logging every action. **Manual** ones are yours: shares, shorts, calls,
+  puts, or a whole blend; close all or part any time. Never leveraged: a short ties up its whole value and an order
+  waiting for the open holds its cost. Realistic fills by default (options fill only when the market reaches the
+  card's limit; stops and targets act on regular-session prices). Value over time against SPY, automated and manual side by side; drawdown, win rate,
+  average R. Automated portfolios trade only fresh lists (today's Morning plan, a digest from the last two hours).
+  **Replay** runs any stored recommendation list over a past horizon on price history, entering at the first bar
+  after the run. Portfolios are
+  valued while the app runs and catch up from price history when it restarts; `./setup_paper.sh` keeps it running on
+  a Mac.
+- **Info icons** beside every screen's title and the new controls: hover or click to read what it does; it closes
+  when the pointer leaves. On a touch screen a tap keeps it open so a long text can be scrolled.
+- **The exchange calendar** (holidays and early closes, 2025 to 2028) is now known to the app.
+
+New flags `FEATURE_OPPORTUNITY_BLEND` and `FEATURE_PAPER_TRADING` (both on). Migration 17 (stored opportunity runs and
+the paper tables; the database is backed up first). No new settings in `.env`: the new choices are made on the
+screens and kept in the database. Nothing here places an order.
+
 ## 2.14.0
 
 **The factors count once; pinch zooms both ways; combinations and a budget.**

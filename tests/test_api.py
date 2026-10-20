@@ -22,6 +22,12 @@ V2_WRITES = {
     "/v2/morning/watches/{watch_id}/remove", "/v2/morning/email", "/v2/analysis/email",
     # 2.10: start and stop listening to the news. Reads news and quotes; signals and cards are records and models.
     "/v2/live/start", "/v2/live/stop",
+    # 2.15: saved screen settings, the budget split (a model), the news digest (a ranking of what was recorded),
+    # and paper trading: pretend money in tables of their own. None of it reaches a broker or the real positions.
+    "/v2/prefs", "/v2/blend", "/v2/live/digest", "/v2/paper/portfolios", "/v2/paper/portfolios/{pid}/trades",
+    "/v2/paper/portfolios/{pid}/import", "/v2/paper/positions/{position_id}/close", "/v2/paper/portfolios/{pid}/close",
+    "/v2/paper/portfolios/{pid}/mark", "/v2/paper/portfolios/{pid}/step", "/v2/paper/portfolios/{pid}/settings",
+    "/v2/paper/portfolios/{pid}/delete", "/v2/paper/replay",
     "/v2/positions", "/v2/positions/{position_id}/executions", "/v2/positions/{position_id}/plan",
     "/v2/positions/{position_id}/cancel", "/v2/positions/{position_id}/snapshot",
     "/v2/position/evaluate", "/v2/options/evaluate", "/v2/options/compare", "/v2/portfolio/stress",

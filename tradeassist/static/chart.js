@@ -1,4 +1,4 @@
-/* chart.js: the interactive chart on Analyze a stock (2.12).
+/* chart.js: the interactive chart on Analyze opportunity (2.12; then "Analyze a stock").
    Bars within the day or grouped by day, week, month or quarter; any range, custom dates included; zoom and pan
    (drag, wheel, pinch); indicators switched on and off; swings, levels and trendlines; where a top or bottom may
    be forming; the news on the bars; similar patterns from this stock's own past overlaid on the window with what

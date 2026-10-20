@@ -1,4 +1,4 @@
-"""Trade ideas (2.7): the highest-graded stock trades to buy and to short across up to 200 large companies.
+"""Trade ideas (2.7): the highest-graded stock trades to buy and to short across up to 250 large companies.
 
 For each stock the side comes from Today's lean rule (today.read_stock): the trend engine's net score on
 the last finished bar, withdrawn when the market regime works against that side or the opposite reversal
@@ -41,15 +41,15 @@ from .today import REGIME_WORDS, read_stock
 
 log = logging.getLogger(__name__)
 
-MAX_NAMES = 200
+MAX_NAMES = 250                 # 2.15: the 250 largest (scanner.TOP_250)
 QUOTE_CHUNK = 50
 HORIZON_DAYS = 20               # the holding period a grade assumes (evaluator default), in trading days
 REVERSAL_YEARS = 5              # analysis.REVERSAL_YEARS: fetched once up front so the stock's history is read once
 # Seconds between the scan's own requests to each source: about half of Tradier's allowance (120 a minute
 # live, 60 in the sandbox); Robinhood publishes no limit, so a cautious pace. Demo data needs none.
 SCAN_PACE = {"live": 1.0, "sandbox": 2.0, "robinhood": 0.5}
-UNIVERSE_WORDS = {"top200": "the 200 largest US companies", "large_caps": "100 large US companies",
-                  "watchlist": "your watchlist", "custom": "the symbols given"}
+UNIVERSE_WORDS = {"top250": "the 250 largest US companies", "top200": "the 200 largest US companies",
+                  "large_caps": "100 large US companies", "watchlist": "your watchlist", "custom": "the symbols given"}
 
 
 def money_at(entry: float, stop: float, t1: float, t2: float, direction: int, shares: int) -> dict[str, Any]:
@@ -138,6 +138,20 @@ class TradeIdeas:
         except Exception as exc:                      # noqa: BLE001 - kept in memory even if it cannot be saved
             log.warning("Trade ideas result not saved: %s", exc)
         self._result = result
+        # 2.15: the best ideas as opportunities, kept so paper trading can replay this scan later.
+        try:
+            from .opportunities import Runs, from_idea
+            day = str(result.get("checked_at") or "")[:10]
+            opps = []
+            for row in list(result.get("long") or []) + list(result.get("short") or []):
+                try:
+                    opps.append(from_idea(row, settings=self.svc.settings, run_day=day))
+                except (ValueError, KeyError, TypeError):
+                    continue
+            opps.sort(key=lambda o: -o["score"])
+            Runs(self.svc.db).save("ideas", opps[:25], {"label": f"Trade ideas {str(result.get('checked_at') or '')[:16]}"})
+        except Exception as exc:                      # noqa: BLE001 - a run not kept never breaks the scan
+            log.warning("Trade ideas run not kept: %s", exc)
 
     def start(self, universe_name: str | None) -> dict[str, Any]:
         name, names = self._names(universe_name)
@@ -170,7 +184,7 @@ class TradeIdeas:
         return out
 
     def _names(self, universe_name: str | None) -> tuple[str, list[str]]:
-        name, names = universe(universe_name or "top200", self.svc.settings.watchlist)
+        name, names = universe(universe_name or "top250", self.svc.settings.watchlist)
         names = list(dict.fromkeys(n.strip().upper() for n in names if n.strip()))
         if not names:
             raise ValueError("Give at least one symbol")

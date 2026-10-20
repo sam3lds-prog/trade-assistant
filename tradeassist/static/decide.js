@@ -1,6 +1,6 @@
 "use strict";
 /* Trade Assistant 2.5: the decision path. Today (where the market stands, how the day is going against your
-   limits, which stocks lean which way) leads to Decide (Analyze a stock, with one thesis). Loaded last. */
+   limits, which stocks lean which way) leads to Decide (Analyze opportunity, with one thesis). Loaded last. */
 
 /* ---------- view: today ---------- */
 const SIDE_LEAN_WORDS = { LONG: "Leaning long", SHORT: "Leaning short" };

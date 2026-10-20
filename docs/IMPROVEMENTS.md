@@ -1319,3 +1319,174 @@ An independent reviewer read the change and ran reproductions. It reported 14 fi
 | X12 | ctrl+wheel ignored `deltaMode` | Low | lines and pages scaled to pixels as the library does | — |
 | X13 | Docs and the AI prompt still described one-at-a-time betas; the AI's combination allowed four | Low | docstring, note, prompt (with the own-part betas and the fit's days), docs; three | `test_the_ai_is_sent_...` |
 | X14 | Returns were differenced before the join, so a missing day paired a two-day move with a one-day one | Low | closes joined first | `test_the_joint_fit_...` |
+
+## 2.15: opportunities end to end, budget splits across stocks, Analyze opportunity, paper trading
+
+**The request.** Info icons with tooltips on every page (open on hover or click, close when the pointer leaves the
+icon). A Morning plan for the most volatile hours: the top 250 stocks before the open and in the morning session,
+using overseas markets, pre-market moves and the sharpest swings after the open; rank the opportunities; a button to
+set a budget and split it, optimising for the lowest risk with the best return or for the most dollars; take one
+opportunity or the optimised blend to the analysis screen. The same for Live news (on an interval the user sets: 15
+minutes, 30, an hour, the session) and for Trade ideas. Rename Analyze a stock to Analyze opportunity, taking one
+stock or a diversified set for the budget, with all the existing analysis. A paper trading screen: a budget, the top
+10 recommendations traded as recommended (instrument and split) and monitored, the app free to sell and reinvest;
+manual paper trades (imported or the user's own); optimise for return or for return with low risk; results over a
+chosen horizon, charted, for both.
+
+**Permissions taken upfront.** The 250 largest by market value (a fixed list); the edge from each setup's own past
+record, pulled toward zero when the record is short; forward paper trading plus replay of stored runs; real-money
+blends obey the risk limits and paper portfolios may lift them; the user reconnects GitHub for the push; one PR,
+2.15.0; merge when CI passes.
+
+**What was built.**
+
+- `marketdays.py`: the NYSE calendar 2025 to 2028 from the exchange's own announcements (holidays, early closes),
+  sessions, stepping over closed days, the phase of the day.
+- `scanner.NEXT_50`/`TOP_250`; the sector lists gained the 18 names that had none.
+- `opportunities.py`: the common shape (`make`), the edge (`edge_from`, `SHRINK_CASES` = 100), the day-trade record
+  (`gap_record`), the rest-of-the-day record (`intraday_cases`, `intraday_record_from`), day-trade levels
+  (`day_levels`), ideas as opportunities (`from_idea`), saved screen settings (`load_prefs`/`save_prefs`), stored
+  runs (`Runs`, table `opportunity_runs`).
+- `morning.py`: the 250-stock universe (`movers_universe`; Live news keeps `live_universe`), the markets
+  (`_context`), every stock's reading (`_rows`: own part beyond SPY, volume, since the open), setups and edges for
+  all of them (`_setup_and_edge`, `_edge`), the score (`_score`), the session's 5-minute evidence (`_session_bars`,
+  `_session_extras`), cached cards (`_card_for`), day-trade cards (`card(day_trade=True)`), rescans
+  (`start(rescan=True)`), runs.
+- `digest.py`: the news digest. `hub.py`: the latest opportunities by source, keys and hand-built baskets, contracts on
+  demand. `blend.py`: the joint Monte Carlo and the greedy split. `paper.py`: portfolios, fills, marks, automation
+  with rotation, catch-up, replay. `clockwork.py`: the timed work.
+- Migration 17; flags `opportunity_blend`, `paper_trading`; 19 routes, each added to the write list in
+  `tests/test_api.py`.
+- The page: `help.js` (icons and text for every screen), `blend.js` (the shared budget panel, fan chart, correlation
+  table), `basket.js` (Analyze opportunity's basket and Blend view), `paper.js` (the screen, equity charts on the
+  vendored Lightweight Charts), and the Morning plan, Live news and Trade ideas screens; the rename everywhere it is
+  a current name (menu, title, buttons, email footer, README, V2.md, `.env.example`; past release notes keep the name
+  of their time).
+- `setup_paper.sh`: a launchd agent that keeps the app running on a Mac.
+
+**Decisions.**
+
+- *What "best return" can honestly mean.* An optimiser maximises whatever expected return it is given, so that number
+  decides everything. A model with no view on direction (the app's simulations) makes every trade's expected result
+  the cost of trading, and the "best" split is cash. A model with an invented view makes the split look clever and
+  means nothing. The edge is therefore the one thing the app can stand behind: what the same kind of trade did on
+  these stocks, measured where it would be entered (a gap: open to close; a morning swing: from that minute to the
+  close; ideas: the signal history against SPY), net of costs, weighted by `cases / (cases + 100)`. A typical day's
+  move in a large stock is about 2%, so a 100-case average is uncertain by about 0.2 points, the size of most edges:
+  the weight is a James-Stein style pull with that noise in mind. When nothing beats its costs the split holds cash
+  and an equal-risk split is shown for study, labelled as having no edge.
+- *Goals as tail limits, not a caution dial.* The 2.14 one-stock split maximised expected result − caution × CVaR10.
+  For a single day trade the expected profit is a few percent of its worst-tenth loss, so any caution above about
+  0.1 bought nothing, and the dial's meaning depended on the trade. Every goal now maximises the expected profit;
+  "best return for the risk" keeps the blend's worst-tenth average loss inside a share of the budget (2%), and
+  "lowest risk" inside 0.5%, choosing by profit per unit of tail it adds. A limit in dollars of the budget reads the
+  same for any trade.
+- *Joint paths, not a sum of single-stock outcomes.* Hedges (a long and a short in the same sector) and
+  concentration (three chip makers) only show when the stocks move together: one Cholesky draw per step from the
+  last year's correlation, shrunk 30% toward the average and repaired to a valid matrix, with each trade's stop and
+  target applied path by path. 4,000 paths keeps a split under a second on the 25 candidates allowed.
+- *The stop first when a step touches both levels.* The 2.7 simulation re-walks such a step in 32 sub-steps; across
+  25 stocks that costs more than it changes, so the blend takes the cautious reading and says so.
+- *Day trades on day-trade levels and day-trade records.* The 2.8 cards were five-day trades (chart targets two to
+  three ranges away). A day trade needs a stop and targets one session can reach (0.6 of a range; a fade aims at the
+  gap) and a record of the same span (the gap's open to close, not the next five closes). Swing remains a choice.
+- *Overseas markets as context, not a term.* By the US open, Tokyo's close and Frankfurt's morning are already in
+  SPY's pre-market price, and US-listed country funds' daily returns overlap the US session, so a regression of a
+  stock on them would count the same move twice. The plan shows them, and measures each stock's own move against
+  SPY's (beta × SPY's move); that own part is what the score rewards.
+- *Paper in its own tables.* Every reader of `positions` (risk limits, the daily loss stop, journal analytics, Live
+  news holdings, reconciliation) would otherwise need a filter, and one missed filter would let pretend trades move
+  real limits. Separate tables make that impossible by construction; a test checks the real figures stay at zero.
+- *Fills a real account would get.* Paper results that assume midpoints overstate. Shares cross the spread and pay the
+  app's trading cost; an option buys only when its ask reaches the card's limit (the price the app tells the user to
+  type), and a limit not reached by the close is cancelled. Midpoint fills exist, labelled optimistic.
+- *Time from the data source for now, the calendar otherwise.* Demo data keeps its own market hours; deciding "is it
+  open now" from the exchange calendar would make paper trading on demo data never fill outside New York's day. The
+  calendar decides for any other moment (catch-up, replay, horizons).
+- *The app is a local program.* It values portfolios only while running, says so, catches up from bars when it
+  restarts (5-minute bars within the source's reach, daily beyond; options by the model, marked), and offers a
+  launchd agent to keep it running.
+- *No leverage on paper.* A short's proceeds land in the cash, so counting only its value as collateral left buying
+  power unchanged and a $10,000 portfolio could short $50,000. Buying power is the cash less twice each short's value
+  now (the proceeds and the same again), less what waiting orders hold: what is long plus what is short never
+  exceeds what the portfolio is worth. A paper result built on leverage the user does not have would flatter the
+  recommendations.
+- *Real-money splits always obey the limits.* The approved rule was that real-money blends obey the risk limits and
+  paper may lift them; a tick box on every screen made the rule optional. The box is now on a paper portfolio's panel
+  only, and the route ignores `obey_limits: false` without `paper: true`.
+- *One date for an N-day trade.* The card counted N trading days after today, paper orders N−1 after the trade day,
+  and the blend's grid either, depending on what else was in it. All three now use `marketdays.horizon_close` (the
+  card's rule, with the holidays known), so a five-day trade begun before Tuesday's open leaves at the next
+  Tuesday's close everywhere.
+- *Mirror records and the better-looking side.* Riding and fading a move are measured on the same cases with opposite
+  signs, so picking whichever shows the better average always picks the luckier side of the noise, an upward bias
+  the pull toward zero was meant to remove. The plan rides the move unless the fade's record also wins the trade's
+  way more often than not with 95% confidence.
+- *Ideas' edge beside SPY.* The signal history measures a stock's move beyond SPY's. The blend gives the market no
+  drift, so under the model that is the stock's whole expected move; the alternative, adding SPY's past drift back,
+  would make every long look better for a reason the app does not stand behind. Said in V2.md.
+
+**Tests.** `tests/test_marketdays.py` (holidays, early closes, stepping, phases); `tests/test_opportunities.py` (the
+pull and the cost, the gap record on a constructed history, the rest-of-the-day record leaving today out, day levels,
+the opportunity's checks, saved settings and their refusals, runs kept and pruned, an idea's edge);
+`tests/test_blend.py` (a valid correlation with gaps filled, exits with the stop first, CVaR, the day and swing grids
+across a holiday and an early close, every cap and limit under each goal, the greedy split against every whole-share
+split on two trades, cash and the study split with no edge, given units, a contract limited by its premium, a swing
+blend with a day trade in it, bad requests); `tests/test_paper.py` (fills and the stop at the bid, the target or
+better and a partial close, a short's collateral and stop, an option limit that waits for the ask, conservative fills,
+buying power and refusals, isolation from the real positions, horizons and the end, end dates over a holiday,
+catch-up from bars, an automated portfolio that picks, splits and rotates, the background pass, a replay of a stored
+run kept as a closed portfolio); `tests/test_digest_and_routes.py` (windows, the digest's ranking and window, the
+settings, blend and paper routes, the flags, the timed work's morning rescans); additions to `tests/test_morning.py`
+(the 250-stock universe, every stock ranked with the markets and day cards, rescans, swing on request, a day card);
+Chromium (an info icon on every screen opening on hover and click and closing when the pointer leaves or on Escape; a
+morning opportunity on Analyze opportunity with its levels; a split taken to Analyze opportunity and to paper trading;
+a manual paper portfolio with a trade, a valuation and a chart; a digest built on request).
+
+The pre-existing `test_chartview.py::test_the_news_sits_on_the_bars_of_the_range` failed on `main` before any change
+when the demo headlines fell on a weekend (a Sunday headline sits on Monday's first bar); the test now allows a
+headline from a day with no bars to sit on the next session's first bar.
+
+### Found while checking the screens
+
+The 2.15 screens were opened on demo data in Chromium before the review.
+
+- A confirmed reversal on a long slide gave a short card whose second target was below zero (a stop 38% away, targets
+  two and three times that). No price gets there, and valuing its contract took the log of a negative price. Cards
+  now refuse a stop or target at or below zero; the reversal is still listed, with the reason it has no card
+  (`test_the_card_caps_the_limit_and_falls_back_to_shares`).
+- The blend's correlation table ran past its panel instead of scrolling (a grid item's minimum width); the
+  instruments' tick boxes were spread across the page by a class name shared with another layout.
+- Trade ideas still scanned the 200 largest while the Morning plan read 250. The 250 are now Trade ideas' first
+  choice and default (`ideas.MAX_NAMES` 250; `test_the_200_are_the_100_large_caps_and_100_more_each_with_a_sector_fund`).
+- An info popover's heading ending in a question mark gained a full stop after it.
+
+### The independent review of 2.15
+
+An independent reviewer read the change and ran reproductions. It reported 20 findings (the last a group of four
+small ones) and five places where the docs did not match the code; all were fixed, except X13, which is answered by a
+decision recorded above and in V2.md.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| X1 | A short's proceeds went into the cash and only its value came back off as collateral, so buying power did not fall: a $10,000 portfolio shorted $49,740 | High | buying power is the cash less twice each short's value now; the order's cost check counts the trading cost | `test_shorts_and_waiting_orders_hold_buying_power`, `test_a_short_is_collateral_...` |
+| X2 | A share order waiting for the open reserved nothing (no limit price), so three $9,900 orders on $10,000 all filled at the open: cash −$19,718 | High | each pending order holds its estimated cost (`reserve`, new column in migration 17), freed on the fill or the cancellation | `test_shorts_and_waiting_orders_hold_buying_power` |
+| X3 | In a swing blend the drift was spread over the whole grid, so a 5-day trade beside a 20-day one expected a quarter of its edge and mixed blends leaned to the longest trade | Medium | each stock's drift over its own exit step | `test_each_trade_expects_its_whole_edge_by_its_own_horizon` |
+| X4 | A close (or closing the portfolio) racing the background valuation at a stop sold the position twice: two credits, doubled realized result | Medium | placing, closing and valuing take the book's lock; a sale re-reads the position inside its write and is refused when it was closed meanwhile | `test_a_sale_is_applied_once_when_a_close_meets_a_valuation` |
+| X5 | Units edited by hand skipped every cap and limit (5,000 AAPL on a $10,000 budget: $1,038,250 spent) while the page said "your limits applied" | Medium | `_breaches` checks the budget, positions, share and sector caps, the tail limit and your limits; `breaches`, `within_limits`, a note, a warning on the page | `test_units_that_break_a_cap_or_limit_say_so` |
+| X6 | Starting Live news did not start the timed work, so the digest was built only by its button | Medium | `/v2/live/start` wakes it | `test_starting_live_news_starts_the_timed_work` |
+| X7 | Automated portfolios traded whatever list was cached, however old: Monday's first pass used Friday's plan | Medium | `Hub.fresh`/`Hub.stale`: today's plan, a digest from the last two hours, ideas from today or the last trading day; stale lists named in the log | `test_an_automated_portfolio_trades_only_fresh_lists` |
+| X8 | Replay looked ahead (entry at the open of the bar containing the run; on daily bars, the open of the run's own day for an afternoon run), could not replay day trades on daily bars, and a daily bar's horizon hid its stop | Medium | bars carry their start; entry at the first bar starting at or after the run; a day trade on daily bars is refused with the reason; stop, then target, then horizon on each bar | `test_a_replay_enters_at_the_first_bar_after_the_run`, `test_a_bar_takes_the_stop_before_the_horizon_...` |
+| X9 | Every real-money split had a tick box to switch the risk limits off, against the approved rule | Medium | the box only on a paper portfolio's panel; the route ignores `obey_limits: false` without `paper: true` | `test_a_real_money_split_always_obeys_the_limits` |
+| X10 | An N-day horizon was counted three ways (card, paper order, blend alone or mixed) | Low | `marketdays.horizon_close` everywhere | `test_a_swing_order_leaves_at_the_cards_horizon`, the day-grid test |
+| X11 | A day blend de-duplicated stocks before dropping swing trades, so a stock's day trade was lost behind its swing trade | Low | the horizon decides first | `test_a_day_blend_keeps_a_stocks_day_trade_behind_its_swing_trade` |
+| X12 | Automated passes applied the share and sector caps and the open-risk limit to each new batch only | Low | `cap_base`, `held_sectors`, `held_risk` from the portfolio's holdings (`_holdings`) | `test_caps_count_what_a_portfolio_already_holds` |
+| X13 | Ideas' edge is the move beyond SPY's, used as the stock's whole move | Low | a decision: the model gives the market no drift, so under it the two are the same; said in V2.md | — |
+| X14 | Riding and fading are mirror records, so the better-looking one carried an upward bias | Low | the fade only when its win rate clears 50% with 95% confidence | `test_the_fade_needs_a_record_that_clears_the_noise` |
+| X15 | A custom end on a weekend rolled back to the previous session, possibly already past | Low | the next session's close; a date that is not a date is refused | `test_a_custom_end_on_a_closed_day_is_the_next_sessions_close` |
+| X16 | Between midnight and 4:00 the session digest's window started after now | Low | the previous session | `test_the_session_window_never_starts_after_now` |
+| X17 | Stops, targets and swing horizons acted on pre- and after-hours quotes, unlike catch-up's bars | Low | levels only on regular-session prices; a horizon after the close at that session's close | `test_levels_wait_for_the_session_and_a_horizon_after_it_takes_the_close` |
+| X18 | On a phone the long info popovers were cut off and could not be scrolled | Low | placed on the side with more room, never taller than it; a tap pins it open and scrollable (checked at 390 × 700 in Chromium) | Chromium |
+| X19 | With `FEATURE_OPPORTUNITY_BLEND=0` the Morning plan and Live news still offered Set budget | Low | hidden with the flag (the card's "Add to the blend" too); `/v2/prefs` serves the morning settings and the digest is part of Live news (behind `FEATURE_LIVE_NEWS`), so they stay | Chromium |
+| X20 | Smaller paper defects: an expired option settled at the next day's price; any text was accepted as an expiration; a missing quote left positions open in a closed portfolio; the replay chart was never disposed | Low | settles at the expiration session's close (16:00 or an early close); a date is required; the end closes at the last valuation, said so; disposed before the next replay | `test_an_expired_option_settles_on_its_expiration_days_close`, `test_the_end_closes_at_the_last_valuation_...` |
+| X21 | Docs: buying power, the digest "while Live news is listening", replay entries, each trade's horizon and drift, "within your limits" | Low | V2.md, README and the release notes describe the code as it now is | — |

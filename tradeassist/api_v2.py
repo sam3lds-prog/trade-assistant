@@ -198,7 +198,7 @@ class WatchCreate(Strict):
 
 
 class IdeasScan(Strict):
-    universe: Literal["top200", "large_caps", "watchlist"] = "top200"
+    universe: Literal["top250", "top200", "large_caps", "watchlist"] = "top250"
 
 
 class HistoryImport(Strict):
@@ -409,6 +409,134 @@ class WalkForwardV2(BacktestV2):
 
 class Note(Strict):
     note: str = ""
+
+
+# --- 2.15: opportunities, blends and paper trading -----------------------------------------------------------
+Instrument = Literal["shares", "short", "call", "put"]
+ALL_INSTRUMENTS: list[Instrument] = ["shares", "short", "call", "put"]
+
+
+class PrefsUpdate(Strict):
+    morning: dict[str, Any] | None = None
+    live: dict[str, Any] | None = None
+    blend: dict[str, Any] | None = None
+
+
+class BlendLeg(Strict):
+    key: str | None = Field(None, max_length=200)
+    symbol: str = Field(..., min_length=1, max_length=12)
+    direction: Literal["LONG", "SHORT"] | None = None
+    horizon: Literal["day", "swing"] | None = None
+    horizon_days: int | None = Field(None, ge=1, le=260)
+    entry: float | None = Field(None, gt=0)
+    stop: float | None = Field(None, gt=0)
+    target_1: float | None = Field(None, gt=0)
+    target_2: float | None = Field(None, gt=0)
+
+
+class BlendRequest(Strict):
+    """Which opportunities (a source's best `top_n`, these keys, or basket legs) and how to split the budget."""
+    source: Literal["morning", "live", "ideas", "all", "basket"] = "morning"
+    keys: list[str] | None = Field(None, max_length=40)
+    legs: list[BlendLeg] | None = Field(None, max_length=25)
+    top_n: int = Field(10, ge=1, le=25)
+    budget: float = Field(..., ge=100, le=10_000_000)
+    goal: Literal["dollars", "balanced", "low_risk"] = "balanced"
+    tail_pct: float = Field(2.0, ge=0.25, le=20)
+    max_share: float = Field(0.2, ge=0.05, le=1)
+    max_positions: int = Field(10, ge=1, le=25)
+    sector_cap: float = Field(0.4, ge=0.1, le=1)
+    instruments: list[Instrument] = Field(default_factory=lambda: list(ALL_INSTRUMENTS))
+    obey_limits: bool = True          # honoured only with `paper`: a real-money split always obeys your limits
+    paper: bool = False               # a split for a paper portfolio: measured on its own, limits may be lifted
+    horizon: Literal["day", "swing"] | None = None
+    units: dict[str, int] | None = None
+    with_options: bool = True
+
+
+class DigestBuild(Strict):
+    interval: Literal["15", "30", "60", "session"] | None = None
+
+
+class PaperOption(Strict):
+    option_type: Literal["CALL", "PUT", "call", "put"] | None = None
+    strike: float = Field(..., gt=0)
+    expiration: str
+    iv: float | None = Field(None, gt=0, le=10)
+
+
+class PaperTrade(Strict):
+    symbol: str = Field(..., min_length=1, max_length=12)
+    instrument: Instrument = "shares"
+    quantity: int = Field(..., ge=1, le=1_000_000)
+    option: PaperOption | None = None
+    limit_price: float | None = Field(None, gt=0)
+    stop: float | None = Field(None, gt=0)
+    target_1: float | None = Field(None, gt=0)
+    target_2: float | None = Field(None, gt=0)
+    horizon_days: int | None = Field(None, ge=1, le=260)
+    opp_key: str | None = Field(None, max_length=200)
+    source: str | None = Field(None, max_length=20)
+    setup_label: str | None = Field(None, max_length=120)
+    why: str = Field("", max_length=300)
+
+
+class PaperBlendImport(Strict):
+    """A split from the blend, taken into a paper portfolio: the same opportunities and units."""
+    source: Literal["morning", "live", "ideas", "all", "basket"] = "morning"
+    keys: list[str] | None = Field(None, max_length=40)
+    legs: list[BlendLeg] | None = Field(None, max_length=25)
+    units: dict[str, int] = Field(..., min_length=1)
+
+
+class PaperCreate(Strict):
+    name: str = Field("", max_length=80)
+    mode: Literal["AUTO", "MANUAL"] = "MANUAL"
+    budget: float = Field(..., ge=100, le=10_000_000)
+    source: Literal["morning", "live", "ideas", "all", "manual"] | None = None
+    goal: Literal["dollars", "balanced", "low_risk"] = "balanced"
+    tail_pct: float = Field(2.0, ge=0.25, le=20)
+    top_n: int = Field(10, ge=1, le=25)
+    horizon: Literal["day", "swing"] = "day"
+    ends: Literal["day", "week", "month", "custom", "open"] | None = None
+    ends_on: str | None = None
+    fill_model: Literal["REALISTIC", "CONSERVATIVE", "MIDPOINT"] = "REALISTIC"
+    obey_limits: bool = True
+    rotate: bool = True
+    refresh_minutes: int | None = None
+    instruments: list[Instrument] = Field(default_factory=lambda: list(ALL_INSTRUMENTS))
+    max_share: float = Field(0.2, ge=0.05, le=1)
+    max_positions: int = Field(10, ge=1, le=25)
+    sector_cap: float = Field(0.4, ge=0.1, le=1)
+    trades: list[PaperTrade] | None = Field(None, max_length=25)
+    blend: PaperBlendImport | None = None
+    notes: str = Field("", max_length=500)
+
+
+class PaperClose(Strict):
+    quantity: int | None = Field(None, ge=1)
+    reason: str = Field("closed by you", max_length=200)
+
+
+class PaperSettings(Strict):
+    rotate: bool | None = None
+    refresh_minutes: int | None = None
+    name: str | None = Field(None, max_length=80)
+
+
+class PaperReplay(Strict):
+    run_id: int | None = Field(None, ge=1)
+    picks_day: str | None = None
+    budget: float = Field(..., ge=100, le=10_000_000)
+    goal: Literal["dollars", "balanced", "low_risk"] = "balanced"
+    tail_pct: float = Field(2.0, ge=0.25, le=20)
+    top_n: int = Field(10, ge=1, le=25)
+    horizon_days: int | None = Field(None, ge=1, le=60)
+    max_share: float = Field(0.2, ge=0.05, le=1)
+    max_positions: int = Field(10, ge=1, le=25)
+    instruments: list[Instrument] = Field(default_factory=lambda: list(ALL_INSTRUMENTS))
+    obey_limits: bool = False
+    save: bool = False
 
 
 def build_router(svc: Any) -> APIRouter:
@@ -871,7 +999,7 @@ def build_router(svc: Any) -> APIRouter:
                                 target_1=req.target_1,
                                 target_2=req.target_2 if req.target_2 is not None else req.target_1,
                                 horizon_days=req.horizon_days, setup="analysis",
-                                levels_why="Your thesis levels from Analyze a stock.")
+                                levels_why="Your thesis levels from Analyze opportunity.")
         except (DataError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         trend = None
@@ -907,14 +1035,230 @@ def build_router(svc: Any) -> APIRouter:
         if not live.source_names():
             raise HTTPException(status_code=400, detail="No news source is set up. " + " ".join(live.setup_notes()))
         try:
-            return clean(live.start())
+            out = live.start()
         except RuntimeError as exc:                   # still finishing the pass it was on when stopped
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        wake()                                        # the digest is built on its interval while Live news listens
+        return clean(out)
 
     @router.post("/live/stop")
     def live_stop():
         need("live_news")
         return clean(live.stop())
+
+    # --- 2.15: saved settings, opportunities in one shape, blends, the news digest, paper trading -----------------
+    from .blend import BlendError, Blender
+    from .clockwork import Clockwork
+    from .digest import NewsDigest
+    from .hub import Hub
+    from .opportunities import Runs, compact, load_prefs, save_prefs
+    from .paper import PaperBook, PaperError
+    digest = svc.digest if getattr(svc, "digest", None) else NewsDigest(svc, live, morning)
+    svc.digest = digest
+    hub = svc.hub if getattr(svc, "hub", None) else Hub(svc, morning, ideas, digest)
+    svc.hub = hub
+    blender = svc.blender if getattr(svc, "blender", None) else Blender(svc)
+    svc.blender = blender
+    paper = svc.paper if getattr(svc, "paper", None) else PaperBook(svc, hub, blender)
+    svc.paper = paper
+    clockwork = svc.clockwork if getattr(svc, "clockwork", None) else Clockwork(svc, paper=paper, morning=morning,
+                                                                                 digest=digest, feed=live)
+    svc.clockwork = clockwork
+    try:
+        if clockwork.needed():
+            clockwork.ensure_running()               # active paper portfolios keep being valued after a restart
+    except Exception:                                # noqa: BLE001 - the app starts whatever happens here
+        log.exception("The timed work could not be started")
+
+    def wake() -> None:
+        try:
+            if clockwork.needed():
+                clockwork.ensure_running()
+        except Exception:                            # noqa: BLE001
+            log.exception("The timed work could not be started")
+
+    @router.get("/prefs")
+    def prefs_get():
+        return clean(load_prefs(svc.db, svc.settings))
+
+    @router.post("/prefs")
+    def prefs_set(req: PrefsUpdate):
+        try:
+            out = save_prefs(svc.db, svc.settings, req.model_dump(exclude_none=True))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        wake()
+        return clean(out)
+
+    @router.get("/opportunities/{source}")
+    def opportunities_list(source: str, limit: int = 250):
+        need("opportunity_blend")
+        try:
+            opps, meta = hub.list(source)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return clean({"source": source, "opportunities": [compact(o) for o in opps[:max(1, min(limit, 500))]], "meta": meta})
+
+    def resolve(source: str, keys: list[str] | None, legs: list[BlendLeg] | None, top_n: int) -> list[dict[str, Any]]:
+        if legs:
+            return hub.from_legs([leg.model_dump() for leg in legs])
+        if keys:
+            found = hub.find(keys)
+            if not found:
+                raise ValueError("None of those opportunities is in the latest lists (they may have been rebuilt)")
+            return found
+        if source == "basket":
+            raise ValueError("A basket needs its legs")
+        opps, _ = hub.list(source)
+        opps = [o for o in opps if o.get("tradable", True)]
+        if not opps:
+            raise ValueError({"morning": "Build the Morning plan first.", "live": "No news digest yet: listen to Live news and "
+                              "build a digest.", "ideas": "Scan Trade ideas first.", "all": "No opportunities yet: build the "
+                              "Morning plan, a news digest or a Trade ideas scan first."}[source])
+        return opps[:top_n]
+
+    @router.post("/blend")
+    def blend_split(req: BlendRequest):
+        need("opportunity_blend")
+        try:
+            opps = resolve(req.source, req.keys, req.legs, req.top_n)
+            notes = hub.ensure_options(opps) if req.with_options and any(i in req.instruments for i in ("call", "put")) else []
+            out = blender.run(opps, budget=req.budget, goal=req.goal, tail_pct=req.tail_pct, max_share=req.max_share,
+                              max_positions=req.max_positions, sector_cap=req.sector_cap, instruments=list(req.instruments),
+                              obey_limits=req.obey_limits if req.paper else True, horizon=req.horizon, units=req.units,
+                              real_open_risk=not req.paper)
+        except (BlendError, ValueError, DataError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        out["notes"] = list(out.get("notes") or []) + notes
+        out["opportunities"] = [compact(o) for o in opps]
+        out["source"] = req.source
+        return clean(out)
+
+    @router.get("/live/digest")
+    def live_digest():
+        need("live_news")
+        return clean({"digest": digest.latest(), "interval": load_prefs(svc.db, svc.settings)["live"]["digest"]})
+
+    @router.post("/live/digest")
+    def live_digest_build(req: DigestBuild):
+        need("live_news")
+        choice = req.interval or load_prefs(svc.db, svc.settings)["live"]["digest"]
+        try:
+            return clean({"digest": digest.build(choice), "interval": choice})
+        except (ValueError, DataError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def paper_call(fn):
+        need("paper_trading")
+        try:
+            return clean(fn())
+        except (PaperError, BlendError, ValueError, DataError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.get("/paper")
+    def paper_list():
+        return paper_call(lambda: {**paper.listing(), "clockwork": clockwork.status()})
+
+    def blend_trades(b: PaperBlendImport) -> list[dict[str, Any]]:
+        opps = {o["key"]: o for o in resolve(b.source, b.keys, b.legs, 25)}
+        trades = []
+        for k, n in b.units.items():
+            key, _, inst = k.rpartition("|")
+            o = opps.get(key)
+            if o is None or n < 1:
+                continue
+            if inst in ("call", "put") and not o.get("option"):
+                hub.ensure_options([o], limit=1)
+                if not o.get("option"):
+                    raise ValueError(f"{o['symbol']}: its contract could not be found again")
+            trades.append(PaperBook.trade_from(o, {"instrument": inst, "units": n}))
+        if not trades:
+            raise ValueError("None of the blend's trades could be found again (the lists may have been rebuilt)")
+        return trades
+
+    @router.post("/paper/portfolios")
+    def paper_create(req: PaperCreate):
+        def run():
+            body = req.model_dump(exclude={"blend", "trades"})
+            trades = [t.model_dump() for t in req.trades or []]
+            if req.blend is not None:
+                trades += blend_trades(req.blend)
+            body["trades"] = trades
+            out = paper.create(body)
+            wake()
+            return out
+        return paper_call(run)
+
+    @router.get("/paper/portfolios/{pid}")
+    def paper_detail(pid: int):
+        return paper_call(lambda: paper.detail(pid))
+
+    @router.post("/paper/portfolios/{pid}/trades")
+    def paper_trade(pid: int, req: PaperTrade):
+        def run():
+            paper.add_trade(pid, req.model_dump())
+            return paper.detail(pid)
+        return paper_call(run)
+
+    @router.post("/paper/portfolios/{pid}/import")
+    def paper_import(pid: int, req: PaperBlendImport):
+        def run():
+            errors = []
+            for t in blend_trades(req):
+                try:
+                    paper.add_trade(pid, t)
+                except (PaperError, DataError, ValueError) as exc:
+                    errors.append(f"{t['symbol']}: {exc}")
+            return {**paper.detail(pid), "errors": errors}
+        return paper_call(run)
+
+    @router.post("/paper/positions/{position_id}/close")
+    def paper_close_position(position_id: int, req: PaperClose):
+        return paper_call(lambda: paper.close_position(position_id, req.quantity, req.reason))
+
+    @router.post("/paper/portfolios/{pid}/close")
+    def paper_close(pid: int):
+        return paper_call(lambda: paper.close_portfolio(pid))
+
+    @router.post("/paper/portfolios/{pid}/mark")
+    def paper_mark(pid: int):
+        def run():
+            from datetime import timezone as _tz
+            p = paper._portfolio(pid)
+            last = datetime.fromisoformat(p["last_marked_at"]) if p.get("last_marked_at") else None
+            now = datetime.now(_tz.utc)
+            if last is not None and (now - last).total_seconds() > 900 and paper._traded_between(last, now):
+                paper.catch_up(pid, last, now)
+            paper.mark(pid)
+            return paper.detail(pid)
+        return paper_call(run)
+
+    @router.post("/paper/portfolios/{pid}/step")
+    def paper_step(pid: int):
+        def run():
+            out = paper.step(pid, force=True)
+            paper.mark(pid)
+            return {**paper.detail(pid), "step": out}
+        return paper_call(run)
+
+    @router.post("/paper/portfolios/{pid}/settings")
+    def paper_settings(pid: int, req: PaperSettings):
+        return paper_call(lambda: paper.update(pid, req.model_dump(exclude_none=True)))
+
+    @router.post("/paper/portfolios/{pid}/delete")
+    def paper_delete(pid: int):
+        return paper_call(lambda: paper.delete(pid))
+
+    @router.get("/paper/runs")
+    def paper_runs():
+        def run():
+            picks = [r["day"] for r in svc.db.query("SELECT DISTINCT day FROM morning_picks ORDER BY day DESC LIMIT 30")]
+            return {"runs": Runs(svc.db).listing(), "picks_days": picks}
+        return paper_call(run)
+
+    @router.post("/paper/replay")
+    def paper_replay(req: PaperReplay):
+        return paper_call(lambda: paper.replay(req.model_dump()))
 
     # --- your trade history (2.6): imported read-only, analysed locally ---------------------------------
     from .tradehistory import HistoryImportError, TradeHistory

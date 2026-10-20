@@ -31,6 +31,8 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "live_news": True,
     "analyze_interactive": True,
     "what_if": True,
+    "opportunity_blend": True,
+    "paper_trading": True,
     "options_backtest": False,
 }
 
