@@ -458,6 +458,25 @@ class DigestBuild(Strict):
     interval: Literal["15", "30", "60", "session"] | None = None
 
 
+class ReplayEvent(Strict):
+    """2.16: a news event typed in by hand for the replay: the stock, when the headline was published (ISO time with
+    its offset, or New York time), the headline, and the way to trade it when the headline does not say."""
+    symbol: str = Field(..., min_length=1, max_length=12)
+    published_at: str = Field(..., min_length=10, max_length=40)
+    headline: str = Field("", max_length=300)
+    direction: Literal["LONG", "SHORT"] | None = None
+
+
+class ReplayRequest(Strict):
+    events: Literal["feed", "manual", "both"] = "feed"
+    manual: list[ReplayEvent] = Field(default_factory=list, max_length=50)
+    days: float | None = Field(None, gt=0, le=60)
+    feed_latency_s: float = Field(1.0, ge=0, le=3600)
+    spread_bps: float | None = Field(None, ge=0, le=1000)      # None: estimated from the prints before the news
+    slippage_bps: float = Field(5.0, ge=0, le=500)
+    limit: int = Field(60, ge=1, le=150)
+
+
 class PaperOption(Strict):
     option_type: Literal["CALL", "PUT", "call", "put"] | None = None
     strike: float = Field(..., gt=0)
@@ -1045,6 +1064,52 @@ def build_router(svc: Any) -> APIRouter:
     def live_stop():
         need("live_news")
         return clean(live.stop())
+
+    # --- 2.16: the news replay: what was really available after a headline ---------------------------------------
+    from .newsreplay import NewsReplay
+    replay = svc.replay if getattr(svc, "replay", None) else NewsReplay(svc, live)
+    svc.replay = replay
+    live.replay = replay                              # the live assessment reads the replay's record
+
+    @router.get("/live/replay")
+    def live_replay_status():
+        need("live_news")
+        return clean(replay.status())
+
+    @router.post("/live/replay")
+    def live_replay_start(req: ReplayRequest):
+        need("live_news")
+        from .livenews import parse_time
+        events: list[dict[str, Any]] = []
+        for m in req.manual:
+            raw = m.published_at.strip()
+            try:
+                when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                when = parse_time(raw)                # Unix seconds, say
+            if when is None:
+                raise HTTPException(status_code=400, detail=f"{m.symbol}: the time {m.published_at!r} could not be read "
+                                                            "(use ISO 8601, e.g. 2026-10-19T08:30:00-04:00)")
+            if when.tzinfo is None:
+                from .optionmath import NY
+                when = when.replace(tzinfo=NY)        # a bare time is New York time, as the wires print it
+            if when > datetime.now(timezone.utc):
+                raise HTTPException(status_code=400, detail=f"{m.symbol}: {m.published_at} is in the future")
+            events.append({"symbol": svc._symbol(m.symbol), "published_at": when.isoformat(), "headline": m.headline,
+                           "source": "manual", "direction": {"LONG": 1, "SHORT": -1}.get(m.direction or "", 0)})
+        if req.events in ("feed", "both"):
+            events += replay.events_from_feed(req.days, req.limit)
+        try:
+            out = replay.start(events[:req.limit + len(req.manual)], feed_latency_s=req.feed_latency_s,
+                               spread_bps=req.spread_bps, slippage_bps=req.slippage_bps)
+        except (ValueError, DataError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return clean({**out, "events": len(events)})
+
+    @router.post("/live/replay/stop")
+    def live_replay_stop():
+        need("live_news")
+        return clean(replay.stop())
 
     # --- 2.15: saved settings, opportunities in one shape, blends, the news digest, paper trading -----------------
     from .blend import BlendError, Blender

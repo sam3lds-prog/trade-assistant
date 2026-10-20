@@ -434,6 +434,7 @@ def signal_row(r: Any) -> dict[str, Any]:
     d["checks_list"] = json.loads(d.pop("checks_json") or "[]")
     d["card"] = json.loads(d.pop("card_json")) if d.get("card_json") else None
     d["holdings"] = json.loads(d.pop("holdings_json")) if d.get("holdings_json") else []
+    d["intel"] = json.loads(d.pop("intel_json")) if d.get("intel_json") else None
     return d
 
 
@@ -553,6 +554,7 @@ class LiveFeed:
         self._movers_lock = threading.Lock()
         self._search_thread: threading.Thread | None = None
         self._headline_jobs = 0
+        self.replay: Any = None                       # 2.16: the news replay, whose record the assessment reads
         self.started_at: str | None = None
         self.sources: dict[str, dict[str, Any]] = {name: {"name": name, "state": "off", "note": None,
                                                           "last_item_at": None, "last_ok_at": None,
@@ -1328,11 +1330,13 @@ class LiveFeed:
             # known yet, from the price at the news: the day's move is then the move since the news, which only
             # makes the late rule harder to meet.
             prev = self._day_close(quote, daily) or price
+            holdings = self.holdings(sym)
             self._update(sig["id"], same, state="watching", ref_price=price, ref_at=iso(now),
                          prev_close=prev, atr=daily["atr"], last_price=price, last_at=iso(now),
                          next_check_at=iso(now + timedelta(seconds=CHECK_DELAYS[0])),
                          reason="Watching how the price answers the news.",
-                         holdings_json=json.dumps(self.holdings(sym)))
+                         holdings_json=json.dumps(holdings),
+                         intel_json=self._intel(item, quote, session, daily, price, prev, holdings, now, price))
             return
 
         price, why = self._price(quote, session, self._demo_runs.get(sig["id"]))
@@ -1349,7 +1353,9 @@ class LiveFeed:
         n = sig["checks"] + 1
         next_at = iso(now + timedelta(seconds=CHECK_DELAYS[n])) if n < len(CHECK_DELAYS) else None
         fields: dict[str, Any] = {"last_price": price, "last_at": iso(now), "checks": n,
-                                  "checks_json": json.dumps(checks[-12:]), "next_check_at": next_at}
+                                  "checks_json": json.dumps(checks[-12:]), "next_check_at": next_at,
+                                  "intel_json": self._intel(item, quote, session, self._daily(sym), sig["ref_price"],
+                                                            sig["prev_close"], sig["holdings"], now, price)}
         if sig["state"] == "watching":
             if verdict["direction"] and verdict["path"] == "day_move" and self._opportunity_today(sym, sig["id"]):
                 fields.update(state="skipped", next_check_at=None, reason=(
@@ -1431,6 +1437,25 @@ class LiveFeed:
                 "card_json": json.dumps(_clean(card)) if card else None, "holdings_json": json.dumps(holdings),
                 "reason": f"{sym} moved {move}: moves with news have tended to keep drifting, so the trade is "
                           f"{'long' if d > 0 else 'short'}. " + " ".join(notes)}
+
+    def _intel(self, item: dict[str, Any], quote: dict[str, Any], session: str, daily: dict[str, Any] | None,
+               ref_price: float | None, prev_close: float | None, holdings: list[dict[str, Any]],
+               now: datetime, price: float | None) -> str | None:
+        """2.16: the five-step assessment (newsintel.assess) on the quote in hand, as JSON for the signal's row.
+        A failure here never stops a price check: the signal simply carries no assessment."""
+        try:
+            from .newsintel import assess, classify
+            record = None
+            if self.replay is not None:
+                kind = classify(item.get("headline") or "", item.get("summary") or "", kind=item.get("kind"),
+                                extra=item.get("extra") or {}, tone=item.get("tone"))["catalyst"]
+                record = self.replay.record_for(kind)
+            out = assess(item, quote, session, daily, ref_price=ref_price, prev_close=prev_close, record=record,
+                         now=now, holdings=holdings, reaction_pct=self.settings.live_min_reaction_pct, price=price)
+            return json.dumps(_clean(out))
+        except Exception as exc:                      # noqa: BLE001 - advisory: the price check goes on without it
+            log.info("Live news: no assessment for %s: %r", item.get("headline", "")[:60], exc)
+            return None
 
     def holdings(self, symbol: str) -> list[dict[str, Any]]:
         """Open positions in the stock, each with the way it profits (+1 rising, -1 falling)."""
@@ -1516,8 +1541,14 @@ class LiveFeed:
         rows = self.db.query("SELECT * FROM live_news WHERE id > ? ORDER BY id DESC LIMIT ?", (after, max(1, limit)))
         items = [item_row(r) for r in rows]
         universe = self.universe()
+        from .newsintel import classify
         for it in items:
             it["tradable"] = [s for s in it["symbols"] if self.settings.live_universe == "all" or s in universe]
+            try:
+                it["catalyst"] = classify(it["headline"], it.get("summary") or "", kind=it.get("kind"), extra=it.get("extra"),
+                                          tone=it.get("tone"))
+            except Exception:                         # noqa: BLE001 - a kind is a bonus on the list
+                it["catalyst"] = None
         if not all_symbols:
             items = [it for it in items if it["tradable"]]
         since = iso(now_utc() - timedelta(hours=24))

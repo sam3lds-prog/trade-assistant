@@ -3,7 +3,10 @@
    the price's answer in the minutes after, and a trade card when the move confirms: buy shares or calls when
    the news sends a stock up, short or buy puts when it sends it down, and an alert on anything you hold.
    2.15: a digest every 15, 30 or 60 minutes (or over the session) ranks the news's best opportunities, with a
-   budget split across them (blend.js). Setups, not forecasts, and nothing here places an order. */
+   budget split across them (blend.js). 2.16: each item is judged in five steps (what it is, tradable now, the way it
+   should push the price, how much is already in the price, the signal), and the replay measures what price an order
+   could really have got 100 ms, 500 ms, 1 s, 5 s and 30 s after a headline. Setups, not forecasts, and nothing here
+   places an order. */
 
 const LIVE_POLL_MS = 4000;
 const LIVE_STATE_WORDS = { waiting: "Waiting for a price", watching: "Watching", opportunity: "Opportunity",
@@ -42,6 +45,36 @@ function toneTag(item) {
 function headlineLink(item) {
   const text = item.headline || "(no headline)";
   return item.url && /^https?:\/\//i.test(item.url) ? el("a", { href: item.url, target: "_blank", rel: "noopener noreferrer", text }) : el("span", { text });
+}
+
+/* ---------- 2.16: the five steps ---------- */
+const INTEL_STEP_WORDS = { detected: "Detected", tradable: "Tradable", effect: "Effect", priced_in: "Priced in", signal: "Signal" };
+const INTEL_STATE_CLASS = { pass: "intel-pass", warn: "intel-warn", fail: "intel-fail", info: "intel-info" };
+
+function catalystTag(cat) {
+  if (!cat) return "";
+  return el("span", { class: `m-tag ${cat.major ? "m-news" : "m-none"}`, title: `${cat.severity}/100, read from the ${cat.via}. ${cat.why}`,
+    text: `${cat.label}${cat.major ? " · major" : ""}` });
+}
+
+function intelStrip(intel) {
+  if (!intel || !(intel.steps || []).length) return null;
+  return el("div", { class: "intel-strip" }, intel.steps.map(st => el("span", { class: `intel-step ${INTEL_STATE_CLASS[st.state] || "intel-info"}`,
+    title: `${INTEL_STEP_WORDS[st.step] || st.step}: ${st.title}. ${st.detail || ""}` },
+    el("b", { text: INTEL_STEP_WORDS[st.step] || st.step }), ` ${st.title}`)));
+}
+
+function intelPanel(intel) {
+  if (!intel || !(intel.steps || []).length) return null;
+  const sig = intel.signal || {};
+  const leg = intel.second_leg || {};
+  const box = el("div", { class: "intel-box" }, intelStrip(intel),
+    el("p", { class: "small" }, el("strong", { text: `${{ enter: "Enter", wait: "Wait", pass: "Pass" }[sig.action] || "Signal"}${sig.direction ? ` ${sig.direction === "LONG" ? "long" : "short"}` : ""}: ` }), sig.why || ""),
+    el("details", {}, el("summary", { class: "small", text: "The five steps in full" }),
+      el("ol", { class: "intel-list small" }, intel.steps.map(st => el("li", { class: INTEL_STATE_CLASS[st.state] || "" },
+        el("strong", { text: `${INTEL_STEP_WORDS[st.step] || st.step}: ${st.title}. ` }), st.detail || "")),
+        leg.text ? el("li", {}, el("strong", { text: "The record: " }), leg.text) : null)));
+  return box;
 }
 
 function signalMove(sig) {
@@ -121,7 +154,7 @@ function opportunityPanel(sig) {
     el("span", { class: "small muted", text: `${news.source || ""} · ${liveAgo(news.received_at)}${news.delay_seconds !== null && news.delay_seconds !== undefined ? ` · ${liveDelay(news.delay_seconds)}` : ""}` }));
   const box = el("div", { class: `panel live-opp${sig.state === "stopped" ? " live-stopped" : ""}`, id: `live-${sig.id}` }, head,
     el("p", {}, headlineLink(news), " ", news.symbols ? toneTag(news) : ""),
-    signalMove(sig), el("p", { class: "small", text: sig.reason || "" }));
+    signalMove(sig), el("p", { class: "small", text: sig.reason || "" }), intelPanel(sig.intel));
   const hb = holdingsBanner(sig);
   if (hb) box.append(hb);
   if (sig.card) box.append(morningCard(sig.card, sig.state === "opportunity" ? { watchStop: liveWatchStop } : {}));
@@ -183,6 +216,130 @@ function digestSection() {
       el("div", { class: "panel-head" }, el("h3", {}, "The digest: the news's best opportunities ", infoIcon("digest", "About the digest")), budgetBtn),
       el("div", { class: "row" }, field("Rank", choice), buildBtn), head, err, body),
     blend, cardsBox);
+  return { node, refresh };
+}
+
+/* ---------- 2.16: the replay: what price an order could really have got after a headline ---------- */
+const REPLAY_POLL_MS = 2500;
+const offsetWord = s => s < 1 ? `${Math.round(s * 1000)} ms` : `${num(s, 0)} s`;
+const horizonWord = h => ({ "60": "1 min", "300": "5 min", "900": "15 min", "1800": "30 min", "3600": "1 hour", close: "close" })[h] || `${h} s`;
+
+function parseManualEvents(text) {
+  const out = [], bad = [];
+  for (const raw of (text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const parts = line.split(",").map(x => x.trim());
+    if (parts.length < 2 || !parts[0] || !parts[1]) { bad.push(line); continue; }
+    const last = (parts[parts.length - 1] || "").toUpperCase();
+    const direction = ["LONG", "SHORT"].includes(last) ? last : null;
+    const headline = parts.slice(2, direction ? parts.length - 1 : parts.length).join(", ");
+    out.push({ symbol: parts[0].toUpperCase(), published_at: parts[1], headline, direction });
+  }
+  return { events: out, bad };
+}
+
+function replayTable(r) {
+  const keys = r.horizons || [];
+  const cell = (row, k) => {
+    const c = (row.horizons || {})[k];
+    if (!c || !isNum(c.median)) return el("span", { class: "muted", text: "—" });
+    return el("div", { class: "small" }, el("strong", { class: c.median >= 0 ? "pos-text" : "neg-text", text: signedPct(c.median, 2) }),
+      el("div", { class: "muted", text: `${isNum(c.hit_rate) ? pct(100 * c.hit_rate, 0) : "n/a"} up · ${c.n}` }));
+  };
+  return table([
+    { label: "Order sent", cell: row => el("div", {}, el("strong", { text: `${offsetWord(row.offset_s)} after receipt` }),
+      el("div", { class: "small muted", text: `${row.n} fill${row.n === 1 ? "" : "s"}${row.halted ? `, ${row.halted} halted` : ""}` })) },
+    { label: "Fill vs pre-news", num: true, cell: row => isNum(row.since_ref_median_pct) ? el("span", { class: "small", text: signedPct(row.since_ref_median_pct, 2) }) : "—" },
+    { label: "First minute caught", num: true, cell: row => isNum(row.captured_median) ? el("span", { class: row.captured_median > 0 ? "pos-text" : "neg-text", text: pct(100 * row.captured_median, 0) }) : "—" },
+    { label: "Fill lag", num: true, cell: row => isNum(row.lag_median_s) ? `${num(row.lag_median_s, 1)} s` : "—" },
+    ...keys.map(k => ({ label: `Held to ${horizonWord(k)}`, num: true, cell: row => cell(row, k) }))], r.table || []);
+}
+
+function replayEventsTable(results) {
+  const rows = (results || []).slice(0, 150);
+  const net = (res, o, h) => {
+    const row = (res.offsets || []).find(x => x.offset_s === o && x.fill);
+    const v = row ? (row.net || {})[h] : null;
+    return isNum(v) ? el("span", { class: v >= 0 ? "pos-text" : "neg-text", text: signedPct(v, 2) }) : el("span", { class: "muted", text: "—" });
+  };
+  return table([
+    { label: "Stock", cell: e => el("div", {}, el("strong", { text: e.symbol }), el("div", { class: "small muted", text: e.published_at ? `${clockTime(e.published_at).slice(0, 8)} ${shortDate(e.published_at.slice(0, 10))}` : "" })) },
+    { label: "Headline", cell: e => el("div", { class: "small" }, e.headline || "(typed in)", el("div", { class: "muted", text: `${e.catalyst_label || e.catalyst} · ${e.direction > 0 ? "long" : "short"} · ${e.source || ""}` })) },
+    { label: "Pre-news → 1 min", num: true, cell: e => e.result && !e.result.skipped ? el("span", { class: (e.result.jump_1m_pct || 0) >= 0 ? "pos-text" : "neg-text", text: `${money(e.result.ref_price)} ${signedPct(e.result.jump_1m_pct, 2)}` }) : el("span", { class: "small muted", text: e.result ? e.result.skipped : "" }) },
+    { label: "100 ms → 30 min", num: true, cell: e => e.result && !e.result.skipped ? net(e.result, 0.1, "1800") : "" },
+    { label: "30 s → 30 min", num: true, cell: e => e.result && !e.result.skipped ? net(e.result, 30, "1800") : "" },
+    { label: "30 s → close", num: true, cell: e => e.result && !e.result.skipped ? net(e.result, 30, "close") : "" },
+    { label: "Notes", cell: e => el("span", { class: "small muted", text: e.result && !e.result.skipped ? [e.result.halted ? "halted" : null,
+      e.result.spread_estimated ? `spread ${num(e.result.spread_bps, 0)} bps (estimated)` : `spread ${num(e.result.spread_bps, 0)} bps`,
+      `${e.result.prints} prints`].filter(Boolean).join(" · ") : "" }) }], rows);
+}
+
+function replaySection() {
+  const source = el("select", { "aria-label": "Events to replay" }, [["feed", "This week's feed"], ["both", "The feed and the events typed in"], ["manual", "Only the events typed in"]]
+    .map(([v, t]) => el("option", { value: v, text: t })));
+  const latency = el("input", { type: "number", step: "0.1", min: "0", value: "1.0", style: "width: 6em" });
+  const spread = el("input", { type: "number", step: "1", min: "0", placeholder: "estimate", style: "width: 6em" });
+  const slippage = el("input", { type: "number", step: "1", min: "0", value: "5", style: "width: 6em" });
+  const limit = el("input", { type: "number", step: "1", min: "1", max: "150", value: "60", style: "width: 5em" });
+  const manual = el("textarea", { rows: "3", class: "intel-manual", placeholder: "One event a line: SYMBOL, time, headline, LONG or SHORT\ne.g. ACME, 2026-10-19T08:30:00-04:00, Acme to be acquired for $40 a share, LONG" });
+  const runBtn = el("button", { class: "primary", text: "Run the replay" });
+  const stopBtn = el("button", { class: "plain hidden", text: "Stop" });
+  const err = el("div", { class: "error", role: "alert" });
+  const status = el("p", { class: "small muted" });
+  const verdicts = el("div");
+  const body = el("div");
+  let timer = null, shown = "";
+
+  const render = d => {
+    const job = d.job || {};
+    const r = d.result;
+    const reach = d.reach || {};
+    const lines = [reach.note || ""];
+    if (isNum(d.feed_events)) lines.push(`${d.feed_events} event${d.feed_events === 1 ? "" : "s"} in the feed can be replayed.`);
+    if (job.state === "running") lines.push(`Replaying ${job.done} of ${job.total}${job.current ? ` (${job.current})` : ""}…`);
+    else if (job.state === "failed") lines.push(`The last run failed: ${job.error}`);
+    else if (job.state === "stopped") lines.push("The last run was stopped.");
+    status.textContent = lines.filter(Boolean).join(" ");
+    runBtn.classList.toggle("hidden", job.state === "running");
+    stopBtn.classList.toggle("hidden", job.state !== "running");
+    if (!r) { verdicts.replaceChildren(); body.replaceChildren(el("p", { class: "small muted", text: "No replay yet." })); shown = ""; return; }
+    const key = `${r.built_at}|${r.run_id}`;
+    if (key === shown) return;
+    shown = key;
+    const p = r.params || {};
+    verdicts.replaceChildren(el("p", { class: "small muted", text: `Built ${new Date(r.built_at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" })} New York time: ${r.events} event${r.events === 1 ? "" : "s"} replayed${r.skipped ? `, ${r.skipped} skipped` : ""}; feed latency ${num(p.feed_latency_s, 1)} s, spread ${isNum(p.spread_bps) ? `${num(p.spread_bps, 0)} bps` : "estimated from the prints before each headline"}, slippage ${num(p.slippage_bps, 0)} bps, each paid on the way in and out.` }),
+      ...(r.verdicts || []).map(v => banner(v.state === "pass" ? "pass" : v.state === "fail" ? "fail" : v.state === "warn" ? "warn" : "info", v.text)));
+    const kinds = (r.kinds || []).length ? el("details", {}, el("summary", { text: "By kind of news: entering at 30 s, holding 30 minutes" }),
+      table([{ label: "Kind", cell: k => k.label }, { label: "Events", num: true, cell: k => num(k.events, 0) },
+        { label: "First-minute move", num: true, cell: k => isNum(k.median_jump_pct) ? signedPct(k.median_jump_pct, 2) : "—" },
+        { label: "Median after costs", num: true, cell: k => isNum(k.median_net_pct) ? el("span", { class: k.median_net_pct >= 0 ? "pos-text" : "neg-text", text: signedPct(k.median_net_pct, 2) }) : "—" },
+        { label: "Positive", num: true, cell: k => isNum(k.hit_rate) ? pct(100 * k.hit_rate, 0) : "—" }], r.kinds)) : null;
+    body.replaceChildren(el("h4", { class: "small", text: "Median result after costs, by when the order was sent and how long it was held" }),
+      replayTable(r), kinds,
+      el("details", {}, el("summary", { text: `Every event (${(r.results || []).length})` }), replayEventsTable(r.results)));
+  };
+  const refresh = async () => {
+    clearTimeout(timer);
+    try { const d = await api("/v2/live/replay"); render(d); err.textContent = "";
+      if ((d.job || {}).state === "running") timer = setTimeout(refresh, REPLAY_POLL_MS); }
+    catch (e) { err.textContent = e.message; }
+  };
+  runBtn.addEventListener("click", () => withBusy(runBtn, err, async () => {
+    const parsed = parseManualEvents(manual.value);
+    if (parsed.bad.length) throw new Error(`Could not read: ${parsed.bad[0]} (SYMBOL, time, headline, LONG or SHORT)`);
+    if (source.value === "manual" && !parsed.events.length) throw new Error("Type in at least one event, or replay the feed.");
+    const body = { events: source.value, manual: parsed.events, feed_latency_s: Number(latency.value) || 0,
+      slippage_bps: Number(slippage.value) || 0, limit: Math.max(1, Math.min(150, Number(limit.value) || 60)) };
+    if (spread.value !== "") body.spread_bps = Number(spread.value);
+    render(await api("/v2/live/replay", body));
+    timer = setTimeout(refresh, REPLAY_POLL_MS);
+  }));
+  stopBtn.addEventListener("click", () => withBusy(stopBtn, err, async () => { render(await api("/v2/live/replay/stop", {})); timer = setTimeout(refresh, REPLAY_POLL_MS); }));
+  const node = el("details", { class: "panel" }, el("summary", {}, "The replay: what was really available after a headline ", infoIcon("newsreplay", "About the replay")),
+    el("p", { class: "small muted", text: "For each headline the feed collected (or that you type in), the trade prints around it say what price a marketable order would have got 100 ms, 500 ms, 1 s, 5 s and 30 s after the app received it, after the feed's latency, half the spread, slippage and any halt, and what that trade made held to a minute, five, fifteen, thirty, an hour and the close. Each event is traded the way the news should push it, decided before the price moved. The answer to \"is a sub-second feed worth paying for\" is the gap between the 100 ms row and the 30 s row; the trade to build on is the second leg, if the 30 s row is positive." }),
+    el("div", { class: "row" }, field("Events", source), field("Feed latency (s)", latency), field("Spread (bps)", spread), field("Slippage (bps)", slippage), field("At most", limit), runBtn, stopBtn),
+    field("Events typed in", manual), err, status, verdicts, body);
   return { node, refresh };
 }
 
@@ -271,6 +428,7 @@ function buildLive() {
         { label: "Stock", cell: s => el("strong", { text: s.symbol }) },
         { label: "News", cell: s => el("div", { class: "small" }, headlineLink((s.news || [])[0] || {})) },
         { label: "Price since", cell: s => signalMove(s) },
+        { label: "The five steps", cell: s => s.intel ? el("div", {}, intelStrip(s.intel), el("div", { class: "small muted", text: ((s.intel.signal || {}).why || "").slice(0, 160) })) : el("span", { class: "small muted", text: "Assessed at the first price" }) },
         { label: "Next check", cell: s => el("span", { class: "small muted", text: s.next_check_at ? clockTime(s.next_check_at).slice(0, 8) : "—" }) }], watching)
         : el("p", { class: "small muted", text: "Nothing being watched right now." }),
       quiet.length ? el("details", {}, el("summary", { text: `${quiet.length} item${quiet.length === 1 ? "" : "s"} the price did not answer (or that could not be traded)` }),
@@ -285,6 +443,7 @@ function buildLive() {
         { label: "Time (New York)", cell: it => el("div", { class: "small" }, clockTime(it.received_at).slice(0, 8), el("div", { class: "muted", text: liveDelay(it.delay_seconds) })) },
         { label: "Stocks", cell: it => el("span", { text: (it.symbols || []).join(", ") || "—" }) },
         { label: "Headline", cell: it => el("div", {}, headlineLink(it), it.summary ? el("div", { class: "small muted", text: it.summary.slice(0, 180) }) : null) },
+        { label: "Kind", cell: it => catalystTag(it.catalyst) },
         { label: "Source", cell: it => el("span", { class: "small", text: it.source }) },
         { label: "Tone", cell: it => toneTag(it) }], items)
         : el("p", { class: "small muted", text: d.running ? "Nothing yet. Items appear here within seconds of arriving." : "Press Start listening." })));
@@ -313,6 +472,7 @@ function buildLive() {
   allBox.addEventListener("change", () => { lastKey = ""; poll(); });
 
   const digest = digestSection();
+  const replay = replaySection();
   let digestTimer = null;
   const digestPoll = async () => {
     clearTimeout(digestTimer);
@@ -321,10 +481,10 @@ function buildLive() {
     digestTimer = setTimeout(digestPoll, 30000);
   };
   const view = el("section", {}, el("h2", { text: "Live news" }),
-    el("p", { class: "lede", text: "Press releases, 8-K filings and headlines as they arrive, the price's answer in the minutes after, and a trade card when the move confirms: shares or calls when the news sends a stock up, a short or puts when it sends it down. Every 15, 30 or 60 minutes the digest ranks the news's best opportunities, ready to blend under a budget. A news move is usually fastest in its first seconds; this shows you the news and the price together, with the risk worked out. Nothing here places an order." }),
+    el("p", { class: "lede", text: "Press releases, 8-K filings and headlines as they arrive, the price's answer in the minutes after, and a trade card when the move confirms: shares or calls when the news sends a stock up, a short or puts when it sends it down. Each item is judged in five steps: what it is, whether its stock can be traded right now, the way the news should push it, how much of that push is already in the price, and only then a signal. Every 15, 30 or 60 minutes the digest ranks the news's best opportunities, ready to blend under a budget. A news move is usually fastest in its first seconds, and the replay below measures what was really left for an order sent after the headline. Nothing here places an order." }),
     el("div", { class: "panel" }, el("div", { class: "row" }, startBtn, stopBtn, notifyBtn), err, sourcesBox, statusLine, notesBox),
-    digest.node, oppBox, heldBox, moverBox, watchBox, feedBox);
-  view.onShow = () => { poll(); digestPoll(); };
+    digest.node, oppBox, heldBox, moverBox, watchBox, feedBox, replay.node);
+  view.onShow = () => { poll(); digestPoll(); replay.refresh(); };
   return view;
 }
 
