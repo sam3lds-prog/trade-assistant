@@ -22,6 +22,8 @@ V2_WRITES = {
     "/v2/morning/watches/{watch_id}/remove", "/v2/morning/email", "/v2/analysis/email",
     # 2.10: start and stop listening to the news. Reads news and quotes; signals and cards are records and models.
     "/v2/live/start", "/v2/live/stop",
+    # 2.16: the news replay: reads trade prints and keeps a record of what was available after each headline.
+    "/v2/live/replay", "/v2/live/replay/stop",
     # 2.15: saved screen settings, the budget split (a model), the news digest (a ranking of what was recorded),
     # and paper trading: pretend money in tables of their own. None of it reaches a broker or the real positions.
     "/v2/prefs", "/v2/blend", "/v2/live/digest", "/v2/paper/portfolios", "/v2/paper/portfolios/{pid}/trades",
