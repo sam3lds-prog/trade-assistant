@@ -65,7 +65,7 @@ latest news with their sources. Everything is modelled only: the app still place
 
 Version 2.5 joins the screens into one path, from which way to lean to the limit to type at
 your broker. The app opens on **Today**: the market regime, your daily stop and open risk, and
-up to eight stocks leaning long and eight leaning short. Pick one and **Analyze a stock**
+up to eight stocks leaning long and eight leaning short. Pick one and **Analyze opportunity**
 (Decide) opens with that direction, grades the stock trade and finds calls or puts on the same
 levels from one thesis form. It sets the sized shares beside the best risk-adjusted contract:
 what each costs, makes at the target and loses if wrong, the chance option prices imply, and
@@ -87,6 +87,26 @@ Every trade opens to the statement rows it was built from, so each figure can be
 against Robinhood. Optionally, with `ROBINHOOD_ACCOUNT_READ=1`, it also reads your filled
 orders and holdings through the Robinhood connection, read-only.
 
+Version 2.15 joins the screens into one path from opportunity to result, and adds paper trading.
+
+- **The Morning plan reads the 250 largest US stocks** before the open and through the morning session, with the
+  markets overseas, the US index funds and the sector funds. Every stock is ranked as an opportunity (a score from
+  0 to 100, the points behind it on hover): its move in its own daily ranges, its own part beyond SPY's, volume,
+  news, the setup and the past record of the same trade. After the open the sharpest swings are judged by a
+  rest-of-the-day record from 5-minute bars, and the plan can rescan itself every few minutes until 11:30. Day
+  trades (out by 15:55) or five-day swings; trade cards for the best 20.
+- **Set budget** splits money across several stocks on the Morning plan, Live news, Trade ideas and Analyze
+  opportunity: most dollars, the best return for the risk, or the lowest risk, as shares, shorts, calls or puts,
+  always within your risk limits (units you edit by hand are checked, and anything they break is named). Each trade's only edge is its past record, after costs and pulled toward zero when the record
+  is short; with no edge the split holds cash.
+- **Live news digests** rank the news's best opportunities every 15, 30 or 60 minutes, or over the session.
+- **Analyze opportunity** (was Analyze a stock) takes one stock or a basket: each stock's full analysis, and the
+  blend's split, outcomes, risk and correlations.
+- **Paper trading**: automated portfolios that pick, split, rotate and close by themselves, manual ones you run,
+  realistic fills, value over time against SPY, and a replay of any stored recommendation list. Pretend money
+  only: it never touches your positions or limits.
+- **Info icons** beside every screen's title say what it does.
+
 Version 2.14 makes the what-if factors count once, zooms the chart both ways, and sizes combinations and
 a budget.
 
@@ -103,7 +123,7 @@ a budget.
   the expected result minus caution × the average loss in the worst tenth of outcomes, with a cap on any one
   strategy and only strategies whose loss has a limit. One click makes the split the combination.
 
-Version 2.13 adds **what-if analysis** under the chart on Analyze a stock.
+Version 2.13 adds **what-if analysis** under the chart on Analyze opportunity.
 
 - **A model you can steer.** Overseas markets (Nikkei, DAX, Hang Seng), the US market, the 10-year yield,
   Brent, the dollar, the VIX, the stock's sector fund and foreign peers you name, each with today's reading
@@ -120,7 +140,7 @@ Version 2.13 adds **what-if analysis** under the chart on Analyze a stock.
   downside and upside (10th and 90th percentile), the expected result, the chance of a profit, the most it
   can lose. Rank every strategy and the best by the model and the AI's pick are marked. Models only.
 
-Version 2.12 makes **Analyze a stock** interactive.
+Version 2.12 makes **Analyze opportunity** interactive.
 
 - **The chart** is drawn with TradingView's Lightweight Charts (Apache-2.0, served by the app, no CDN):
   drag to pan, scroll or pinch to zoom, hover for every figure of a bar, click a swing, a news marker or a
@@ -182,7 +202,7 @@ Version 2.10 changes how the app prices an option you want to buy, and adds **Li
   - Optionally, opportunities and alerts arrive by browser notification or email.
 
 Version 2.8 adds the **Morning plan**, the new landing screen. Each morning it reads about 290 large US
-stocks plus your watchlist, finds the ones that jumped since the last close, and says which look worth
+stocks (from 2.15, the 250 largest) plus your watchlist, finds the ones that jumped since the last close, and says which look worth
 riding (fresh news behind the move) and which look stretched enough to fade (no news found, already
 overextended before the move). Each setup becomes a trade card: entry, stop, targets, shares sized to
 your risk, the best call or put the budget pays for, and the exact limit price to type — capped where
@@ -627,6 +647,55 @@ price's answer to it within seconds, with the risk worked out:
 
 Nothing here places an order. Switch the screen off with `FEATURE_LIVE_NEWS=0`.
 
+## Opportunities, budgets and paper trading (2.15)
+
+**From opportunity to result.** The Morning plan, Live news and Trade ideas each rank what they find as
+*opportunities*: a stock, a direction, a stop and targets, a horizon (a day trade out by 15:55, or a swing), a score
+from 0 to 100 and an edge. Tick the ones you like, or let the best-scored go, and press **Set budget**:
+
+1. Give the budget and the goal. **Most dollars** buys the most expected profit the caps allow. **Best return for
+   the risk** does the same while the average loss in the worst tenth of outcomes stays under a share of the budget
+   (2% unless you set it). **Lowest risk** keeps that under 0.5% and prefers trades that add the least tail risk.
+2. Choose the caps (the most in one trade, the number of trades, the instruments). Your real-money risk limits
+   always apply here; only a paper portfolio's own panel can lift them.
+3. **Plan the split.** The answer lists each trade, as shares, a short, a call or a put, with its dollars, its loss at
+   the stop and what it adds; the blend's expected result, its range, the chance of a profit and the worst tenth;
+   sectors, how the stocks move together, and what a market drop would do.
+4. **Analyze this blend** opens it on Analyze opportunity (where you can edit the units and evaluate them; anything
+   the edited units break, the budget, a cap or a limit, is named), **Paper trade this blend** opens a paper
+   portfolio with it, **Copy orders** copies the orders to type.
+
+**What the edge is.** The optimizer is told one thing about direction: each trade's past record, the average move of
+the same kind of trade on these stocks (after a gap of this size, open to close; after a morning swing of this size,
+to the close; for ideas, the signal history 10 days on against SPY), after the round trip's cost, and pulled toward
+zero when the record has few cases. Nothing else. When no record beats its costs, the split keeps the cash and shows
+an equal-risk split for study, with no edge behind it.
+
+**Paper trading** (under Hold) is pretend money in tables of its own: it never touches your positions, the journal or
+your risk limits.
+
+- **Automated**: give a budget and a source (the Morning plan, the news digest, Trade ideas or the best of all three).
+  It takes the best opportunities, splits the budget, and trades on paper. Every few minutes it looks again: it sells
+  a position whose opportunity has faded when a fresher one scores at least 15 points higher, and puts idle cash to
+  work within the caps for the whole portfolio. It trades only fresh lists (today's Morning plan, a digest from the
+  last two hours, Trade ideas from today or the last trading day). Day-trade portfolios open nothing after 15:00
+  and are out by 15:55.
+- **Manual**: place trades yourself, or add a blend; close all or part any time. Stops, targets and horizons apply.
+- **Fills**: Realistic (shares cross the spread with your trading cost; a call or put fills only when the market
+  reaches the card's limit), Conservative (options at the ask) or Midpoint (optimistic). Stops and targets act on
+  regular-session prices. No leverage: a short ties up its whole value, and an order waiting for the open holds
+  its cost.
+- **Results**: each portfolio's value over time against SPY, portfolios side by side, the trade log, return, drawdown,
+  win rate and average R.
+- **Replay**: run any stored recommendation list (every plan, digest and ideas scan from 2.15 on, and the Morning plan's
+  earlier picks) over a past horizon on price history. Each trade enters at the first bar after the run (on daily
+  bars, older than the 5-minute history reaches, the next session's open), never earlier.
+
+Portfolios are valued only while the app runs. When it was closed, or the Mac asleep, they catch up from price history
+on restart. To keep the app running on a Mac, run `./setup_paper.sh` once (it starts the app at login and restarts it
+if it stops; `./setup_paper.sh --remove` undoes it). Switch the areas off with `FEATURE_OPPORTUNITY_BLEND=0` and
+`FEATURE_PAPER_TRADING=0`.
+
 ## Version 2
 
 **Morning plan (2.8).** The landing screen. Switch it off with `FEATURE_MORNING=0`.
@@ -658,15 +727,15 @@ Nothing here places an order. Switch the screen off with `FEATURE_LIVE_NEWS=0`.
    line). The Mac must be awake — the script prints the `pmset` line that wakes it. Try it without
    sending: `.venv/bin/python run.py --morning-print`.
 
-**The trade card on Analyze a stock (2.9).** After **Grade and find a contract**, your thesis gets the
+**The trade card on Analyze opportunity (2.9).** After **Grade and find a contract**, your thesis gets the
 same card the Morning plan builds: the best contract for your risk per trade, the capped limit price, the
 order to copy, **Watch the stop**, and **Email me this analysis** — the trend reading and the card sent to
 your inbox, built on the server from your own levels.
 
 **Trade ideas (2.7).** Under Find. Switch it off with `FEATURE_TRADE_IDEAS=0`.
 
-1. Pick the stocks: the 200 largest US companies (a fixed list, not updated automatically), the 100
-   large ones, or your watchlist. Press **Scan**. The scan runs in the background with a progress bar and
+1. Pick the stocks: the 250 largest US companies (2.15; a fixed list, not updated automatically), the 200
+   largest, the 100 large ones, or your watchlist. Press **Scan**. The scan runs in the background with a progress bar and
    can be stopped.
    - On demo data the 200 take about two minutes.
    - With live data, the first scan of the day also fetches each stock's price history, spaced out so the
@@ -772,7 +841,7 @@ Switch it off with `FEATURE_TODAY=0`.
 Six screens are new or extended. Each part can be switched off in `.env` (see the end of
 `.env.example`); the classic screens work as before.
 
-**Analyze a stock.** The trend engine gives one of seven states (strong uptrend to strong
+**Analyze opportunity.** The trend engine gives one of seven states (strong uptrend to strong
 downtrend, with "uptrend weakening" and "downtrend developing" between), the bullish and
 bearish evidence behind it point by point (swing structure, moving averages, momentum,
 strength against SPY and the stock's sector fund, volume, and patterns that passed the
@@ -803,7 +872,7 @@ trend chart then runs on to the horizon date with the targets, the invalidation,
 option prices imply by then and where the contract breaks even. **Set the limit** on any
 contract opens Price an option on it with the limit ladder ready.
 
-**The interactive chart (2.12).** At the foot of Analyze a stock, with `FEATURE_ANALYZE_INTERACTIVE=1`
+**The interactive chart (2.12).** At the foot of Analyze opportunity, with `FEATURE_ANALYZE_INTERACTIVE=1`
 (the default).
 
 1. **Range and grouping.** Press 1D to 10Y, or Custom and type two dates. The grouping follows the range
@@ -1220,6 +1289,8 @@ these corrections:
 ```
 run.py                     start the app, record the daily snapshot, or check Robinhood
 update.sh                  update from GitHub (macOS and Linux)
+setup_morning.sh           schedule the 7:00 morning email on a Mac (2.8)
+setup_paper.sh             keep the app running on a Mac, for paper trading and the timed work (2.15)
 tradeassist/
   config.py                settings from .env
   providers/               Tradier, Robinhood and demo data, all read-only
@@ -1261,7 +1332,15 @@ tradeassist/
   tradeanalysis.py         trades rebuilt from it; strategies, risk, periods and patterns (2.6)
   robinhood_account.py     optional read of your orders and holdings through the connection (2.6)
   ideas.py                 trade ideas: the background scan of up to 200 stocks, graded and ranked (2.7)
-  morning.py               the morning plan: movers, ride/fade setups, limit caps, past records, watches (2.8)
+  morning.py               the morning plan: movers, ride/fade setups, limit caps, past records, watches (2.8);
+                           the 250 largest ranked as opportunities, the markets, the morning session (2.15)
+  marketdays.py            the exchange calendar: holidays, early closes, the phase of the day (2.15)
+  opportunities.py         opportunities in one shape: the edge, the records behind it, saved settings, stored runs (2.15)
+  hub.py                   the latest opportunities from each screen, and baskets built by hand (2.15)
+  blend.py                 the budget split across stocks: joint paths, exits, goals, caps and limits (2.15)
+  digest.py                the Live news digest: the news's best opportunities in a window, ranked (2.15)
+  paper.py                 paper trading: portfolios, fills, marks, automation, catch-up and replay (2.15)
+  clockwork.py             the timed work: paper marks and steps, the morning rescans, the digest (2.15)
   livenews.py              live news: RTPR stream, SEC 8-K and Finnhub polling, price reactions, signals (2.10);
                            the "why is it moving?" movers scan (2.11)
   searchnews.py            news found by searching: Google News search feeds and capped Brave news search (2.11)
@@ -1286,9 +1365,10 @@ tradeassist/
                            trades.js My trades (2.6), ideas.js Trade ideas (2.7), morning.js Morning plan (2.8),
                            live.js Live news (2.10), chart.js the interactive chart (2.12), whatif.js the
                            what-if widget (2.13), lwcharts.js TradingView Lightweight Charts 5.2.1
-                           (Apache-2.0; LICENSE-lightweight-charts.txt)
+                           (Apache-2.0; LICENSE-lightweight-charts.txt); blend.js the budget split, basket.js
+                           Analyze opportunity's basket, paper.js Paper trading, help.js the info icons (2.15)
 docs/V2.md                 version 2 in detail: rules, formulas, database and API
-docs/IMPROVEMENTS.md       the 2.1.1 to 2.13 engineering record: defects found, tests, reports
+docs/IMPROVEMENTS.md       the 2.1.1 to 2.15 engineering record: defects found, tests, reports
 docs/RELEASE_NOTES.md      what changed in each release, and how to upgrade
 tests/                     automated tests
 ```

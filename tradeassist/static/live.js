@@ -2,7 +2,8 @@
 /* Trade Assistant 2.10: Live news. Stock-moving news as it arrives (press releases, 8-K filings, headlines),
    the price's answer in the minutes after, and a trade card when the move confirms: buy shares or calls when
    the news sends a stock up, short or buy puts when it sends it down, and an alert on anything you hold.
-   Setups, not forecasts, and nothing here places an order. */
+   2.15: a digest every 15, 30 or 60 minutes (or over the session) ranks the news's best opportunities, with a
+   budget split across them (blend.js). Setups, not forecasts, and nothing here places an order. */
 
 const LIVE_POLL_MS = 4000;
 const LIVE_STATE_WORDS = { waiting: "Waiting for a price", watching: "Watching", opportunity: "Opportunity",
@@ -128,6 +129,61 @@ function opportunityPanel(sig) {
   if ((sig.news || []).length > 1) box.append(el("details", {}, el("summary", { text: `${sig.news.length - 1} more item${sig.news.length > 2 ? "s" : ""} on ${sig.symbol}` }),
     el("ul", { class: "plain small" }, sig.news.slice(1).map(n => el("li", {}, `${clockTime(n.received_at).slice(0, 8)} `, headlineLink(n), ` (${n.source})`)))));
   return box;
+}
+
+/* ---------- 2.15: the digest: the news's best opportunities every so often, ranked, with a budget split ---------- */
+function digestSection() {
+  const picked = new Set();
+  const choice = el("select", { "aria-label": "Digest every" }, [["15", "Every 15 minutes"], ["30", "Every 30 minutes"], ["60", "Every hour"], ["session", "The whole session"]]
+    .map(([v, t]) => el("option", { value: v, text: t })));
+  const buildBtn = el("button", { class: "plain", text: "Build the digest now" });
+  const err = el("div", { class: "error", role: "alert" });
+  const head = el("p", { class: "small muted" });
+  const body = el("div");
+  const cardsBox = el("div");
+  const blend = blendPanel({ source: "live", collapsed: true, horizon: "day", title: "Split a budget across the news's opportunities",
+    keys: () => [...picked] });
+  const budgetBtn = el("button", { class: "primary small-btn", text: "Set budget" });
+  budgetBtn.addEventListener("click", () => blend.toggle());
+  if (!featureOn("opportunity_blend")) { budgetBtn.classList.add("hidden"); blend.classList.add("hidden"); }   // FEATURE_OPPORTUNITY_BLEND=0
+  let shown = "";
+  const render = d => {
+    if (!d) { head.textContent = "No digest yet. It is built at the interval above while Live news is listening, or press Build the digest now."; body.replaceChildren(); cardsBox.replaceChildren(); return; }
+    const key = `${d.built_at}|${d.count}`;
+    if (key === shown) return;
+    shown = key;
+    head.textContent = `Built ${new Date(d.built_at).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" })} New York time, covering ${d.window}: ${d.count} opportunit${d.count === 1 ? "y" : "ies"}.${d.record ? ` The record: ${num(d.record.cases, 0)} stock-days of 5-minute bars.` : ""}`;
+    const notes = (d.notes || []).map(n => el("p", { class: "small muted", text: n }));
+    const opps = d.opportunities || [];
+    body.replaceChildren(...notes, opps.length ? table([
+      { label: "", cell: o => pickBox(picked, o.key) },
+      { label: "#", num: true, cell: o => num(o.rank, 0) },
+      { label: "Stock", cell: o => el("div", {}, el("strong", { text: o.symbol }), el("div", { class: "small muted", text: money(o.price) })) },
+      { label: "News", cell: o => el("div", { class: "small" }, headlineLink({ headline: o.headline || "News", url: o.url }), el("span", { class: "muted", text: o.news_source ? ` (${o.news_source})` : "" })) },
+      { label: "Trade", cell: o => el("div", {}, el("span", { class: `m-tag ${o.direction === "LONG" ? "m-ride" : "m-fade"}`, text: o.direction === "LONG" ? "Buy" : "Short" }),
+        o.option ? el("div", { class: "small muted", text: `or a ${o.option.option_type.toLowerCase()} at $${num(o.option.premium, 2)}` }) : null) },
+      { label: "On the day", num: true, cell: o => isNum(o.move_pct) ? el("span", { class: o.move_pct >= 0 ? "pos-text" : "neg-text", text: signedPct(o.move_pct, 1) }) : "n/a" },
+      { label: "Edge", num: true, cell: edgeCell },
+      { label: "Score", num: true, cell: scoreCell },
+      { label: "", cell: o => state.openOpportunity && featureOn("trend_engine_v2") ? analyzeButton(o) : "" }], opps)
+      : el("p", { class: "small muted", text: "Nothing in this window." }));
+    const byKey = Object.fromEntries(opps.map(o => [o.card_key, o]));
+    cardsBox.replaceChildren(...(d.cards || []).map(c => morningCard(c, { watchStop: liveWatchStop, opportunity: byKey[c.key],
+      pick: byKey[c.key] ? () => { const k = byKey[c.key].key; if (picked.has(k)) picked.delete(k); else picked.add(k); } : null,
+      picked: byKey[c.key] ? () => picked.has(byKey[c.key].key) : null })));
+  };
+  const refresh = async () => {
+    try { const r = await api("/v2/live/digest"); choice.value = r.interval; render(r.digest); err.textContent = ""; }
+    catch (e) { err.textContent = e.message; }
+  };
+  choice.addEventListener("change", () => api("/v2/prefs", { live: { digest: choice.value } }).then(p => { state.prefs = p; }).catch(e => { err.textContent = e.message; }));
+  buildBtn.addEventListener("click", () => withBusy(buildBtn, err, async () => { shown = ""; render((await api("/v2/live/digest", { interval: choice.value })).digest); }));
+  const node = el("div", {},
+    el("div", { class: "panel" },
+      el("div", { class: "panel-head" }, el("h3", {}, "The digest: the news's best opportunities ", infoIcon("digest", "About the digest")), budgetBtn),
+      el("div", { class: "row" }, field("Rank", choice), buildBtn), head, err, body),
+    blend, cardsBox);
+  return { node, refresh };
 }
 
 function buildLive() {
@@ -256,11 +312,19 @@ function buildLive() {
   stopBtn.addEventListener("click", () => withBusy(stopBtn, err, async () => { renderSources(await api("/v2/live/stop", {})); }));
   allBox.addEventListener("change", () => { lastKey = ""; poll(); });
 
+  const digest = digestSection();
+  let digestTimer = null;
+  const digestPoll = async () => {
+    clearTimeout(digestTimer);
+    if (view.classList.contains("hidden")) return;
+    await digest.refresh();
+    digestTimer = setTimeout(digestPoll, 30000);
+  };
   const view = el("section", {}, el("h2", { text: "Live news" }),
-    el("p", { class: "lede", text: "Press releases, 8-K filings and headlines as they arrive, the price's answer in the minutes after, and a trade card when the move confirms: shares or calls when the news sends a stock up, a short or puts when it sends it down. A news move is usually fastest in its first seconds; this shows you the news and the price together, with the risk worked out. Nothing here places an order." }),
+    el("p", { class: "lede", text: "Press releases, 8-K filings and headlines as they arrive, the price's answer in the minutes after, and a trade card when the move confirms: shares or calls when the news sends a stock up, a short or puts when it sends it down. Every 15, 30 or 60 minutes the digest ranks the news's best opportunities, ready to blend under a budget. A news move is usually fastest in its first seconds; this shows you the news and the price together, with the risk worked out. Nothing here places an order." }),
     el("div", { class: "panel" }, el("div", { class: "row" }, startBtn, stopBtn, notifyBtn), err, sourcesBox, statusLine, notesBox),
-    oppBox, heldBox, moverBox, watchBox, feedBox);
-  view.onShow = () => poll();
+    digest.node, oppBox, heldBox, moverBox, watchBox, feedBox);
+  view.onShow = () => { poll(); digestPoll(); };
   return view;
 }
 

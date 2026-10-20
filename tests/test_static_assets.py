@@ -22,7 +22,8 @@ import pytest
 
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
 SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js",
-           "lwcharts.js", "chart.js", "whatif.js")   # in the order index.html loads them; lwcharts.js is the vendored chart library
+           "lwcharts.js", "chart.js", "whatif.js", "blend.js", "basket.js", "paper.js",
+           "help.js")   # in the order index.html loads them; lwcharts.js is the vendored chart library
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -174,12 +175,12 @@ def test_one_thesis_grades_finds_a_contract_and_sets_the_limit(tmp_path):
         assert "$0 against" not in body and "if bought" not in body
         assert body.count("middle outcome") == 2 and body.count("Eight in ten between") == 2
         # 2.9: the Morning trade card follows the grade — the capped limit, the order to copy, the email
-        # button — and no "Open on Decide" (this is Decide).
+        # button — and no "Analyze opportunity" button (this is that screen).
         page.wait_for_selector(".panel:has(> h3:text-is('The trade card')) .m-card", timeout=60000)
         tc = page.locator(".panel:has(> h3:text-is('The trade card'))")
         assert "Order to copy into Robinhood" in tc.inner_text()
         assert tc.locator("button:text-is('Email me this analysis')").count() == 1
-        assert tc.locator("button:text-is('Open on Decide')").count() == 0
+        assert tc.locator("button:text-is('Analyze opportunity')").count() == 0
         card = page.locator(".panel.thesis .pick").first
         chosen = page.evaluate("""() => {
           const k = state.decision.options.picks[0].contract;
@@ -356,7 +357,7 @@ def test_trade_ideas_lists_simulate_a_trade_and_hand_it_to_decide(tmp_path):
         page.click(".sim-panel button:text-is('Simulate')")
         page.wait_for_selector("text=Half out at target 1, the rest at target 2", timeout=60000)
         stop = float(page.input_value('.sim-panel input[aria-label="Stop"]'))
-        page.click("text=Open the thesis on Decide")
+        page.click(".sim-panel button:text-is('Analyze opportunity')")
         page.wait_for_function(f"state.thesis && state.thesis.symbol === '{symbol}' && location.hash === '#analyze'", timeout=30000)
         assert page.evaluate("state.thesis.invalidation") == pytest.approx(stop, abs=0.01)
     assert errors == []
@@ -393,9 +394,10 @@ def test_the_morning_plan_builds_cards_copies_an_order_and_watches_a_trigger(tmp
         page.wait_for_selector("text=No plan yet today", timeout=30000)
         assert page.evaluate("location.hash") == "#morning"
         page.click("button:text-is('Build the plan')")
-        page.wait_for_selector("text=Big movers since the last close", timeout=120000)
+        page.wait_for_selector("h3:has-text('stocks ranked')", timeout=120000)
         body = page.inner_text("section:not(.hidden)")
-        assert "Reversal watch" in body and "not a forecast" in body and "places an order" in body
+        assert "Reversal watch" in body and "not forecasts" in body and "places an order" in body
+        assert "Markets" in body and "Asia" in body                       # 2.15: the markets before the open
         cards = page.locator(".m-card")
         if cards.count():
             card = cards.first.inner_text()
@@ -412,7 +414,7 @@ def test_the_morning_plan_builds_cards_copies_an_order_and_watches_a_trigger(tmp
             page.locator(".m-watch button:text-is('Remove')").first.click()
         # The plan survives a reload without a rescan (it is kept in the database).
         page.goto(page.base + "#morning")
-        page.wait_for_selector("text=Big movers since the last close", timeout=30000)
+        page.wait_for_selector("h3:has-text('stocks ranked')", timeout=30000)
         assert page.request.get(page.base + "v2/morning?brief=true").json()["job"]["state"] in ("done", "idle")
     assert errors == []
 
@@ -423,7 +425,7 @@ def test_live_news_listens_shows_the_feed_and_turns_a_confirmed_move_into_a_card
     the Morning plan's trade card. Timings are shortened so the whole life of a signal takes seconds."""
     import tradeassist.livenews as live_mod
     import tradeassist.morning as morning_mod
-    monkeypatch.setattr(morning_mod, "movers_universe", lambda watchlist: ["AAPL", "MSFT", "NVDA"])
+    monkeypatch.setattr(morning_mod, "live_universe", lambda watchlist: ["AAPL", "MSFT", "NVDA"])
     monkeypatch.setattr(live_mod, "DEMO_TEMPLATES", (("{s} raises full-year outlook", 0.05),))
     monkeypatch.setattr(live_mod, "CHECK_DELAYS", (1, 1, 1, 1, 1, 1))
     monkeypatch.setattr(live_mod, "DEMO_MOVE_SECONDS", 1.0)
@@ -652,4 +654,106 @@ def test_price_an_option_shows_the_fair_price_and_its_evidence(tmp_path):
         text = page.inner_text(".fair-box")
         assert "Fair price" in text and "Midpoint of the bid and ask" in text
         assert "Most you will pay" in page.inner_text("section:not(.hidden)")
+    assert errors == []
+
+
+# --- 2.15 -----------------------------------------------------------------------------------------------------
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_every_screen_has_an_info_icon_that_opens_on_hover_or_click_and_closes_when_the_pointer_leaves(tmp_path):
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#price")
+        page.wait_for_selector("section:not(.hidden) h2 .info-btn", timeout=30000)
+        views = page.eval_on_selector_all(".rail button.nav:not(.hidden)", "bs => bs.map(b => b.dataset.view)")
+        assert "paper" in views and len(views) >= 19
+        for v in views:
+            page.click(f'.rail button.nav[data-view="{v}"]')
+            page.wait_for_selector("section:not(.hidden) h2 .info-btn", timeout=30000)
+        btn = page.locator("section:not(.hidden) h2 .info-btn")        # the last screen opened
+        btn.hover()                                                    # the pointer on the icon opens it
+        page.wait_for_selector(".info-pop.open", timeout=5000)
+        assert len(page.inner_text(".info-pop.open")) > 40
+        page.mouse.move(5, 5)                                          # and leaving the icon closes it
+        page.wait_for_function("!document.querySelector('.info-pop.open')", timeout=5000)
+        btn.click()                                                    # a click opens it too
+        assert page.locator(".info-pop.open").count() == 1
+        page.keyboard.press("Escape")
+        page.wait_for_function("!document.querySelector('.info-pop.open')", timeout=5000)
+        page.click('.rail button.nav[data-view="paper"]')
+        page.locator("section:not(.hidden) h2 .info-btn").hover()
+        assert "places an order" in page.inner_text(".info-pop.open")
+        assert page.locator('.rail button.nav[data-view="analyze"]').inner_text() == "Analyze opportunity"
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_a_morning_blend_opens_on_analyze_opportunity_and_goes_to_paper_trading(tmp_path, monkeypatch):
+    import tradeassist.clockwork as cw
+    import tradeassist.morning as morning_mod
+    monkeypatch.setattr(cw.Clockwork, "ensure_running", lambda self: None)
+    monkeypatch.setattr(morning_mod, "movers_universe",
+                        lambda watchlist: ["AAPL", "MSFT", "KO", "JPM", "NVDA", "CAT", "PG", "XOM", "UNH", "TSLA"])
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#morning")
+        page.click("button:text-is('Build the plan')")
+        page.wait_for_selector("h3:has-text('stocks ranked')", timeout=120000)
+        # One opportunity on Analyze opportunity: the basket shows it and the thesis carries its levels.
+        row = page.locator(".panel:has(h3:has-text('stocks ranked')) tbody tr").first
+        sym = row.locator("td").nth(2).locator("strong").inner_text()
+        row.locator("button:text-is('Analyze')").click()
+        page.wait_for_function("location.hash === '#analyze'", timeout=20000)
+        page.wait_for_selector(f".basket .chip:has-text('{sym}')", timeout=20000)
+        assert page.evaluate("state.thesis.symbol") == sym and page.evaluate("state.thesis.invalidation") is not None
+        # The split, from the Morning plan.
+        page.click('.rail button.nav[data-view="morning"]')
+        page.locator("section:not(.hidden) button:text-is('Set budget')").first.click()
+        page.locator("section:not(.hidden) .blend-panel button:text-is('Plan the split')").click()
+        page.wait_for_selector("section:not(.hidden) .blend-result", timeout=120000)
+        text = page.inner_text("section:not(.hidden) .blend-result")
+        assert ("Expected result" in text) or ("keeps the cash" in text)
+        if page.locator("section:not(.hidden) button:text-is('Analyze this blend')").count():
+            page.locator("section:not(.hidden) button:text-is('Analyze this blend')").click()
+            page.wait_for_selector(".basket .chip.on:has-text('Blend')", timeout=20000)
+            page.wait_for_selector("section:not(.hidden) .blend-result", timeout=120000)
+            assert page.locator("section:not(.hidden) h3:text-is('The stocks')").count() == 1
+            page.locator("section:not(.hidden) button:text-is('Paper trade this blend')").first.click()
+            page.wait_for_function("location.hash === '#paper'", timeout=30000)
+            page.wait_for_selector("section:not(.hidden) h3:has-text('Positions')", timeout=30000)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_paper_trading_opens_a_portfolio_takes_a_trade_and_charts_it(tmp_path, monkeypatch):
+    import tradeassist.clockwork as cw
+    monkeypatch.setattr(cw.Clockwork, "ensure_running", lambda self: None)
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#paper")
+        page.wait_for_selector("text=Open a new paper portfolio", timeout=30000)
+        page.click("summary:text-is('Open a new paper portfolio')")
+        page.locator("section:not(.hidden) .seg label:has-text('Manual')").first.click()
+        page.locator("section:not(.hidden) select").nth(1).select_option("open")
+        page.click("button:text-is('Open the portfolio')")
+        page.wait_for_selector("section:not(.hidden) h3:has-text('Positions (0)')", timeout=30000)
+        page.click("summary:text-is('Place a trade by hand')")
+        page.fill("section:not(.hidden) input[aria-label='Ticker']", "AAPL")
+        page.click("button:text-is('Place the paper order')")
+        page.wait_for_selector("section:not(.hidden) h3:has-text('Positions (1)')", timeout=30000)
+        body = page.inner_text("section:not(.hidden)")
+        assert "AAPL" in body and "Paper money only" in body and "Value over time" in body
+        page.click("button:text-is('Value it now')")
+        page.wait_for_selector("section:not(.hidden) .eq-wrap", timeout=20000)
+        page.click("summary:has-text('Replay a past run')")
+        page.wait_for_selector("section:not(.hidden) select[aria-label='Run to replay'] option", state="attached", timeout=20000)
+    assert errors == []
+
+
+@pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+def test_live_news_builds_a_digest_on_request(tmp_path, monkeypatch):
+    import tradeassist.clockwork as cw
+    monkeypatch.setattr(cw.Clockwork, "ensure_running", lambda self: None)
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.base + "#live")
+        page.wait_for_selector("text=The digest: the news's best opportunities", timeout=20000)
+        page.click("button:text-is('Build the digest now')")
+        page.wait_for_selector("text=Nothing confirmed in", timeout=20000)
     assert errors == []

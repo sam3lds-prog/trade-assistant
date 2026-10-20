@@ -585,3 +585,116 @@ def intraday_asked_from(cur: sqlite3.Cursor) -> None:
     columns = {row[1] for row in cur.execute("PRAGMA table_info(intraday_meta)").fetchall()}
     if "asked_from" not in columns:
         cur.execute("ALTER TABLE intraday_meta ADD COLUMN asked_from REAL")
+
+
+@migration(17, "opportunity runs and paper trading")
+def paper_tables(cur: sqlite3.Cursor) -> None:
+    """2.15: the opportunities each screen built (kept so paper trading can take the latest and replay any of them),
+    and paper portfolios: what was bought and sold on paper, at what price and why, and the portfolio's value over
+    time. Paper rows live in tables of their own, so nothing here ever reaches your real positions, the journal or
+    the risk limits. Records only; nothing here can place an order."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS opportunity_runs (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        source       TEXT NOT NULL CHECK (source IN ('morning', 'live', 'ideas', 'manual')),
+        created_at   TEXT NOT NULL,
+        day          TEXT NOT NULL,
+        count        INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,                -- the opportunities, best first
+        meta_json    TEXT NOT NULL DEFAULT '{}'
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_opportunity_runs_source ON opportunity_runs (source, id)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS paper_portfolios (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        name            TEXT NOT NULL,
+        mode            TEXT NOT NULL CHECK (mode IN ('AUTO', 'MANUAL', 'REPLAY')),
+        status          TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'CLOSED')),
+        created_at      TEXT NOT NULL,
+        closed_at       TEXT,
+        starts_at       TEXT NOT NULL,             -- a replay starts at the run's own time
+        ends_at         TEXT,                      -- the horizon's end; NULL runs until closed
+        budget          REAL NOT NULL CHECK (budget > 0),
+        cash            REAL NOT NULL,
+        source          TEXT NOT NULL,             -- morning, live, ideas, all, manual or run
+        goal            TEXT NOT NULL DEFAULT 'balanced',
+        tail_pct        REAL NOT NULL DEFAULT 2.0,
+        top_n           INTEGER NOT NULL DEFAULT 10,
+        horizon         TEXT NOT NULL DEFAULT 'day' CHECK (horizon IN ('day', 'swing')),
+        fill_model      TEXT NOT NULL DEFAULT 'REALISTIC' CHECK (fill_model IN ('REALISTIC', 'CONSERVATIVE', 'MIDPOINT')),
+        obey_limits     INTEGER NOT NULL DEFAULT 0,
+        rotate          INTEGER NOT NULL DEFAULT 1,
+        refresh_minutes INTEGER NOT NULL DEFAULT 15,
+        instruments     TEXT NOT NULL DEFAULT '["shares", "short", "call", "put"]',
+        max_share       REAL NOT NULL DEFAULT 0.2,
+        max_positions   INTEGER NOT NULL DEFAULT 10,
+        sector_cap      REAL NOT NULL DEFAULT 0.4,
+        run_id          INTEGER,
+        data_source     TEXT NOT NULL DEFAULT '',
+        last_marked_at  TEXT,
+        last_step_at    TEXT,
+        notes           TEXT NOT NULL DEFAULT ''
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS paper_positions (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        portfolio_id     INTEGER NOT NULL REFERENCES paper_portfolios (id) ON DELETE CASCADE,
+        opp_key          TEXT,
+        source           TEXT,
+        setup_label      TEXT,
+        symbol           TEXT NOT NULL,
+        instrument       TEXT NOT NULL CHECK (instrument IN ('SHARES', 'SHORT', 'CALL', 'PUT')),
+        direction        TEXT NOT NULL CHECK (direction IN ('LONG', 'SHORT')),
+        option_symbol    TEXT,
+        strike           REAL,
+        expiration       TEXT,
+        iv               REAL,
+        multiplier       REAL NOT NULL DEFAULT 1 CHECK (multiplier > 0),
+        quantity         REAL NOT NULL CHECK (quantity > 0),
+        open_quantity    REAL NOT NULL DEFAULT 0 CHECK (open_quantity >= 0),
+        status           TEXT NOT NULL CHECK (status IN ('PENDING', 'OPEN', 'CLOSED', 'CANCELLED')),
+        limit_price      REAL,                     -- a pending order's limit
+        reserve          REAL NOT NULL DEFAULT 0 CHECK (reserve >= 0),  -- what a pending order holds of the cash
+        entry_price      REAL,
+        entry_at         TEXT,
+        entry_underlying REAL,
+        exit_price       REAL,                     -- the average of every sale
+        exit_at          TEXT,
+        exit_reason      TEXT,
+        stop             REAL,
+        target_1         REAL,
+        target_2         REAL,
+        horizon_end      TEXT,
+        last_price       REAL,
+        last_underlying  REAL,
+        last_at          TEXT,
+        mark_basis       TEXT,
+        realized_pnl     REAL NOT NULL DEFAULT 0,
+        fees             REAL NOT NULL DEFAULT 0 CHECK (fees >= 0),
+        initial_risk     REAL,
+        why              TEXT NOT NULL DEFAULT '',
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_paper_positions_portfolio ON paper_positions (portfolio_id, status)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS paper_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        portfolio_id INTEGER NOT NULL REFERENCES paper_portfolios (id) ON DELETE CASCADE,
+        position_id  INTEGER,
+        at           TEXT NOT NULL,
+        kind         TEXT NOT NULL,                -- ORDER, FILL, CLOSE, CANCEL, ROTATE, NOTE, CATCH_UP
+        text         TEXT NOT NULL,
+        price        REAL,
+        quantity     REAL,
+        extra_json   TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_paper_events_portfolio ON paper_events (portfolio_id, id)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS paper_marks (
+        portfolio_id INTEGER NOT NULL REFERENCES paper_portfolios (id) ON DELETE CASCADE,
+        at           TEXT NOT NULL,
+        equity       REAL NOT NULL,
+        cash         REAL NOT NULL,
+        invested     REAL NOT NULL,
+        realized     REAL NOT NULL,
+        unrealized   REAL NOT NULL,
+        spy          REAL,
+        modelled     INTEGER NOT NULL DEFAULT 0,  -- 1 when an option in it was valued by the model, not a quote
+        PRIMARY KEY (portfolio_id, at)
+    )""")

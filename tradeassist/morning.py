@@ -51,8 +51,8 @@ from .indicators import rsi as rsi_series
 from .optionmath import NY, black76_price
 from .pricer import age_seconds, fair_value
 from .providers.base import DataError
-from .scanner import TOP_200
-from .sectors import TICKER_FUND
+from .scanner import TOP_200, TOP_250  # noqa: F401 - TOP_200 is part of this module's surface (tests read it)
+from .sectors import SECTOR_FUNDS, TICKER_FUND
 from .signalbook import wilson
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,6 @@ STRETCH_ATR = 2.0              # overextended: this far from the 20-day average.
 RSI_LOW, RSI_HIGH = 30.0, 70.0  # ...or RSI at an extreme...
 RUN_DAYS = 3                   # ...or at least this many one-way days in a row
 MAX_MOVERS = 14
-MAX_CARDS = 8
 MOVER_HORIZON = 5              # trading days a mover trade is given
 REVERSAL_HORIZON = 15          # trading days a reversal trade is given
 NEWS_HOURS = 36
@@ -82,10 +81,40 @@ PRE_STATES = ("premarket", "pre")   # Tradier says "premarket", Robinhood's cloc
 POST_STATES = ("postmarket", "post")
 
 
+MORNING_CARDS = 20             # 2.15: trade cards for the best-scored opportunities
+CARD_SECONDS = 15 * 60         # a card is rebuilt after this long (the morning session's rescans reuse younger ones)
+QUIET_RANGES = 0.5             # a move under this many daily ranges is not an opportunity
+NEWS_CHECKS = 20               # news is looked up for the biggest movers, this many at most
+SESSION_RECORD_NAMES = 30      # stocks whose 5-minute bars feed the rest-of-the-day record
+SESSION_RECORD_DAYS = 30
+RUN_SAVE_SECONDS = 30 * 60     # a rescan's opportunities are kept for replay at most this often
+RUN_TOP = 40                   # ...the best this many of them
+CONTEXT_US = {"SPY": "S&P 500 (SPY)", "QQQ": "Nasdaq 100 (QQQ)", "IWM": "Russell 2000 (IWM)", "DIA": "Dow (DIA)"}
+# Overseas markets before New York opens: the real index from stooq's free quotes (move from its own open) when it
+# answers, else the US-listed fund that tracks it (its move from yesterday's close, pre-market trading included).
+OVERSEAS = [
+    ("japan", "Japan (Nikkei 225)", "^nkx", "EWJ", "Asia"),
+    ("hong_kong", "Hong Kong (Hang Seng)", "^hsi", "EWH", "Asia"),
+    ("china", "China (Shanghai)", "^shc", "ASHR", "Asia"),
+    ("korea", "Korea (KOSPI)", "^kospi", "EWY", "Asia"),
+    ("australia", "Australia (All Ordinaries)", "^aor", "EWA", "Asia"),
+    ("germany", "Germany (DAX)", "^dax", "EWG", "Europe"),
+    ("uk", "UK (FTSE 100)", "^ukx", "EWU", "Europe"),
+    ("france", "France (CAC 40)", "^cac", "EWQ", "Europe"),
+    ("euro_area", "Euro area (Euro Stoxx 50)", None, "FEZ", "Europe"),
+]
+
+
 def movers_universe(watchlist: list[str]) -> list[str]:
-    """The stocks scanned for movers: the 200 largest plus every stock the sector lists name (about 330
-    large, optionable US companies), plus the watchlist. A fixed list; small caps are not covered."""
-    return sorted(set(TOP_200) | set(TICKER_FUND) | {s.strip().upper() for s in watchlist if s.strip()})
+    """The stocks the Morning plan reads (2.15): the 250 largest US companies (a fixed list, close to the largest
+    by market value in mid-2026) plus the watchlist. Small caps are not covered."""
+    return sorted(set(TOP_250) | {s.strip().upper() for s in watchlist if s.strip()})
+
+
+def live_universe(watchlist: list[str]) -> list[str]:
+    """The stocks Live news trades: the 250 largest plus every stock the sector lists name (about 340 large,
+    optionable US companies), plus the watchlist."""
+    return sorted(set(TOP_250) | set(TICKER_FUND) | {s.strip().upper() for s in watchlist if s.strip()})
 
 
 def tick_of(price: float) -> float:
@@ -256,8 +285,12 @@ def features_of(df: pd.DataFrame) -> dict[str, np.ndarray] | None:
     run = np.ones(len(close))
     for i in range(1, len(close)):
         run[i] = run[i - 1] + 1 if chg[i] == chg[i - 1] and chg[i] != 0 else 1
-    return {"close": close, "atr": atr, "rsi": rsi, "sma20": sma20, "run": run * chg,
-            "dates": df["date"].dt.strftime("%Y-%m-%d").to_numpy()}
+    # 2.15: the open and the volume too, for the day-trade record (open to close after a gap) and volume against
+    # normal. A frame without them (older tests build close-only frames) gets the close and no volume.
+    open_ = df["open"].to_numpy(dtype=float) if "open" in df else close.copy()
+    volume = df["volume"].to_numpy(dtype=float) if "volume" in df else np.full(len(close), np.nan)
+    return {"close": close, "atr": atr, "rsi": rsi, "sma20": sma20, "run": run * chg, "open": open_,
+            "volume": volume, "dates": df["date"].dt.strftime("%Y-%m-%d").to_numpy()}
 
 
 def overextended(f: dict[str, np.ndarray], i: int, move_direction: int) -> tuple[bool, list[str]]:
@@ -359,6 +392,11 @@ class Morning:
         self._loaded = False
         self._job = OneJob("morning-plan", self._keep)
         self._news = None
+        self._cards: dict[tuple, tuple[float, dict[str, Any]]] = {}   # 2.15: recent cards, reused by rescans
+        self._run_saved_at = 0.0
+        self._intraday = None
+        from .opportunities import Runs
+        self.runs = Runs(svc.db)
 
     # --- job plumbing (as the trade-ideas scan) ---------------------------------------------------------
     def _key(self) -> str:
@@ -377,14 +415,20 @@ class Morning:
         """Keep a plan built outside the job (the 7:00 email run), so the screen shows it too."""
         self._keep(dict(plan), {"id": 0})
 
-    def start(self) -> dict[str, Any]:
+    def start(self, rescan: bool = False) -> dict[str, Any]:
+        """Build the plan in the background. A `rescan` (the morning session's refresh) keeps the reversal watch of
+        today's plan instead of reading it again, and saves its opportunities for replay at most every half hour."""
         names = movers_universe(self.svc.settings.watchlist)
 
         def work(progress):
             with self.svc.market.paced(SCAN_PACE.get(self.svc.market.info.mode, 0.0)):
-                return self.plan(progress=progress)
-        out = self._job.start({}, len(names) + 60, work)
+                return self.plan(progress=progress, rescan=rescan)
+        out = self._job.start({"rescan": rescan}, len(names) + 60, work)
         return {**out, **self._result_line()}
+
+    @property
+    def running(self) -> bool:
+        return (self._job.status_brief().get("job") or {}).get("state") == "running"
 
     def stop(self) -> dict[str, Any]:
         return {**self._job.stop(), **self._result_line()}
@@ -533,24 +577,42 @@ class Morning:
 
     # --- the trade card ---------------------------------------------------------------------------------
     def card(self, *, symbol: str, direction: str, entry: float, stop: float, target_1: float,
-             target_2: float, horizon_days: int, setup: str, levels_why: str = "") -> dict[str, Any]:
-        """Entry, stop and targets on the stock; the contract for the risk budget; the limit to type."""
-        from .options.evaluator import best_within_budget, evaluate, horizon_date, pick_expirations
+             target_2: float, horizon_days: int, setup: str, levels_why: str = "",
+             day_trade: bool = False) -> dict[str, Any]:
+        """Entry, stop and targets on the stock; the contract for the risk budget; the limit to type.
+
+        2.15: a `day_trade` card is out by 15:55 the same session (today's, or the next one's outside trading
+        hours). Its contract is still one that expires at least a week later (the contract checks), so it is sold
+        with time value left; the contract's figures at the target are at the next close, a little below what it
+        is worth earlier in the day."""
+        from . import marketdays
+        from .options.evaluator import best_within_budget, evaluate, pick_expirations
         s = self.svc.settings
         d = 1 if direction == "LONG" else -1
         if not (entry > 0 and d * (entry - stop) > 0 and d * (target_1 - entry) > 0):
             raise ValueError("The stop must sit behind the entry and target 1 ahead of it")
         if d * (target_2 - target_1) <= 0:
             target_2 = target_1 + d * abs(target_1 - entry) * 0.5
+        if min(stop, target_1, target_2) <= 0:
+            # A short's targets two or three times a very wide risk can fall below zero (a reversal read on a long
+            # slide); no price gets there, and the contract's valuation would take the log of a negative price.
+            raise ValueError("A target or the stop falls at or below zero: the risk is too wide for a card")
         risk_ps = abs(entry - stop)
         budget = s.account_size * s.max_risk_per_trade_pct / 100.0
         shares = int(min(budget // risk_ps, s.account_size // entry)) if risk_ps > 0 else 0
-        today = datetime.now(NY).date()
-        h_day = horizon_date(today, horizon_days)
+        now_ny = datetime.now(NY)
+        today = now_ny.date()
+        if day_trade:
+            horizon_days = 1
+            sess = marketdays.session(today)
+            h_day = today if sess and now_ny < sess[1] else marketdays.next_trading_day(today)
+        else:
+            # The holidays known (2.15): the same close paper trading and the blend use (marketdays.horizon_close).
+            h_day = marketdays.horizon_close(now_ny, horizon_days).date()
         card: dict[str, Any] = {
             "symbol": symbol, "setup": setup, "direction": direction,
             "side_word": "buy" if d > 0 else "short", "entry": entry, "stop": stop,
-            "target_1": target_1, "target_2": target_2, "horizon_days": horizon_days,
+            "target_1": target_1, "target_2": target_2, "horizon_days": horizon_days, "day_trade": bool(day_trade),
             "horizon_date": h_day.isoformat(), "levels_why": levels_why, "risk_per_share": risk_ps,
             "shares": {"count": shares, "value": shares * entry,
                        "at_target_1": d * shares * (target_1 - entry) if shares else None,
@@ -560,6 +622,10 @@ class Morning:
         if not shares:
             card["warnings"].append(f"One share of {symbol} risks ${risk_ps:,.2f} to the stop, more than the "
                                     f"${budget:,.0f} risk per trade: no share position fits the limit.")
+        if day_trade:
+            card["notes"].append(f"A day trade: out by 15:55 New York time on {h_day:%a %b %d} whatever happens. A "
+                                 "contract's figures at the target are at the next close, a little under what it is "
+                                 "worth earlier in the day.")
         clock = self.svc.market.clock().get("state")
         card["price_basis"] = ("live" if clock == "open" else
                                "the previous close (options trade 9:30–16:00 New York time)")
@@ -661,9 +727,9 @@ class Morning:
         return (f"{verb} {n} {card['symbol']} · Limit ${card['entry']:.2f} · stop ${card['stop']:.2f}, "
                 f"target ${card['target_1']:.2f}")
 
-    def _mover_setup(self, row: dict[str, Any], frames: dict[str, dict[str, np.ndarray]], d_move: int,
-                     cards: list[dict[str, Any]]) -> None:
-        """One mover's news, setup, past record and (up to MAX_CARDS) trade card, written onto `row`."""
+    def _mover_setup(self, row: dict[str, Any], frames: dict[str, dict[str, np.ndarray]], d_move: int) -> None:
+        """One mover's news, setup and past record, written onto `row`. (2.15: its trade card is built later, with
+        the other best-scored opportunities.)"""
         f = frames[row["symbol"]]
         # Overextension on the bar before the move: the reference bar (pre-market, that is the last finished
         # close; for a close-to-close move, the close before it), matching the past record's reading.
@@ -680,73 +746,67 @@ class Morning:
         row["record"] = self._record(frames, move_direction=d_move,
                                      min_ranges=FADE_MIN_RANGES if setup["kind"] == "fade" else RIDE_MIN_RANGES,
                                      need_overext=setup["kind"] == "fade", trade_direction=trade_d)
-        if len(cards) >= MAX_CARDS:
-            return
-        entry = row["price"]
-        atr = row["atr"]
-        if setup["kind"] == "fade":
-            stop = entry - trade_d * FADE_STOP_ATR * atr
-            t1 = entry + 0.5 * (row["reference"] - entry)           # halfway back to where the move started
-            t2 = row["reference"]
-            why_lv = (f"Stop one daily range {'below' if trade_d > 0 else 'above'} the entry; target 1 halfway "
-                      f"back to the pre-move close (${row['reference']:,.2f}), target 2 all the way.")
-        else:
-            try:
-                from .evaluator import suggest_levels
-                sug = suggest_levels(self.svc.market.enriched(row["symbol"], 3), trade_d, entry)
-                stop, t1, t2 = sug["invalidation"], sug["target_1"], sug["target_2"]
-                why_lv = " ".join(sug["notes"])
-            except Exception as exc:                  # noqa: BLE001 - chart levels are a bonus
-                stop = entry - trade_d * 1.2 * atr
-                t1, t2 = entry + trade_d * 2.4 * atr, entry + trade_d * 3.6 * atr
-                why_lv = f"Chart levels unavailable ({_why(exc)}); stop 1.2 daily ranges, targets 2 and 3 times the risk."
-        try:
-            card = self.card(symbol=row["symbol"], direction=setup["direction"], entry=entry, stop=stop,
-                             target_1=t1, target_2=t2, horizon_days=MOVER_HORIZON, setup=setup["kind"],
-                             levels_why=why_lv)
-            card["key"] = f"{row['symbol']}:{setup['kind']}"
-            card["record"] = row["record"]
-            card["news"] = news
-            cards.append(card)
-            row["card_key"] = card["key"]
-        except (DataError, ValueError) as exc:
-            row["setup"] = {**setup, "why": setup["why"] + f" (No card: {_why(exc)}.)"}
 
-    # --- the whole plan ---------------------------------------------------------------------------------
-    def plan(self, progress: Callable[[int, int, str | None], None] | None = None) -> dict[str, Any]:
-        started = time.time()
-        s = self.svc.settings
-        names = movers_universe(s.watchlist)
-        total = len(names) + 60
-        if progress:
-            progress(0, total, None)
-        notes: list[str] = []
-        clock = self.svc.market.clock().get("state")
-        regime_label = None
-        try:
-            regime_label = self.analyst.regime()["confirmed"]["label"]
-        except (DataError, ValueError, KeyError) as exc:
-            notes.append(f"The market regime could not be read ({exc}).")
-        quotes = self._quotes(names + ["SPY"], progress, total)
-        if not quotes:
-            # The data source is down for everything (an expired sign-in, no network). Grinding through the
-            # bars of ~290 names would take minutes and end in a plan that reads "a quiet open" — the unknown
-            # shown as calm. Fail now, with the source's own message, which says what to do.
-            raise DataError(f"No quotes could be read, so there is no plan. {self.last_quote_error or ''}".strip())
-        frames = self._frames(names, progress, 8, total)
-        if not frames:
-            raise DataError("Quotes were read but no price history could be, so there is no plan. "
-                            "The last error: " + (self._last_frame_error or "none recorded"))
-        spy = None
-        try:
-            spy_f = features_of(self.svc.market.bars("SPY", 1.0, complete=True))
-            if spy_f is not None and quotes.get("SPY"):
-                spy = self._move(quotes["SPY"], spy_f)
-        except Exception as exc:                      # noqa: BLE001
-            log.info("Morning: no SPY line: %s", exc)
+    # --- 2.15: the markets before the open, and every stock as a scored opportunity ---------------------
+    def _stooq_client(self):
+        if getattr(self, "_stooq", None) is None:
+            from .factors import Stooq
+            # Real indexes only with real data: demo data is made up, and the tests must not reach the network.
+            self._stooq = Stooq(enabled=bool(getattr(self.svc.settings, "stooq_quotes", True))
+                                and self.svc.market.info.mode != "demo")
+        return self._stooq
 
-        # 1. The movers.
-        movers = []
+    def _context(self, quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """Overseas markets, the US index funds and the sector funds, each with its move and where it was read."""
+        from .factors import pct_move
+        st = self._stooq_client()
+        stooq_rows = st.quotes([o[2] for o in OVERSEAS if o[2]]) if st.enabled else {}
+        overseas = []
+        for key, label, code, proxy, region in OVERSEAS:
+            move, source = None, "no reading"
+            s = stooq_rows.get(code) if code else None
+            if s and s.get("close") and s.get("open"):
+                move = 100.0 * (s["close"] / s["open"] - 1.0)
+                source = f"stooq {code}, from its own open ({s.get('date')} {s.get('time')})"
+            elif proxy in quotes:
+                m, how = pct_move(quotes[proxy])
+                if m is not None:
+                    move, source = m, f"{proxy}, the US-listed fund that tracks it ({how}, against yesterday's close)"
+            overseas.append({"key": key, "label": label, "region": region, "move_pct": move, "source": source,
+                             "proxy": proxy})
+
+        def avg(region: str) -> float | None:
+            v = [o["move_pct"] for o in overseas if o["region"] == region and o["move_pct"] is not None]
+            return float(np.mean(v)) if v else None
+        us = [{"symbol": sym, "label": label, "move_pct": pct_move(quotes[sym])[0] if sym in quotes else None}
+              for sym, label in CONTEXT_US.items()]
+        sectors = [{"fund": fund, "label": SECTOR_FUNDS[fund], "move_pct": pct_move(quotes[fund])[0] if fund in quotes else None}
+                   for fund in SECTOR_FUNDS]
+        return {"overseas": overseas, "asia_avg": avg("Asia"), "europe_avg": avg("Europe"), "us": us, "sectors": sectors,
+                "stooq": {"enabled": st.enabled, "last_error": st.last_error},
+                "note": "Context, not a signal on its own: the move overseas is already in the US funds' prices before the "
+                        "open, so each stock's own part of its move is measured against SPY (its beta times SPY's move)."}
+
+    @staticmethod
+    def _beta(f: dict[str, np.ndarray], spy_f: dict[str, np.ndarray] | None) -> float | None:
+        """The stock's daily return per 1% of SPY's over the last year of finished bars they share."""
+        if spy_f is None:
+            return None
+        both = pd.concat([pd.Series(f["close"], index=f["dates"]), pd.Series(spy_f["close"], index=spy_f["dates"])],
+                         axis=1, join="inner").tail(251)
+        if len(both) < 61:
+            return None
+        r = np.log(both.astype(float)).diff().dropna()
+        v = float(r.iloc[:, 1].var())
+        return float(r.cov().iloc[0, 1] / v) if v > 0 else None
+
+    def _rows(self, names: list[str], quotes: dict[str, dict[str, Any]], frames: dict[str, dict[str, np.ndarray]],
+              spy_f: dict[str, np.ndarray] | None, spy_move: float | None, sector_moves: dict[str, float | None],
+              phase: str) -> list[dict[str, Any]]:
+        """One reading per stock: the move since the last close (in percent and daily ranges), its own part beyond
+        what SPY's move explains, the sector fund's move, volume against normal, and since the open (in the session)."""
+        from .opportunities import realized_vol
+        rows = []
         for sym in names:
             f, q = frames.get(sym), quotes.get(sym)
             if f is None or q is None:
@@ -754,20 +814,342 @@ class Morning:
             m = self._move(q, f)
             if m is None:
                 continue
-            if abs(m["move_pct"]) >= MOVE_MIN_PCT and m["ranges"] >= MOVE_MIN_RANGES * 0.75:
-                movers.append({"symbol": sym, **m})
+            row = {"symbol": sym, **m, "atr_pct": 100.0 * m["atr"] / m["reference"],
+                   "signed_ranges": m["ranges"] if m["move_pct"] >= 0 else -m["ranges"]}
+            beta = self._beta(f, spy_f)
+            row["beta"] = beta
+            row["market_part_pct"] = row["own_pct"] = row["own_ranges"] = None
+            if beta is not None and spy_move is not None:
+                row["market_part_pct"] = beta * spy_move
+                row["own_pct"] = m["move_pct"] - row["market_part_pct"]
+                row["own_ranges"] = row["own_pct"] / row["atr_pct"] if row["atr_pct"] > 0 else None
+            fund = TICKER_FUND.get(sym)
+            row["sector"], row["sector_move_pct"] = fund, sector_moves.get(fund) if fund else None
+            vol, avg = q.get("volume"), q.get("average_volume")
+            row["volume_ratio"] = float(vol) / float(avg) if vol and avg and avg > 0 else None
+            row["open"] = row["since_open_pct"] = row["since_open_ranges"] = row["gap_ranges"] = None
+            if phase == "session" and m["move_is"].startswith("vs"):
+                op = q.get("open")
+                if op and op > 0:
+                    row["open"] = float(op)
+                    row["since_open_pct"] = 100.0 * (m["price"] / op - 1.0)
+                    row["since_open_ranges"] = (m["price"] - op) / m["atr"]
+                    row["gap_ranges"] = (op - m["reference"]) / m["atr"]
+            row["vol"] = realized_vol(f["close"])
+            rows.append(row)
+        return rows
+
+    def _intraday_store(self):
+        if self._intraday is None:
+            cv = getattr(self.svc, "chart_view", None)
+            if cv is not None and getattr(cv, "intraday", None) is not None:
+                self._intraday = cv.intraday
+            else:
+                from .intraday import Intraday
+                self._intraday = Intraday(self.svc.market, self.svc.db)
+        return self._intraday
+
+    def _session_bars(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
+        store, out = self._intraday_store(), {}
+        for sym in symbols:
+            try:
+                df = store.bars(sym, "5m", SESSION_RECORD_DAYS)
+            except Exception as exc:                  # noqa: BLE001 - a stock without bars is left out of the record
+                log.info("Morning: no 5-minute bars for %s: %s", sym, exc)
+                continue
+            if df is not None and not df.empty:
+                out[sym] = df
+        return out
+
+    @staticmethod
+    def _session_extras(df: pd.DataFrame, today: Any, minute: int) -> dict[str, Any]:
+        """Today's VWAP and opening range (the first 30 minutes) from 5-minute bars, and where the price is
+        against them."""
+        from .opportunities import session_frame
+        s = session_frame(df)
+        s = s[s["day"] == today]
+        if s.empty:
+            return {}
+        typ = (s["high"] + s["low"] + s["close"]) / 3.0
+        vol = s["volume"].astype(float)
+        last = float(s["close"].iloc[-1])
+        out: dict[str, Any] = {"vwap": float((typ * vol).sum() / vol.sum()) if vol.sum() > 0 else None}
+        out["above_vwap"] = (last > out["vwap"]) if out["vwap"] else None
+        first = s[s["minute"] <= 30]
+        if not first.empty and minute > 30:
+            hi, lo = float(first["high"].max()), float(first["low"].min())
+            out.update({"or_high": hi, "or_low": lo,
+                        "breakout": "up" if last > hi else "down" if last < lo else None})
+        return out
+
+    def _gap_record(self, frames, *, move_d: int, min_r: float, fade: bool, trade_d: int) -> dict[str, Any]:
+        from .opportunities import gap_record
+        key = (f"morning:gap:{self.svc.market.info.mode}:{datetime.now(NY).date()}:{move_d}:{min_r:g}:{int(fade)}:"
+               f"{trade_d}:{len(frames)}")
+        hit = self.svc.db.cache_get(key, 20 * 3600)
+        if hit is not None:
+            return hit
+        out = gap_record(frames, gap_direction=move_d, min_ranges=min_r, trade_direction=trade_d, need_overext=fade)
+        self.svc.db.cache_put(key, out)
+        return out
+
+    def _edge(self, row: dict[str, Any], kind: str, trade_d: int, *, phase: str, horizon: str, frames, cases,
+              minute: int) -> dict[str, Any]:
+        """The trade's edge from the record that fits when it would be entered (opportunities.py explains the pull
+        toward zero). Day trades: before the open, the gap's open-to-close record; in the session, the rest-of-the-day
+        record after a swing of this size by this time; after the close, the next day's close-to-close record.
+        Swing trades: the close-to-close record MOVER_HORIZON days on."""
+        from .opportunities import cost_pct, edge_from
+        from .opportunities import intraday_record_from as from_cases
+        cpct = cost_pct(self.svc.settings)
+        move_d = 1 if row["move_pct"] >= 0 else -1
+        bucket = lambda v, hi: min(hi, max(0.5, math.floor(abs(v) * 2) / 2))      # noqa: E731
+        if horizon == "swing" or phase == "closed":
+            h = str(MOVER_HORIZON) if horizon == "swing" else "1"
+            if row["ranges"] < 1.0 or abs(row["move_pct"]) < MOVE_MIN_PCT:
+                return edge_from(None, 0, cost_pct=cpct, basis="The move is too small for the close-to-close record "
+                                                               f"(it counts moves of {MOVE_MIN_PCT:g}% and a daily range or more)")
+            rec = self._record(frames, move_direction=move_d, min_ranges=bucket(row["ranges"], 3.0), need_overext=kind == "fade",
+                               trade_direction=trade_d)
+            r = (rec.get("horizons") or {}).get(h) or {}
+            span = f"{MOVER_HORIZON} trading days on" if horizon == "swing" else "the next day, close to close"
+            return edge_from(r.get("mean_move_pct"), r.get("cases"), cost_pct=cpct, frequency=r.get("frequency"),
+                             low=r.get("low"), high=r.get("high"),
+                             basis=f"Five years of {len(frames)} large stocks: after {rec['what']}, the move {span}, the trade's way")
+        so = row.get("since_open_ranges")
+        if phase == "session" and so is not None and cases is not None and len(cases["move"]):
+            sd = 1 if so >= 0 else -1
+            rec = from_cases(cases, min_ranges=bucket(so, 2.5), move_direction=sd, trade_direction=trade_d)
+            return edge_from(rec.get("mean_move_pct"), rec.get("cases"), cost_pct=cpct, frequency=rec.get("frequency"),
+                             low=rec.get("low"), high=rec.get("high"),
+                             basis=f"5-minute bars of {cases['stocks']} of today's movers over the last {SESSION_RECORD_DAYS} "
+                                   f"days: after {bucket(so, 2.5):g}+ daily ranges {'up' if sd > 0 else 'down'} from the open "
+                                   f"{cases['minute']} minutes in, the rest of the day, the trade's way")
+        if row["ranges"] < QUIET_RANGES:
+            return edge_from(None, 0, cost_pct=cpct, basis="Too small a move to have a record")
+        rec = self._gap_record(frames, move_d=move_d, min_r=bucket(row["ranges"], 3.0), fade=kind == "fade", trade_d=trade_d)
+        late = " (the record runs from the open; it is later than that now)" if phase == "session" else ""
+        return edge_from(rec.get("mean_move_pct"), rec.get("cases"), cost_pct=cpct, frequency=rec.get("frequency"),
+                         low=rec.get("low"), high=rec.get("high"),
+                         basis=f"Five years of {len(frames)} large stocks: after {rec['what']}, the trade's way{late}")
+
+    def _setup_and_edge(self, row: dict[str, Any], *, phase: str, horizon: str, frames, cases,
+                        minute: int) -> tuple[str, int, str, dict[str, Any]]:
+        """The kind of trade, its direction, its label and its edge. A checked mover keeps its news setup (ride or
+        fade); otherwise the direction is whichever way the record favours, with the move or against it."""
+        move_d = 1 if row["move_pct"] >= 0 else -1
+        st = row.get("setup") or {}
+        if st.get("kind"):
+            d = 1 if st["direction"] == "LONG" else -1
+            label = {"ride": "Ride the news", "fade": "Fade the move"}[st["kind"]]
+            return st["kind"], d, label, self._edge(row, st["kind"], d, phase=phase, horizon=horizon, frames=frames,
+                                                    cases=cases, minute=minute)
+        so = row.get("since_open_ranges")
+        swing = phase == "session" and so is not None and abs(so) >= 1.0
+        quiet = row["ranges"] < QUIET_RANGES and not (so is not None and abs(so) >= QUIET_RANGES)
+        if quiet:
+            from .opportunities import cost_pct, edge_from
+            return "quiet", move_d, "Quiet", edge_from(None, 0, cost_pct=cost_pct(self.svc.settings),
+                                                       basis="An ordinary move for this stock: no trade")
+        kind = "swing" if swing else "gap"
+        with_d = (1 if so >= 0 else -1) if swing else move_d
+        e_with = self._edge(row, kind, with_d, phase=phase, horizon=horizon, frames=frames, cases=cases, minute=minute)
+        e_against = self._edge(row, kind, -with_d, phase=phase, horizon=horizon, frames=frames, cases=cases, minute=minute)
+        checked = " (news not checked)" if not row.get("news") else ""
+        what = "morning swing" if swing else "move"
+        # The two records are mirror images (the same cases, opposite signs), so taking whichever looks better would
+        # always pick the luckier side of the noise. The fade is chosen only when its record wins the trade's way
+        # more often than not with 95% confidence (the Wilson interval's low end above 50%); otherwise the trade
+        # rides the move, with whatever edge (often none after costs) that record shows.
+        if e_against["known"] and e_against["expected_pct"] > e_with["expected_pct"] and (e_against.get("low") or 0.0) > 0.5:
+            return kind, -with_d, f"Fade the {what}{checked}", e_against
+        return kind, with_d, f"Ride the {what}{checked}", e_with
+
+    @staticmethod
+    def _score(row: dict[str, Any], kind: str, trade_d: int, edge: dict[str, Any], phase: str,
+               minute: int) -> list[dict[str, Any]]:
+        """The points behind an opportunity's score (0 to 100)."""
+        from .opportunities import part
+        parts = []
+        so = row.get("since_open_ranges")
+        if phase == "session" and so is not None:
+            parts.append(part("swing", "Swing since the open", min(abs(so) / 3.0, 1.0) * 25, 25,
+                              f"{so:+.1f} daily ranges since the open"))
+            parts.append(part("move", "Move since the close", min(row["ranges"] / 4.0, 1.0) * 10, 10,
+                              f"{row['move_pct']:+.1f}%, {row['ranges']:.1f} daily ranges"))
+        else:
+            parts.append(part("move", "Move since the close", min(row["ranges"] / 4.0, 1.0) * 35, 35,
+                              f"{row['move_pct']:+.1f}%, {row['ranges']:.1f} daily ranges ({row['move_is']})"))
+        own = row.get("own_ranges")
+        if own is not None:
+            parts.append(part("own", "Its own move", min(abs(own) / 3.0, 1.0) * 15, 15,
+                              f"{row['own_pct']:+.1f}% beyond what SPY's move explains ({abs(own):.1f} ranges)"))
+        vr = row.get("volume_ratio")
+        if phase == "session" and vr is not None:
+            frac = max(minute / 390.0, 0.1)
+            pace = vr / frac
+            parts.append(part("volume", "Volume", float(np.clip((pace - 1.0) / 2.0, 0, 1)) * 10, 10,
+                              f"trading at {pace:.1f}× its normal pace for this time of day"))
+        news = (row.get("news") or {}).get("state")
+        setup_pts = 15 if kind in ("ride", "fade") else 10 if kind == "swing" else 5 if news == "unchecked" else 0
+        parts.append(part("setup", "Setup", setup_pts, 15,
+                          {"ride": "news behind the move", "fade": "no news and overextended", "swing": "a sharp morning swing"}
+                          .get(kind, "news could not be checked" if news == "unchecked" else "no clear setup")))
+        if edge["known"]:
+            parts.append(part("edge", "Past record", float(np.clip(edge["expected_pct"] / 0.5, -1, 1)) * 25, 25,
+                              f"{edge['expected_pct']:+.2f}% expected after costs and the pull toward zero "
+                              f"({edge['cases']} cases)"))
+        else:
+            parts.append(part("edge", "Past record", 0, 25, "no record"))
+        ext = row.get("extras") or {}
+        if ext.get("breakout") and (ext["breakout"] == "up") == (trade_d > 0):
+            parts.append(part("levels", "Opening range", 5, 5, f"broke the opening range {ext['breakout']}"))
+        elif ext.get("above_vwap") is not None and ext["above_vwap"] == (trade_d > 0):
+            parts.append(part("levels", "VWAP", 3, 5, f"{'above' if ext['above_vwap'] else 'below'} VWAP, the trade's way"))
+        return parts
+
+    def _levels(self, row: dict[str, Any], trade_d: int, kind: str, horizon: str,
+                refine: bool = False) -> tuple[float, float, float, str]:
+        from .opportunities import day_levels
+        entry, atr = row["price"], row["atr"]
+        if horizon == "day":
+            return day_levels(entry=entry, atr=atr, direction=trade_d, setup=kind, reference=row["reference"])
+        if kind == "fade":
+            stop = entry - trade_d * FADE_STOP_ATR * atr
+            return (stop, entry + 0.5 * (row["reference"] - entry), row["reference"],
+                    f"Stop one daily range {'below' if trade_d > 0 else 'above'} the entry; target 1 halfway back to the "
+                    f"pre-move close (${row['reference']:,.2f}), target 2 all the way.")
+        if refine:
+            try:
+                from .evaluator import suggest_levels
+                sug = suggest_levels(self.svc.market.enriched(row["symbol"], 3), trade_d, entry)
+                return sug["invalidation"], sug["target_1"], sug["target_2"], " ".join(sug["notes"])
+            except Exception as exc:                  # noqa: BLE001 - chart levels are a bonus
+                log.info("Morning: no chart levels for %s: %s", row["symbol"], exc)
+        return (entry - trade_d * 1.2 * atr, entry + trade_d * 2.4 * atr, entry + trade_d * 3.6 * atr,
+                "Stop 1.2 daily ranges from the entry, targets 2 and 3 times the risk.")
+
+    def _card_for(self, opp: dict[str, Any], row: dict[str, Any], horizon: str) -> dict[str, Any] | None:
+        """The trade card for an opportunity, reused when one for the same trade was built in the last
+        CARD_SECONDS (the morning session's rescans)."""
+        key = (opp["symbol"], opp["direction"], opp["setup"], horizon, round(opp["entry"] / max(row["atr"], 1e-9) * 4))
+        now = time.time()
+        hit = self._cards.get(key)
+        if hit and now - hit[0] < CARD_SECONDS:
+            return dict(hit[1])
+        stop, t1, t2, why = (self._levels(row, 1 if opp["direction"] == "LONG" else -1, opp["setup"], horizon, refine=True)
+                             if horizon == "swing" else (opp["stop"], opp["target_1"], opp["target_2"], opp.get("levels_why", "")))
+        try:
+            card = self.card(symbol=opp["symbol"], direction=opp["direction"], entry=opp["entry"], stop=stop, target_1=t1,
+                             target_2=t2, horizon_days=MOVER_HORIZON if horizon == "swing" else 1,
+                             setup=opp["setup"] if opp["setup"] in ("ride", "fade") else ("ride" if opp["setup"] != "fade" else "fade"),
+                             levels_why=why, day_trade=horizon == "day")
+        except (DataError, ValueError) as exc:
+            log.info("Morning: no card for %s: %s", opp["symbol"], exc)
+            return None
+        self._cards[key] = (now, card)
+        if len(self._cards) > 400:                     # forget the oldest
+            for k in sorted(self._cards, key=lambda k: self._cards[k][0])[:100]:
+                self._cards.pop(k, None)
+        return dict(card)
+
+    def _opportunities(self, rows: list[dict[str, Any]], *, phase: str, horizon: str, frames, cases,
+                       minute: int) -> list[dict[str, Any]]:
+        from .opportunities import make, total_score
+        out = []
+        day = datetime.now(NY).date().isoformat()
+        for row in rows:
+            try:
+                kind, d, label, edge = self._setup_and_edge(row, phase=phase, horizon=horizon, frames=frames, cases=cases,
+                                                            minute=minute)
+                parts = self._score(row, kind, d, edge, phase, minute)
+                stop, t1, t2, why = self._levels(row, d, kind, horizon)
+                news = row.get("news") or {"state": "not_checked", "label": "Not checked (outside the biggest movers)", "items": []}
+                opp = make(source="morning", key=f"morning:{day}:{row['symbol']}:{kind}:{'L' if d > 0 else 'S'}",
+                           symbol=row["symbol"], direction="LONG" if d > 0 else "SHORT", setup=kind, setup_label=label,
+                           horizon=horizon, horizon_days=1 if horizon == "day" else MOVER_HORIZON, entry=row["price"],
+                           stop=stop, target_1=t1, target_2=t2, atr=row["atr"], vol=row.get("vol"),
+                           score=total_score(parts) if kind != "quiet" else min(total_score(parts), 10.0),
+                           score_parts=parts, edge=edge,
+                           why=[x for x in [(row.get("setup") or {}).get("why"),
+                                            ", ".join(row.get("overextended_why") or []) or None] if x],
+                           price=row["price"], reference=row["reference"], move_pct=row["move_pct"], move_is=row["move_is"],
+                           ranges=row["ranges"], signed_ranges=row["signed_ranges"], since_open_pct=row.get("since_open_pct"),
+                           since_open_ranges=row.get("since_open_ranges"), gap_ranges=row.get("gap_ranges"),
+                           own_pct=row.get("own_pct"), own_ranges=row.get("own_ranges"), beta=row.get("beta"),
+                           volume_ratio=row.get("volume_ratio"), sector_move_pct=row.get("sector_move_pct"),
+                           news={"state": news.get("state"), "label": news.get("label"), "items": (news.get("items") or [])[:3]},
+                           extras=row.get("extras") or {}, levels_why=why, tradable=kind != "quiet", card_key=None)
+            except (ValueError, KeyError, TypeError) as exc:
+                log.info("Morning: %s is not an opportunity: %s", row.get("symbol"), exc)
+                continue
+            out.append(opp)
+        out.sort(key=lambda o: (-o["score"], o["symbol"]))
+        for i, o in enumerate(out, 1):
+            o["rank"] = i
+        return out
+
+    # --- the whole plan ---------------------------------------------------------------------------------
+    def plan(self, progress: Callable[[int, int, str | None], None] | None = None, rescan: bool = False) -> dict[str, Any]:
+        from .opportunities import atr_by_day_from_frame, intraday_cases, load_prefs, option_of
+        started = time.time()
+        s = self.svc.settings
+        prefs = load_prefs(self.svc.db, s)["morning"]
+        horizon = prefs["horizon"]
+        names = movers_universe(s.watchlist)
+        total = len(names) + 60
+        if progress:
+            progress(0, total, None)
+        notes: list[str] = []
+        clock = self.svc.market.clock().get("state")
+        phase = "session" if clock in OPEN_STATES else "pre" if clock in PRE_STATES else "closed"
+        now_ny = datetime.now(NY)
+        minute = max(5, min(390, int((now_ny - now_ny.replace(hour=9, minute=30, second=0, microsecond=0)).total_seconds() // 60)))
+        regime_label = None
+        try:
+            regime_label = self.analyst.regime()["confirmed"]["label"]
+        except (DataError, ValueError, KeyError) as exc:
+            notes.append(f"The market regime could not be read ({exc}).")
+        extra = list(CONTEXT_US) + list(SECTOR_FUNDS) + [o[3] for o in OVERSEAS]
+        quotes = self._quotes(list(dict.fromkeys(names + extra)), progress, total)
+        if not any(sym in quotes for sym in names):
+            # The data source is down for everything (an expired sign-in, no network). Grinding through the
+            # bars of 250 names would take minutes and end in a plan that reads "a quiet open" — the unknown
+            # shown as calm. Fail now, with the source's own message, which says what to do.
+            raise DataError(f"No quotes could be read, so there is no plan. {self.last_quote_error or ''}".strip())
+        frames = self._frames(names, progress, 8, total)
+        if not frames:
+            raise DataError("Quotes were read but no price history could be, so there is no plan. "
+                            "The last error: " + (self._last_frame_error or "none recorded"))
+        spy = spy_f = None
+        try:
+            spy_f = features_of(self.svc.market.bars("SPY", 1.0, complete=True))
+            if spy_f is not None and quotes.get("SPY"):
+                spy = self._move(quotes["SPY"], spy_f)
+        except Exception as exc:                      # noqa: BLE001
+            log.info("Morning: no SPY line: %s", exc)
+        context = self._context(quotes)
+        sector_moves = {x["fund"]: x["move_pct"] for x in context["sectors"]}
+
+        # 1. Every stock's reading, and the movers among them.
+        rows = self._rows(names, quotes, frames, spy_f, spy["move_pct"] if spy else None, sector_moves, phase)
+        movers = [r for r in rows if abs(r["move_pct"]) >= MOVE_MIN_PCT and r["ranges"] >= MOVE_MIN_RANGES * 0.75]
         movers.sort(key=lambda r: -r["ranges"])
         movers = movers[:MAX_MOVERS]
         done = 8 + len(names)
 
-        # 2. News, setups, records and cards for each mover.
-        cards: list[dict[str, Any]] = []
-        for k, row in enumerate(movers):
+        # 2. News, setups and records for the biggest movers (and, in the session, the sharpest morning swings).
+        checked = list(movers)
+        if phase == "session":
+            swings = sorted((r for r in rows if r.get("since_open_ranges") is not None and r not in checked),
+                            key=lambda r: -abs(r["since_open_ranges"]))
+            checked += [r for r in swings if abs(r["since_open_ranges"]) >= 1.0][:max(0, NEWS_CHECKS - len(checked))]
+        for k, row in enumerate(checked):
             if progress:
                 progress(done + k, total, row["symbol"])
             d_move = 1 if row["move_pct"] > 0 else -1
             try:
-                self._mover_setup(row, frames, d_move, cards)
+                self._mover_setup(row, frames, d_move)
             except Exception as exc:                  # noqa: BLE001 - one stock never stops the morning
                 log.warning("Morning: %s could not be read: %r", row["symbol"], exc)
                 row.update({"news": {"state": "unchecked", "label": f"Not read ({_why(exc)})", "items": []},
@@ -776,51 +1158,55 @@ class Morning:
                             "listed": row["ranges"] >= MOVE_MIN_RANGES})
         movers = [r for r in movers if r.get("listed", True)]
 
-        # 3. Reversal watch: the watchlist plus today's movers.
+        # 3. In the session: 5-minute bars of the sharpest swings, for the rest-of-the-day record, VWAP and the
+        # opening range.
+        cases = None
+        if phase == "session" and horizon == "day":
+            top = sorted((r for r in rows if r.get("since_open_ranges") is not None),
+                         key=lambda r: -abs(r["since_open_ranges"]))[:SESSION_RECORD_NAMES]
+            bars5 = self._session_bars([r["symbol"] for r in top])
+            for r in top:
+                if r["symbol"] in bars5:
+                    r["extras"] = self._session_extras(bars5[r["symbol"]], now_ny.date(), minute)
+            atr_of = {sym: atr_by_day_from_frame(frames[sym]) for sym in bars5 if sym in frames}
+            cases = intraday_cases(bars5, atr_of, minute=minute, skip_day=now_ny.date()) if bars5 else None
+            if not bars5:
+                notes.append("No bars within the day could be read, so the morning swings are judged by the gap's "
+                             "open-to-close record instead.")
+
+        # 4. Every stock as an opportunity, scored; cards for the best.
+        opps = self._opportunities(rows, phase=phase, horizon=horizon, frames=frames, cases=cases, minute=minute)
+        cards: list[dict[str, Any]] = []
+        by_symbol = {r["symbol"]: r for r in rows}
+        for opp in [o for o in opps if o["tradable"]][:MORNING_CARDS]:
+            if progress:
+                progress(min(total - 1, done + len(checked)), total, opp["symbol"])
+            card = self._card_for(opp, by_symbol[opp["symbol"]], horizon)
+            if card is None:
+                continue
+            card["key"] = f"{opp['symbol']}:{opp['setup']}:{'L' if opp['direction'] == 'LONG' else 'S'}"
+            card["record"] = by_symbol[opp["symbol"]].get("record")
+            card["news"] = opp["news"]
+            card["score"], card["opp_key"], card["setup_label"] = opp["score"], opp["key"], opp["setup_label"]
+            card["edge"] = opp["edge"]
+            cards.append(card)
+            opp["card_key"], opp["option"] = card["key"], option_of(card)
+            if horizon == "swing":                    # the card's chart levels replace the quick ones
+                opp.update({k: card[k] for k in ("stop", "target_1", "target_2")})
+                opp["levels_why"] = card.get("levels_why") or opp.get("levels_why")
+            row = by_symbol[opp["symbol"]]
+            if row in movers:
+                row["card_key"] = card["key"]
+
+        # 5. Reversal watch: the watchlist plus today's movers (a rescan keeps today's).
         reversal_rows: list[dict[str, Any]] = []
-        if self.features.get("reversal_analysis"):
-            watch_names = list(dict.fromkeys([*s.watchlist, *[r["symbol"] for r in movers]]))[:MAX_WATCH_SYMBOLS]
-            for k, sym in enumerate(watch_names):
-                if progress:
-                    progress(done + len(movers) + k, total, sym)
-                try:
-                    r = self.analyst.reversal(sym, history=False)
-                except (DataError, ValueError) as exc:
-                    log.info("Morning: no reversal reading for %s: %s", sym, exc)
-                    continue
-                day = r["confirmed"]
-                for side in ("bottom", "top"):
-                    pick = day[side]
-                    if pick["stage"] not in ("CANDIDATE", "CONFIRMED"):
-                        continue
-                    lv = pick["levels"]
-                    trigger = lv.get("confirms_above") if side == "bottom" else lv.get("confirms_below")
-                    reversal_rows.append({
-                        "symbol": sym, "side": side, "stage": pick["stage"], "score": pick["score"],
-                        "direction": "LONG" if side == "bottom" else "SHORT",
-                        "headline": pick.get("text") or day.get("headline"),
-                        "close": lv["close"], "trigger": trigger,
-                        "trigger_kind": "above" if side == "bottom" else "below",
-                        "invalidation": lv["invalidation"], "target_1": lv["target_1"],
-                        "target_2": lv.get("target_2"), "since": pick.get("since"),
-                        "evidence": [e["text"] for e in (pick.get("evidence") or [])[:4]],
-                        "confirmed": pick["stage"] == "CONFIRMED"})
-            reversal_rows.sort(key=lambda x: (x["stage"] != "CONFIRMED", -x["score"]))
-            for row in reversal_rows:
-                if row["confirmed"] and len(cards) < MAX_CARDS + 2:
-                    entry = quotes.get(row["symbol"], {}).get("last") or row["close"]
-                    try:
-                        card = self.card(symbol=row["symbol"], direction=row["direction"], entry=float(entry),
-                                         stop=row["invalidation"], target_1=row["target_1"],
-                                         target_2=row.get("target_2") or row["target_1"],
-                                         horizon_days=REVERSAL_HORIZON, setup="reversal",
-                                         levels_why="Levels from the reversal reading (Analyze a stock has the detail).")
-                        card["key"] = f"{row['symbol']}:reversal:{row['side']}"
-                        cards.append(card)
-                        row["card_key"] = card["key"]
-                    except Exception as exc:          # noqa: BLE001 - one stock never stops the morning
-                        log.warning("Morning: no reversal card for %s: %r", row["symbol"], exc)
-                        row["note"] = f"No card: {_why(exc)}."
+        prior = self._result if (rescan and self._result and self._result.get("day") == now_ny.date().isoformat()) else None
+        if prior is not None:
+            reversal_rows = prior.get("reversal") or []
+            cards += [c for c in prior.get("cards") or [] if c.get("setup") == "reversal"]
+        elif self.features.get("reversal_analysis"):
+            reversal_rows, rev_cards = self._reversal_watch(s, movers, quotes, done, total, progress, len(cards))
+            cards += rev_cards
         else:
             notes.append("Reversal analysis is switched off, so the reversal watch is empty.")
 
@@ -830,18 +1216,79 @@ class Morning:
                  "Stock prices are pre-market; option prices are the previous close's (options trade 9:30–16:00 "
                  "New York time)." if clock in PRE_STATES else
                  "The market is closed: prices are the last session's.")
-        return {"checked_at": datetime.now(NY).isoformat(timespec="seconds"), "day": datetime.now(NY).date().isoformat(),
-                "seconds": round(time.time() - started, 1), "clock": clock, "price_basis": basis,
-                "market": {"regime": regime_label,
-                           "spy_move_pct": spy["move_pct"] if spy else None,
-                           "spy_move_is": spy["move_is"] if spy else None},
-                "universe_size": len(names), "read": len(frames), "movers": movers, "cards": cards,
-                "reversal": reversal_rows, "notes": notes, "data_source": self.svc.market.info.mode,
-                "min_payoff": s.morning_min_payoff,
-                "rule": "A mover with news is read to keep going; a big mover with no news found, already "
-                        "overextended, is read to snap back. Past records count what followed the same price "
-                        "pattern on these stocks over five years: frequencies, not forecasts. Nothing here "
-                        "places an order."}
+        am_end = prefs["am_end"]
+        result = {"checked_at": now_ny.isoformat(timespec="seconds"), "day": now_ny.date().isoformat(),
+                  "seconds": round(time.time() - started, 1), "clock": clock, "phase": phase, "horizon": horizon,
+                  "rescan": rescan, "price_basis": basis, "am_end": am_end,
+                  "market": {"regime": regime_label,
+                             "spy_move_pct": spy["move_pct"] if spy else None,
+                             "spy_move_is": spy["move_is"] if spy else None},
+                  "context": context, "universe_size": len(names), "read": len(frames), "movers": movers, "cards": cards,
+                  "opportunities": opps, "reversal": reversal_rows, "notes": notes,
+                  "data_source": self.svc.market.info.mode, "min_payoff": s.morning_min_payoff,
+                  "session_record": ({"stocks": cases["stocks"], "days": SESSION_RECORD_DAYS, "minute": cases["minute"],
+                                      "cases": int(len(cases["move"]))} if cases else None),
+                  "rule": "A mover with news is read to keep going; a big mover with no news found, already "
+                          "overextended, is read to snap back; every other stock goes whichever way its record favours. "
+                          "Records are what followed the same pattern on these stocks: frequencies, not forecasts. "
+                          "Nothing here places an order."}
+        if not rescan or time.time() - self._run_saved_at >= RUN_SAVE_SECONDS:
+            run_cards = {c["key"]: c for c in cards}
+            top = [{**o, "card": run_cards.get(o.get("card_key"))} for o in opps if o["tradable"]][:RUN_TOP]
+            result["run_id"] = self.runs.save("morning", top, {"label": f"Morning plan {now_ny:%b %d %H:%M}", "phase": phase,
+                                                               "horizon": horizon})
+            if result["run_id"]:
+                self._run_saved_at = time.time()
+        return result
+
+    def _reversal_watch(self, s, movers, quotes, done: int, total: int, progress, cards_so_far: int):
+        """The watchlist plus today's movers, read for a forming or confirmed bottom or top; a card for each
+        confirmed one (a 15-day trade)."""
+        reversal_rows: list[dict[str, Any]] = []
+        cards: list[dict[str, Any]] = []
+        watch_names = list(dict.fromkeys([*s.watchlist, *[r["symbol"] for r in movers]]))[:MAX_WATCH_SYMBOLS]
+        for k, sym in enumerate(watch_names):
+            if progress:
+                progress(min(total - 1, done + len(movers) + k), total, sym)
+            try:
+                r = self.analyst.reversal(sym, history=False)
+            except (DataError, ValueError) as exc:
+                log.info("Morning: no reversal reading for %s: %s", sym, exc)
+                continue
+            day = r["confirmed"]
+            for side in ("bottom", "top"):
+                pick = day[side]
+                if pick["stage"] not in ("CANDIDATE", "CONFIRMED"):
+                    continue
+                lv = pick["levels"]
+                trigger = lv.get("confirms_above") if side == "bottom" else lv.get("confirms_below")
+                reversal_rows.append({
+                    "symbol": sym, "side": side, "stage": pick["stage"], "score": pick["score"],
+                    "direction": "LONG" if side == "bottom" else "SHORT",
+                    "headline": pick.get("text") or day.get("headline"),
+                    "close": lv["close"], "trigger": trigger,
+                    "trigger_kind": "above" if side == "bottom" else "below",
+                    "invalidation": lv["invalidation"], "target_1": lv["target_1"],
+                    "target_2": lv.get("target_2"), "since": pick.get("since"),
+                    "evidence": [e["text"] for e in (pick.get("evidence") or [])[:4]],
+                    "confirmed": pick["stage"] == "CONFIRMED"})
+        reversal_rows.sort(key=lambda x: (x["stage"] != "CONFIRMED", -x["score"]))
+        for row in reversal_rows:
+            if row["confirmed"] and len(cards) < 3:
+                entry = quotes.get(row["symbol"], {}).get("last") or row["close"]
+                try:
+                    card = self.card(symbol=row["symbol"], direction=row["direction"], entry=float(entry),
+                                     stop=row["invalidation"], target_1=row["target_1"],
+                                     target_2=row.get("target_2") or row["target_1"],
+                                     horizon_days=REVERSAL_HORIZON, setup="reversal",
+                                     levels_why="Levels from the reversal reading (Analyze opportunity has the detail).")
+                    card["key"] = f"{row['symbol']}:reversal:{row['side']}"
+                    cards.append(card)
+                    row["card_key"] = card["key"]
+                except Exception as exc:              # noqa: BLE001 - one stock never stops the morning
+                    log.warning("Morning: no reversal card for %s: %r", row["symbol"], exc)
+                    row["note"] = f"No card: {_why(exc)}."
+        return reversal_rows, cards
 
 
 def _fresh(when: Any, hours: int = NEWS_HOURS, now: datetime | None = None) -> bool:

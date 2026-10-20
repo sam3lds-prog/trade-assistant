@@ -1,9 +1,11 @@
 "use strict";
 /* Trade Assistant 2.8: the Morning plan. Big movers since yesterday's close read as ride-the-news or
    fade-the-move, reversal triggers to watch, and a trade card per setup with the limit price to type.
+   2.15: the 250 largest stocks ranked as opportunities before the open and through the morning session, the
+   markets overseas, day trades or swing trades, and a budget split across the best (blend.js).
    Three steps: pick, read the card, copy the order into Robinhood. Nothing here places an order. */
 
-const MORNING_SETUP_WORDS = { fade: "Fade the move", ride: "Ride the news", reversal: "Reversal" };
+const MORNING_SETUP_WORDS = { fade: "Fade the move", ride: "Ride the news", reversal: "Reversal", swing: "Morning swing", gap: "The move", news: "News" };
 
 function morningMoney(v, d = 2) { return isNum(v) ? money(v, d) : "n/a"; }
 
@@ -61,8 +63,9 @@ async function copyText(text, button) {
 function morningCard(card, actions) {
   const opt = card.option, lm = opt && opt.limits, viable = !!(lm && lm.viable);
   const box = el("div", { class: "panel m-card", id: `card-${card.key || card.symbol}` });
-  const sub = [MORNING_SETUP_WORDS[card.setup] || card.setup, card.news && card.news.label,
-    `${card.horizon_days} trading days`].filter(Boolean).join(" · ");
+  const sub = [card.setup_label || MORNING_SETUP_WORDS[card.setup] || card.setup, card.news && card.news.label,
+    card.day_trade ? "day trade, out by 15:55" : `${card.horizon_days} trading days`,
+    isNum(card.score) ? `score ${num(card.score, 0)}` : null].filter(Boolean).join(" · ");
   box.append(el("div", { class: "panel-head" },
     el("h3", {}, `${card.symbol}: ${card.side_word === "buy" ? "buy" : "short"}`,
       viable ? ` with a ${opt.option_type === "CALL" ? "call" : "put"}` : " the shares"),
@@ -121,12 +124,18 @@ function morningCard(card, actions) {
     row.append(b);
   }
   if (state.openDecide && featureOn("trend_engine_v2") && !(actions && actions.hideDecide)) {
-    const b = el("button", { class: "plain", text: "Open on Decide" });
+    const b = el("button", { class: "plain", text: "Analyze opportunity" });
     b.addEventListener("click", () => {
+      if (actions && actions.opportunity && state.openOpportunity) { state.openOpportunity(actions.opportunity); return; }
       state.thesis = FLOW.thesis({ symbol: card.symbol, direction: card.direction, entry: card.entry,
         invalidation: card.stop, target1: card.target_1, target2: card.target_2, horizonDays: card.horizon_days });
       state.openDecide(card.symbol, card.direction);
     });
+    row.append(b);
+  }
+  if (actions && actions.pick && featureOn("opportunity_blend")) {
+    const b = el("button", { class: "plain", text: actions.picked && actions.picked() ? "In the blend" : "Add to the blend" });
+    b.addEventListener("click", () => { actions.pick(); b.textContent = actions.picked() ? "In the blend" : "Add to the blend"; });
     row.append(b);
   }
   if (actions && actions.watchStop) {
@@ -139,7 +148,7 @@ function morningCard(card, actions) {
   return box;
 }
 
-/* ---------- 2.9: the trade card and the email on Analyze a stock ---------- */
+/* ---------- 2.9: the trade card and the email on Analyze opportunity ---------- */
 // After "Grade and find a contract" runs, the same card the Morning plan builds — the best contract for
 // the risk budget, the capped limit price and the copy-ready order — is built for the graded thesis, with
 // a button that emails the whole analysis. The card is server-built from the thesis levels.
@@ -182,10 +191,79 @@ if (typeof DECIDE_AFTER !== "undefined") DECIDE_AFTER.push((out, dec) => {
 });
 
 /* ---------- the screen ---------- */
+const OPP_SHOWN = 25;
+
+// The markets before the open: overseas (Asia closed, Europe trading), the US index funds and the sector funds.
+function morningContext(ctx, market) {
+  if (!ctx) return null;
+  const move = v => isNum(v) ? el("span", { class: v >= 0 ? "pos-text" : "neg-text", text: signedPct(v, 2) }) : el("span", { class: "muted", text: "n/a" });
+  const block = (title, rows) => el("div", { class: "ctx-block" }, el("h4", { text: title }),
+    el("ul", { class: "plain small" }, rows.map(([label, v, tip]) => el("li", { title: tip || null }, el("span", { text: label }), " ", move(v)))));
+  const asia = ctx.overseas.filter(o => o.region === "Asia"), europe = ctx.overseas.filter(o => o.region === "Europe");
+  const sectors = [...ctx.sectors].filter(s => isNum(s.move_pct)).sort((a, b) => b.move_pct - a.move_pct);
+  return el("div", { class: "panel" },
+    el("h3", { text: "Markets" }),
+    el("div", { class: "ctx-grid" },
+      block(`Asia (average ${isNum(ctx.asia_avg) ? signedPct(ctx.asia_avg, 2) : "n/a"})`, asia.map(o => [o.label, o.move_pct, o.source])),
+      block(`Europe (average ${isNum(ctx.europe_avg) ? signedPct(ctx.europe_avg, 2) : "n/a"})`, europe.map(o => [o.label, o.move_pct, o.source])),
+      block("United States", ctx.us.map(u => [u.label, u.move_pct])),
+      block("Sectors, strongest first", sectors.map(s => [`${s.label} (${s.fund})`, s.move_pct]))),
+    el("p", { class: "small muted" }, market && market.regime ? `Regime: ${market.regime}. ` : "", ctx.note,
+      ctx.stooq && ctx.stooq.enabled ? "" : " Overseas readings are the US-listed funds that track each market (stooq's real indexes are off with demo data or STOOQ_QUOTES=0)."));
+}
+
+function opportunitiesTable(plan, picked, onCard) {
+  const rows = plan.opportunities || [];
+  const session = plan.phase === "session";
+  const wrap = el("div");
+  let filter = "all", all = false;
+  const filters = segmented(`ofilter${++uid}`, [["all", "All"], ["LONG", "Long"], ["SHORT", "Short"], ["card", "With a card"]], "all");
+  const more = el("button", { class: "plain small-btn" });
+  const body = el("div");
+  const draw = () => {
+    const list = rows.filter(o => o.tradable !== false || filter === "all")
+      .filter(o => filter === "all" || (filter === "card" ? o.card_key : o.direction === filter));
+    const shown = all ? list : list.slice(0, OPP_SHOWN);
+    more.textContent = all ? `Show the best ${OPP_SHOWN}` : `Show all ${list.length}`;
+    more.classList.toggle("hidden", list.length <= OPP_SHOWN);
+    body.replaceChildren(table([
+      { label: "", cell: o => o.tradable === false ? "" : pickBox(picked, o.key) },
+      { label: "#", num: true, cell: o => num(o.rank, 0) },
+      { label: "Stock", cell: o => el("div", {}, el("strong", { text: o.symbol }), el("div", { class: "small muted", text: `${money(o.price)}${o.sector ? ` · ${o.sector}` : ""}` })) },
+      { label: session ? "Since the close / open" : "Move", num: true, cell: o => el("div", {},
+        el("span", { class: o.move_pct >= 0 ? "pos-text" : "neg-text", text: signedPct(o.move_pct, 1) }),
+        el("div", { class: "small muted", text: `${num(o.ranges, 1)} ranges${isNum(o.since_open_ranges) ? ` · open ${o.since_open_ranges >= 0 ? "+" : ""}${num(o.since_open_ranges, 1)}` : ""}` })) },
+      { label: "Its own part", num: true, cell: o => isNum(o.own_pct) ? el("span", { title: `Beyond SPY's move times its beta (${num(o.beta, 2)})`, text: signedPct(o.own_pct, 1) }) : "n/a" },
+      { label: "Volume", num: true, cell: o => isNum(o.volume_ratio) ? el("span", { title: "Volume so far against a normal day's", text: `${num(100 * o.volume_ratio, 0)}%` }) : el("span", { class: "muted", text: "—" }) },
+      { label: "News", cell: o => o.news && o.news.state !== "not_checked" ? newsTag(o.news) : el("span", { class: "small muted", text: "not checked" }) },
+      { label: "Trade", cell: o => o.tradable === false ? el("span", { class: "muted small", text: "Quiet" }) :
+        el("div", {}, el("span", { class: `m-tag ${o.direction === "LONG" ? "m-ride" : "m-fade"}`, text: `${o.direction === "LONG" ? "Buy" : "Short"}` }), " ",
+          el("span", { class: "small", text: o.setup_label }), o.option ? el("div", { class: "small muted", text: `or a ${o.option.option_type.toLowerCase()} at $${num(o.option.premium, 2)}` }) : null) },
+      { label: "Edge", num: true, cell: edgeCell },
+      { label: "Score", num: true, cell: scoreCell },
+      { label: "", cell: o => {
+        const box = el("div", { class: "row nowrap" });
+        if (o.card_key) { const b = el("button", { class: "plain small-btn", text: "Card" }); b.addEventListener("click", e => { e.stopPropagation(); onCard(o.card_key); }); box.append(b); }
+        if (o.tradable !== false && state.openOpportunity && featureOn("trend_engine_v2")) box.append(analyzeButton(o));
+        return box;
+      } }], shown));
+  };
+  filters.addEventListener("change", () => { filter = filters.value(); draw(); });
+  more.addEventListener("click", () => { all = !all; draw(); });
+  draw();
+  wrap.append(el("div", { class: "row", style: "margin-bottom:8px" }, filters, more), body);
+  return wrap;
+}
+
 function buildMorning() {
   const scan = el("button", { class: "primary", text: "Build the plan" });
   const stopBtn = el("button", { class: "plain hidden", text: "Stop" });
   const emailBtn = el("button", { class: "plain hidden", text: "Email me this plan" });
+  const budgetBtn = el("button", { class: "plain", text: "Set budget" });
+  const horizon = segmented(`mhz${++uid}`, [["day", "Day trades"], ["swing", "Swing (5 days)"]], "day");
+  const auto = el("input", { type: "checkbox" });
+  const every = el("select", { "aria-label": "Refresh every" }, [5, 10, 15, 30].map(m => el("option", { value: m, text: `${m} min` })));
+  const until = el("input", { type: "time", value: "11:30", min: "09:45", max: "16:00", "aria-label": "Until (New York time)" });
   const bar = el("progress", { max: 100, value: 0, class: "scan-progress", "aria-label": "Plan progress" });
   const barText = el("span", { class: "small muted" });
   const progress = el("div", { class: "row scan-row hidden" }, bar, barText);
@@ -193,7 +271,26 @@ function buildMorning() {
   const headline = el("p", { class: "small muted" });
   const out = el("div");
   const watchesBox = el("div");
-  let timer = null, shownJob, planDay = "";
+  const picked = new Set();
+  let timer = null, shownJob, planDay = "", plan = null;
+  const blend = blendPanel({ source: "morning", collapsed: true, title: "Split a budget across the morning's opportunities",
+    keys: () => [...picked], horizon: () => horizon.value() });
+
+  async function settings() {
+    const p = await loadPrefs();
+    if (!p) return;
+    horizon.querySelector(`input[value="${p.morning.horizon}"]`).checked = true;
+    auto.checked = !!p.morning.auto_refresh;
+    every.value = String(p.morning.refresh_minutes);
+    until.value = p.morning.am_end;
+  }
+  horizon.addEventListener("change", () => savePrefs({ morning: { horizon: horizon.value() } }));
+  auto.addEventListener("change", () => api("/v2/prefs", { morning: { auto_refresh: auto.checked } }).then(p => { state.prefs = p; }).catch(e => { err.textContent = e.message; }));
+  every.addEventListener("change", () => savePrefs({ morning: { refresh_minutes: Number(every.value) } }));
+  until.addEventListener("change", () => { if (until.value) savePrefs({ morning: { am_end: until.value } }); });
+  budgetBtn.addEventListener("click", () => blend.toggle());
+  const blendOn = featureOn("opportunity_blend");
+  if (!blendOn) { budgetBtn.classList.add("hidden"); blend.classList.add("hidden"); }
 
   async function watchStop(card, button) {
     await withBusy(button, err, async () => {
@@ -229,11 +326,13 @@ function buildMorning() {
         : "Checked about once a minute while the market is open and this app is running. Set up email in .env (SMTP_USER and SMTP_PASSWORD) to be emailed when one triggers." })));
   }
 
-  function moversTable(plan) {
+  const toCard = key => { const n = document.getElementById(`card-${key}`); if (n) n.scrollIntoView({ behavior: "smooth", block: "start" }); };
+
+  function moversTable(p) {
     const cardBtn = r => {
       if (!r.card_key) return "";
       const b = el("button", { class: "plain small-btn", text: "Trade card" });
-      b.addEventListener("click", () => { const n = document.getElementById(`card-${r.card_key}`); if (n) n.scrollIntoView({ behavior: "smooth", block: "start" }); });
+      b.addEventListener("click", () => toCard(r.card_key));
       return b;
     };
     return table([
@@ -243,11 +342,11 @@ function buildMorning() {
       { label: "News", cell: r => newsTag(r.news) },
       { label: "Setup", cell: r => el("div", {}, setupTag(r.setup), el("div", { class: "small muted", text: r.setup.why })) },
       { label: "Past record of this setup", cell: r => r.setup.kind ? recordText(r.record, r.setup.direction) : el("span", { class: "muted", text: "—" }) },
-      { label: "", cell: cardBtn }], plan.movers);
+      { label: "", cell: cardBtn }], p.movers);
   }
 
-  function reversalTable(plan) {
-    const rows = plan.reversal || [];
+  function reversalTable(p) {
+    const rows = p.reversal || [];
     if (!rows.length) return el("p", { class: "small muted", text: "No stock on the watchlist (or among the movers) shows a forming or confirmed reversal." });
     return table([
       { label: "Stock", cell: r => el("div", {}, el("strong", { text: r.symbol }), el("div", { class: "small" }, statusTag(r.confirmed ? "pass" : "warn", r.confirmed ? "Confirmed" : "Forming"))) },
@@ -257,7 +356,7 @@ function buildMorning() {
       { label: "Trade if it turns", cell: r => r.direction === "LONG" ? "Calls or shares" : "Puts or short" },
       { label: "", cell: r => {
         if (r.card_key) { const b = el("button", { class: "plain small-btn", text: "Trade card" });
-          b.addEventListener("click", () => { const n = document.getElementById(`card-${r.card_key}`); if (n) n.scrollIntoView({ behavior: "smooth" }); }); return b; }
+          b.addEventListener("click", () => toCard(r.card_key)); return b; }
         if (!r.confirmed && isNum(r.trigger)) { const b = el("button", { class: "plain small-btn", text: "Watch" });
           b.addEventListener("click", () => addTriggerWatch(r, b)); return b; }
         return "";
@@ -278,26 +377,49 @@ function buildMorning() {
   }
 
   function render(st) {
-    const plan = st.result;
+    plan = st.result;
     const frag = el("div");
     for (const n of plan.notes || []) frag.append(banner(n.startsWith("Demo") ? "warn" : "info", n));
     const m = plan.market || {};
+    const phaseWord = { pre: "before the open", session: "in the session", closed: "after the close" }[plan.phase] || "";
     headline.textContent = [
-      `Built ${shortDate(plan.day)} ${plan.checked_at.slice(11, 16)} New York time`,
+      `Built ${shortDate(plan.day)} ${plan.checked_at.slice(11, 16)} New York time${phaseWord ? ` (${phaseWord}${plan.rescan ? ", a rescan" : ""})` : ""}`,
       m.regime || null,
       isNum(m.spy_move_pct) ? `SPY ${signedPct(m.spy_move_pct, 1)} (${m.spy_move_is})` : null,
+      plan.horizon ? (plan.horizon === "day" ? "day trades" : "swing trades") : null,
       plan.price_basis].filter(Boolean).join(" · ");
-    frag.append(el("div", { class: "panel" }, el("h3", { text: "Big movers since the last close" }),
-      plan.movers.length ? moversTable(plan) : el("p", { class: "small muted", text: "No stock in the universe moved 3% and two of its daily ranges. A quiet open; the reversal watch below may still have triggers." }),
-      el("p", { class: "small muted", text: `From ${num(plan.universe_size, 0)} large US stocks plus your watchlist (${num(plan.read, 0)} read). A move is measured in the stock's own daily ranges, so 4% in a quiet stock counts for more than 4% in a volatile one. ${plan.rule}` })));
+    const ctx = morningContext(plan.context, plan.market);
+    if (ctx) frag.append(ctx);
+    const opps = plan.opportunities || [];
+    if (opps.length) {
+      const tradable = opps.filter(o => o.tradable !== false).length;
+      const sr = plan.session_record;
+      frag.append(el("div", { class: "panel" },
+        el("div", { class: "panel-head" }, el("h3", {}, `Opportunities: ${opps.length} stocks ranked`, " ", infoIcon("edge", "About the edge")),
+          el("div", { class: "row" }, blendOn ? (() => { const b = el("button", { class: "primary small-btn", text: "Set budget" }); b.addEventListener("click", () => blend.toggle()); return b; })() : null)),
+        el("p", { class: "small muted", text: `${tradable} could be traded (a move of half a daily range or more). Tick rows to blend only those. Hover a score for the points behind it, an edge for its record.${sr ? ` After the open, moves are judged by ${num(sr.cases, 0)} stock-days of 5-minute bars from ${sr.stocks} of today's movers.` : ""}` }),
+        opportunitiesTable(plan, picked, toCard)));
+    }
+    frag.append(blend);
+    if ((plan.movers || []).length) {
+      frag.append(el("details", { class: "panel" }, el("summary", { text: `Big movers since the last close (${plan.movers.length})` }),
+        moversTable(plan),
+        el("p", { class: "small muted", text: `From ${num(plan.universe_size, 0)} large US stocks plus your watchlist (${num(plan.read, 0)} read). A move is measured in the stock's own daily ranges, so 4% in a quiet stock counts for more than 4% in a volatile one. ${plan.rule}` })));
+    }
     frag.append(el("div", { class: "panel" }, el("h3", { text: "Reversal watch" }), reversalTable(plan),
       el("p", { class: "small muted", text: "Signs, not certainties: a true bottom or top is only known afterwards. Watch a trigger and the app checks it about once a minute while the market is open." })));
     if (plan.cards && plan.cards.length) {
       frag.append(el("h3", { class: "m-section", text: `Trade cards (${plan.cards.length})` }));
       planDay = plan.day || "";
-      for (const c of plan.cards) frag.append(morningCard(c, { watchStop }));
+      const byKey = Object.fromEntries(opps.map(o => [o.card_key, o]));
+      for (const c of plan.cards) {
+        const opp = byKey[c.key];
+        frag.append(morningCard(c, { watchStop, opportunity: opp,
+          pick: opp ? () => { if (picked.has(opp.key)) picked.delete(opp.key); else picked.add(opp.key); } : null,
+          picked: opp ? () => picked.has(opp.key) : null }));
+      }
     } else {
-      frag.append(el("div", { class: "panel" }, el("p", { class: "small", text: "No mover supports a setup and no reversal confirmed: not trading is the plan today." })));
+      frag.append(el("div", { class: "panel" }, el("p", { class: "small", text: "No opportunity supports a card and no reversal confirmed: not trading is the plan today." })));
     }
     const sc = scorecardPanel(st.scorecard);
     if (sc) frag.append(sc);
@@ -325,7 +447,8 @@ function buildMorning() {
       else {
         out.replaceChildren(el("div", { class: "panel" },
           el("p", {}, "No plan yet today. Press ", el("strong", { text: "Build the plan" }), "."),
-          el("p", { class: "small muted", text: "It reads about 290 large US stocks plus your watchlist: a couple of minutes on demo data; with live data the first run of the day fetches each stock's history, spaced out so the rest of the app keeps working. For the 7:00 email every market morning, run ./setup_morning.sh on this computer (see the README)." })));
+          el("p", { class: "small muted", text: "It reads the 250 largest US stocks plus your watchlist, the markets overseas and the sector funds: a minute or two on demo data; with live data the first run of the day fetches each stock's history, spaced out so the rest of the app keeps working. For the 7:00 email every market morning, run ./setup_morning.sh on this computer (see the README)." })),
+          blend);
         renderWatches(full.watches, full.email_configured);
       }
     }
@@ -338,7 +461,9 @@ function buildMorning() {
     try {
       const running = await paint(await api("/v2/morning?brief=true"));
       failures = 0;
+      // While the morning session refreshes by itself, look for a new plan every half minute.
       if (running) timer = setTimeout(poll, 1500);
+      else if (auto.checked) timer = setTimeout(poll, 30000);
     } catch (e) {
       failures += 1;
       err.textContent = `${e.message} (trying again)`;
@@ -359,15 +484,21 @@ function buildMorning() {
   }));
 
   const steps = el("div", { class: "m-steps" },
-    el("span", { class: "m-step" }, el("b", { text: "1" }), " Pick a mover or a reversal"),
-    el("span", { class: "m-step" }, el("b", { text: "2" }), " Read its trade card"),
-    el("span", { class: "m-step" }, el("b", { text: "3" }), " Copy the order into Robinhood"));
+    el("span", { class: "m-step" }, el("b", { text: "1" }), " Pick an opportunity, or set a budget for a blend"),
+    el("span", { class: "m-step" }, el("b", { text: "2" }), " Read its card, or analyze it"),
+    el("span", { class: "m-step" }, el("b", { text: "3" }), " Copy the order into Robinhood, or paper trade it"));
   const view = el("section", {}, el("h2", { text: "Morning plan" }),
-    el("p", { class: "lede", text: "Stocks that jumped since the last close, read as ride-the-news or fade-the-move; reversals about to confirm; and a trade card with the limit price to type. Setups and past frequencies, not forecasts — and nothing here places an order." }),
+    el("p", { class: "lede", text: "The morning hours move the most. Before the open and through the morning session, the 250 largest US stocks ranked as opportunities: overseas markets, the moves since the close and since the open, news, and the past record behind each trade; a trade card with the limit price to type for the best, and a budget split across them. Setups and past frequencies, not forecasts — and nothing here places an order." }),
     steps,
-    el("div", { class: "panel" }, el("div", { class: "row" }, scan, stopBtn, emailBtn), progress, err, headline),
+    el("div", { class: "panel" },
+      el("div", { class: "row" }, scan, stopBtn, emailBtn, budgetBtn),
+      el("div", { class: "row", style: "margin-top:10px" },
+        infoField("Trades", "horizon", horizon),
+        el("div", { class: "field" }, el("span", {}, "Refresh in the morning session ", infoIcon("refresh")),
+          el("div", { class: "row nowrap" }, el("label", { class: "check" }, auto, "every"), every, el("span", { class: "small", text: "until" }), until))),
+      progress, err, headline),
     out, watchesBox);
-  view.onShow = () => poll();
+  view.onShow = () => { settings(); poll(); };
   return view;
 }
 

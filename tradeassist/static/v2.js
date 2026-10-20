@@ -504,7 +504,7 @@ function newPositionForm(onSaved) {
     el("div", { class: "row" }, save), error);
 }
 
-/* ---------- view: analyze a stock ---------- */
+/* ---------- view: analyze opportunity (2.15; was "analyze a stock") ---------- */
 const TREND_TAG = { STRONG_UP: "pass", UP: "pass", UP_WEAKENING: "warn", NEUTRAL: "info", DOWN_DEVELOPING: "warn", DOWN: "fail", STRONG_DOWN: "fail" };
 const TREND_FILL = { STRONG_UP: "color-mix(in oklab, var(--div-pos) 70%, var(--div-mid))", UP: "color-mix(in oklab, var(--div-pos) 42%, var(--div-mid))",
   UP_WEAKENING: "color-mix(in oklab, var(--div-pos) 18%, var(--div-mid))", NEUTRAL: "var(--div-mid)",
@@ -535,8 +535,8 @@ function buildAnalyze() {
   });
   go.addEventListener("click", run);
   sym.addEventListener("keydown", e => { if (e.key === "Enter") run(); });
-  const view = el("section", {}, el("h2", { text: "Analyze a stock" }),
-    el("p", { class: "lede", text: "Which way the stock is trending and why, then your thesis: the stock trade graded, and calls or puts that fit it. Scores count evidence; they are not chances." }),
+  const view = el("section", {}, el("h2", { text: "Analyze opportunity" }),
+    el("p", { class: "lede", text: "One stock or a blend of several. For a stock: which way it is trending and why, then your thesis graded, and calls or puts that fit it. For a blend: the split under a budget, its range of results and its risk. Scores count evidence; they are not chances." }),
     el("div", { class: "panel" }, el("div", { class: "row" }, field("Ticker", sym), go), error), out);
   view.analyze = symbol => { sym.value = symbol; run(); };
   return view;

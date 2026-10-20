@@ -177,6 +177,10 @@ def test_the_card_caps_the_limit_and_falls_back_to_shares(svc):
     with pytest.raises(ValueError, match="stop must sit behind"):
         m.card(symbol="AAPL", direction="LONG", entry=spot, stop=spot * 1.1, target_1=spot * 1.2,
                target_2=spot * 1.3, horizon_days=5, setup="fade")
+    # 2.15: so are levels no price reaches (a short's second target below zero, from a very wide risk).
+    with pytest.raises(ValueError, match="at or below zero"):
+        m.card(symbol="AAPL", direction="SHORT", entry=spot, stop=spot * 1.4, target_1=spot * 0.2,
+               target_2=-spot * 0.2, horizon_days=15, setup="reversal")
 
 
 def test_without_a_chain_the_shares_carry_the_plan(svc):
@@ -567,3 +571,71 @@ def test_the_analysis_email_refuses_plainly_without_smtp_or_the_flag(client, tmp
     with TestClient(create_app(s, service)) as c:
         assert c.post("/v2/analysis/email", json=body).status_code == 404
     service.db.close()
+
+
+# --- 2.15: the 250 largest, the markets overseas, every stock ranked, day trades, the session's rescans ----------
+
+def test_the_universe_is_the_250_largest_plus_the_watchlist():
+    from tradeassist.morning import live_universe
+    from tradeassist.scanner import TOP_250
+    names = movers_universe(["ZZZZ"])
+    assert set(TOP_250) <= set(names) and len(names) == 251
+    assert set(names) - {"ZZZZ"} <= set(live_universe([]))          # Live news keeps its wider list
+
+
+def test_the_plan_ranks_every_stock_with_the_markets_and_day_trade_cards(svc, monkeypatch):
+    from tradeassist.opportunities import Runs, save_prefs
+    names = ["AAPL", "MSFT", "KO", "JPM", "NVDA", "CAT", "PG", "XOM", "UNH", "TSLA"]
+    monkeypatch.setattr(morning_mod, "movers_universe", lambda watchlist: names)
+    m = Morning(svc, Analyst(svc), dict(FEATURE_DEFAULTS))
+    plan = m.plan()
+    opps = plan["opportunities"]
+    assert len(opps) == len(names) and [o["rank"] for o in opps] == list(range(1, len(names) + 1))
+    assert all(opps[i]["score"] >= opps[i + 1]["score"] for i in range(len(opps) - 1))
+    for o in opps:
+        d = 1 if o["direction"] == "LONG" else -1
+        assert 0 <= o["score"] <= 100 and d * (o["entry"] - o["stop"]) > 0 and d * (o["target_1"] - o["entry"]) > 0
+        assert o["horizon"] == "day" and o["edge"]["basis"] and sum(p["points"] for p in o["score_parts"]) >= o["score"] - 1e-6 \
+            or o["setup"] == "quiet"
+    ctx = plan["context"]
+    assert {o["key"] for o in ctx["overseas"]} >= {"japan", "germany", "uk"} and len(ctx["sectors"]) == 11
+    day_cards = [c for c in plan["cards"] if c.get("setup") != "reversal"]
+    assert day_cards and all(c["day_trade"] and c["horizon_days"] == 1 for c in day_cards)
+    assert all(any(o.get("card_key") == c["key"] for o in opps) for c in day_cards)
+    assert plan["run_id"] and Runs(svc.db).get(plan["run_id"])["source"] == "morning"
+    # A rescan keeps today's reversal watch and keeps runs at most every half hour.
+    again = m.plan(rescan=True)
+    assert again["reversal"] == plan["reversal"] and "run_id" not in again
+    # Swing trades on request: five-day cards with chart levels.
+    save_prefs(svc.db, svc.settings, {"morning": {"horizon": "swing"}})
+    swing = m.plan()
+    assert swing["horizon"] == "swing" and all(o["horizon"] == "swing" and o["horizon_days"] == 5 for o in swing["opportunities"])
+    assert all(not c.get("day_trade") for c in swing["cards"])
+
+
+def test_a_day_trade_card_is_out_the_same_session(svc):
+    m = Morning(svc, Analyst(svc), dict(FEATURE_DEFAULTS))
+    spot = svc.market.spot("AAPL")
+    card = m.card(symbol="AAPL", direction="LONG", entry=spot, stop=spot * 0.99, target_1=spot * 1.015, target_2=spot * 1.025,
+                  horizon_days=5, setup="ride", day_trade=True)
+    assert card["day_trade"] and card["horizon_days"] == 1 and any("15:55" in n for n in card["notes"])
+
+
+def test_the_fade_needs_a_record_that_clears_the_noise(svc, monkeypatch):
+    """2.15 review: riding and fading a move are the same cases with opposite signs, so the plan fades only when the
+    fade's record wins more often than not with 95% confidence, not whenever it merely looks better."""
+    from tradeassist.opportunities import edge_from
+    m = Morning(svc, Analyst(svc), dict(FEATURE_DEFAULTS))
+    row = {"symbol": "AAPL", "move_pct": 2.0, "ranges": 1.2, "since_open_ranges": None, "news": None, "setup": None}
+
+    def edges(fade_low):
+        def _edge(row, kind, d, **kw):
+            return (edge_from(-0.05, 400, basis="t", cost_pct=0.1, frequency=0.47, low=0.42, high=0.52) if d == 1 else
+                    edge_from(0.25, 400, basis="t", cost_pct=0.1, frequency=0.53, low=fade_low, high=0.58))
+        return _edge
+    monkeypatch.setattr(m, "_edge", edges(0.48))                    # better-looking, but within the noise
+    kind, d, label, _ = m._setup_and_edge(row, phase="pre", horizon="day", frames={}, cases=None, minute=0)
+    assert d == 1 and label.startswith("Ride")
+    monkeypatch.setattr(m, "_edge", edges(0.51))                    # wins more often than not, with confidence
+    kind, d, label, _ = m._setup_and_edge(row, phase="pre", horizon="day", frames={}, cases=None, minute=0)
+    assert d == -1 and label.startswith("Fade")

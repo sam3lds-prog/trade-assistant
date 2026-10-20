@@ -317,9 +317,16 @@ def test_the_news_sits_on_the_bars_of_the_range(view):
     assert c["news"]["items"], "demo headlines are dated inside the month"
     for n in c["news"]["items"]:
         assert lo <= n["t"] <= hi and n["headline"] and n["tl"] in {b["tl"] for b in c["bars"]}
-        # A headline sits on a bar of its own New York day (a pre-market headline on that day's first bar).
+        # A headline sits on a bar of its own New York day (a pre-market headline on that day's first bar); one from a
+        # day with no bars (a weekend, a holiday) sits on the next session's first bar.
         bar = next(b for b in c["bars"] if b["tl"] == n["tl"])
-        assert datetime.fromtimestamp(bar["t"], NY).date() <= datetime.fromtimestamp(n["t"], NY).date()
+        n_day = datetime.fromtimestamp(n["t"], NY).date()
+        bar_days = sorted({datetime.fromtimestamp(b["t"], NY).date() for b in c["bars"]})
+        if n_day in bar_days or n_day > bar_days[-1]:
+            assert datetime.fromtimestamp(bar["t"], NY).date() <= n_day
+        else:
+            assert datetime.fromtimestamp(bar["t"], NY).date() == next(d for d in bar_days if d > n_day)
+            continue
         later = [b for b in c["bars"] if b["t"] > bar["t"]]
         if later and datetime.fromtimestamp(bar["t"], NY).date() < datetime.fromtimestamp(n["t"], NY).date():
             assert datetime.fromtimestamp(later[0]["t"], NY).date() > datetime.fromtimestamp(n["t"], NY).date()

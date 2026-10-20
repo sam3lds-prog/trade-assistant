@@ -50,6 +50,10 @@ def test_the_200_are_the_100_large_caps_and_100_more_each_with_a_sector_fund():
     assert list(TOP_200[:100]) == list(LARGE_CAPS) and not set(NEXT_100) & set(LARGE_CAPS)
     assert all(t in TICKER_FUND for t in TOP_200)            # no SEC lookup needed to compare with its sector
     assert universe("top200", [])[1] == list(TOP_200)
+    # 2.15: the 250 largest, the Morning plan's list, is a choice too (and the scan's default); all have a sector fund.
+    name, top250 = universe("top250", [])
+    assert name == "top250" and len(top250) == len(set(top250)) == 250 and top250[:200] == list(TOP_200)
+    assert all(t in TICKER_FUND for t in top250)
     with pytest.raises(ValueError, match="top200"):
         universe("everything", [])
 

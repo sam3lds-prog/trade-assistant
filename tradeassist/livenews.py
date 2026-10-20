@@ -1147,8 +1147,8 @@ class LiveFeed:
         hit = self._universe
         if hit and time.time() - hit[0] < 600:
             return hit[1]
-        from .morning import movers_universe
-        names = set(movers_universe(self.settings.watchlist))
+        from .morning import live_universe
+        names = set(live_universe(self.settings.watchlist))
         try:
             names |= {r["symbol"] for r in self.db.query(
                 "SELECT DISTINCT symbol FROM positions WHERE status IN ('OPEN', 'PARTIALLY_CLOSED')")}

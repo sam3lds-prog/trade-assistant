@@ -144,7 +144,7 @@ def render(plan: dict[str, Any], score: dict[str, Any], *, app_url: str = "http:
 
 def render_analysis(symbol: str, trend: dict[str, Any] | None, card: dict[str, Any], *, demo: bool = False,
                     app_url: str = "http://127.0.0.1:8000/#analyze") -> tuple[str, str, str]:
-    """(subject, text, HTML) for one analyzed stock's trade card, sent from Analyze a stock (2.9). The
+    """(subject, text, HTML) for one analyzed stock's trade card, sent from Analyze opportunity (2.9). The
     levels are the user's own thesis, so the wording says so; the honesty lines stay."""
     when = datetime.now(NY).strftime("%a %b %-d")
     side = "buy" if card["direction"] == "LONG" else "short"
@@ -158,8 +158,8 @@ def render_analysis(symbol: str, trend: dict[str, Any] | None, card: dict[str, A
                       + (f", in this state {days} day{'s' if days != 1 else ''}" if days is not None else "")
                       + ". Points count evidence; they are not chances.")
     lines = _card_lines(card)
-    footer = (f"Prices: {card.get('price_basis', 'n/a')}. The levels are your own thesis, graded on Analyze a "
-              f"stock; past frequencies are never forecasts, and this app never places orders. "
+    footer = (f"Prices: {card.get('price_basis', 'n/a')}. The levels are your own thesis, graded on Analyze "
+              f"opportunity; past frequencies are never forecasts, and this app never places orders. "
               f"The screen: {app_url}")
 
     text_parts = [subject, ""]
