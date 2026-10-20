@@ -1541,6 +1541,9 @@ already in the price) and a measurement of what price an order could really have
 **Known limits, said on the screen.** Tradier stamps prints to the second, so the 100 ms and 500 ms rows cannot be
 told apart there; a millisecond-stamped feed would be needed for that. The spread before a headline is estimated,
 not quoted: Tradier gives no historical NBBO. Halts are read from gaps in the prints, which is their shape, not a
-halt flag. Two Chromium tests of the Analyze screen (`test_analyze_has_an_interactive_chart_with_patterns_and_outcomes`,
-`test_analyze_has_a_what_if_widget_...`) failed on the untouched 2.15 tree in this environment before any of this
-change (demo-data expectations tied to the calendar date and the factor summary), and are unrelated to it.
+halt flag. Four tests failed on the untouched 2.15 tree in this environment before any of this change, and are
+unrelated to it: two Chromium tests of the Analyze screen (`test_analyze_has_an_interactive_chart_with_patterns_and_outcomes`,
+`test_analyze_has_a_what_if_widget_...`) and two of the chart view (`test_the_chart_covers_the_range_...`,
+`test_similar_takes_the_window_...`), all demo-data expectations tied to the calendar date. `test_every_cap_and_limit_holds`
+(the blend) failed once in a full run and passed on every rerun, alone, in its file and in suite order; nothing in
+this change touches the blend.

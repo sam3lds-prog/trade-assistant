@@ -144,8 +144,27 @@ def test_client_only_reads_market_data():
     c.chain("AAPL", "2021-04-16")
     assert all("/markets/" in url for url, _ in session.calls)
     public = [name for name in dir(TradierData) if not name.startswith("_")]
-    # 2.12 adds two reads of /markets/timesales (bars within the day). Still no order, account or write method.
-    assert sorted(public) == ["chain", "clock", "expirations", "history", "intraday", "intraday_reach", "quotes"]
+    # 2.12 adds two reads of /markets/timesales (bars within the day); 2.16 two more (trade prints, for the news
+    # replay). Still no order, account or write method.
+    assert sorted(public) == ["chain", "clock", "expirations", "history", "intraday", "intraday_reach", "quotes",
+                              "tick_reach", "ticks"]
+
+
+def test_ticks_read_every_session_of_timesales_and_keep_the_order_within_a_second():
+    """2.16: trade prints come from /markets/timesales at the tick interval, all sessions, as t/price/volume in the
+    order Tradier gives them; bad rows are dropped."""
+    body = {"series": {"data": [{"time": "2026-10-19T10:30:00", "timestamp": 1792420200, "price": 100.0, "volume": 100},
+                                {"timestamp": 1792420200, "price": 100.02, "volume": 50},
+                                {"timestamp": 1792420201, "price": None, "volume": 10},
+                                {"time": "2026-10-19T10:30:02", "price": 100.01, "volume": 20}, "junk"]}}
+    c, session = client([FakeResponse(body=body)])
+    from datetime import datetime, timezone
+    df = c.ticks("BRK.B", datetime(2026, 10, 19, 13, 0, tzinfo=timezone.utc), datetime(2026, 10, 19, 15, 0, tzinfo=timezone.utc))
+    url, params = session.calls[-1]
+    assert url.endswith("/markets/timesales") and params["interval"] == "tick" and params["session_filter"] == "all"
+    assert params["symbol"] == "BRK/B" and params["start"] == "2026-10-19 09:00" and params["end"] == "2026-10-19 11:00"
+    assert df["t"].tolist() == [1792420200.0, 1792420200.0, 1792420202.0] and df["price"].tolist() == [100.0, 100.02, 100.01]
+    assert c.tick_reach()["days"] == 5 and c.tick_reach()["resolution_s"] == 1.0
 
 
 def test_normalize_contract_handles_seconds_timestamps():
