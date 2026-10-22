@@ -269,6 +269,40 @@ def run_check(provider: RobinhoodData, symbol: str, out_path: Path, rate: float 
         return f"{own_text}. The app will use {len(used)} bars from {source}.", used
     step("Daily price history", history)
 
+    # 2.16.1: the 5-day and 1-day charts ask Robinhood for 5-minute bars, a request with its own argument
+    # layout (an explicit time range), so it is tried here too. The window is the longest the chart sends.
+    from .intraday import regular_session
+    tradier_bars = callable(getattr(provider.history_fallback, "intraday", None))
+
+    def intraday():
+        until = datetime.now(timezone.utc).replace(microsecond=0)
+        since = until - timedelta(days=8)
+        frame = provider._intraday(symbol, "5m", since, until)
+        session = regular_session(frame)
+        if session.empty:
+            raise DataError(f"{len(frame)} bars came back but none fall in regular hours (9:30 to 16:00 New "
+                            "York), so the app is probably reading their times wrongly")
+        local = session["t"].map(lambda t: datetime.fromtimestamp(t, NY))
+        days = sorted({m.date() for m in local})
+        per_day = len(session) / len(days)
+        gaps = session["t"].diff().dropna()
+        usual = int(gaps.mode().iloc[0]) if len(gaps) else 0
+        if usual and usual != 300:
+            notes.append(f"Robinhood's bars are {usual // 60} minutes apart rather than 5, so the 5-minute view "
+                         "will be coarser than its name says.")
+        if len(days) < 3:
+            notes.append(f"Only {len(days)} trading day(s) of bars within the day came back for an 8-day window; "
+                         "the 5-day chart will be shorter than its name says.")
+        if len(frame) != len(session):
+            notes.append(f"{len(frame) - len(session)} bars outside regular hours were sent as well; the chart "
+                         "leaves them out.")
+        source = provider.history_fallback.info.label if tradier_bars else "Robinhood"
+        return (f"Robinhood: {len(session)} bars in regular hours over {len(days)} trading days "
+                f"({per_day:.0f} a day), {local.iloc[0]:%Y-%m-%d %H:%M} to {local.iloc[-1]:%Y-%m-%d %H:%M} New York. "
+                f"The app will use bars within the day from {source}."), session
+    # Not decisive when a Tradier token is set, since the chart takes bars within the day from Tradier then.
+    step("5-minute bars (the 5-day chart)", intraday, optional=tradier_bars)
+
     def earnings():
         payload = provider.earnings_raw(symbol)
         data = payload.get("data", payload) if isinstance(payload, dict) else payload

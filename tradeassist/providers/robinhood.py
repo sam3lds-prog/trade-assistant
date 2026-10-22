@@ -653,18 +653,7 @@ class RobinhoodData:
             args["interval"] = from_enum(props["interval"], daily, "day")
         if "bounds" in props:
             args["bounds"] = from_enum(props["bounds"], ("regular",), "regular")
-        start_arg = choose(props, "start", "start_date", "from", "start_time", "begin")
-        end_arg = choose(props, "end", "end_date", "to", "end_time")
-        def moment(arg: str, day: str, end_of_day: bool) -> str:
-            """A date in the form the argument wants: a plain date, or a full time when it is a *_time."""
-            wants = str((props.get(arg) or {}).get("description") or "") if isinstance(props.get(arg), dict) else ""
-            if arg.endswith("_time") or "RFC3339" in wants or "ISO 8601" in wants:
-                return f"{day}T23:59:59Z" if end_of_day else f"{day}T00:00:00Z"
-            return day
-        if start_arg:
-            args[start_arg] = moment(start_arg, start, False)
-        if end_arg:
-            args[end_arg] = moment(end_arg, end, True)
+        args.update(range_args(props, start, end))
         spans = [None]
         if "span" in props:
             years = (date.fromisoformat(end) - date.fromisoformat(start)).days / 365.25
@@ -737,6 +726,10 @@ class RobinhoodData:
         fallback = getattr(self.history_fallback, "intraday", None)
         if callable(fallback):
             return fallback(symbol, interval, start, end)
+        return self._intraday(symbol, interval, start, end)
+
+    def _intraday(self, symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
+        """Robinhood's own bars within the day, whether or not a Tradier token is set (the check calls this)."""
         if interval != "5m":
             raise DataError(f"Robinhood does not offer {interval} bars within the day (5-minute bars only)")
         symbol = display_symbol(symbol)
@@ -759,6 +752,9 @@ class RobinhoodData:
                 args["bounds"] = from_enum(props["bounds"], ("regular",), "regular")
             if "span" in props:
                 args["span"] = from_enum(props["span"], ("week", "1w", "7d"), "week")
+            # Robinhood's layout asks for an explicit time range (start_time is required); the window the
+            # chart wants is sent as full moments, so the reply holds only the days asked for.
+            args.update(range_args(props, start, end))
             payload = self._call(tool, args)
         from ..intraday import intraday_frame
         rows = find_intraday_bars(unwrap(payload))
@@ -801,6 +797,38 @@ class RobinhoodData:
             state = "closed"
         return {"state": state, "description": "Regular hours by the clock; market holidays are not known",
                 "date": now.date().isoformat(), "next_change": "", "next_state": ""}
+
+
+def range_args(props: dict[str, Any], start: str | datetime, end: str | datetime) -> dict[str, Any]:
+    """The time-range arguments a history tool takes, each in the form it wants.
+
+    `start` and `end` are either dates (ISO strings: the whole of each day is meant) or moments with a time
+    zone (bars within the day). An argument named *_time, or described as RFC3339 or ISO 8601, gets a full
+    UTC time; any other gets a plain date. Robinhood's get_equity_historicals requires start_time, so a
+    request without a range is refused before it is sent (see RobinhoodData._call)."""
+    out: dict[str, Any] = {}
+    start_arg = choose(props, "start", "start_date", "from", "start_time", "begin")
+    end_arg = choose(props, "end", "end_date", "to", "end_time")
+
+    def moment(arg: str, value: str | datetime, end_of_day: bool) -> str:
+        spec = props.get(arg)
+        wants = str(spec.get("description") or "") if isinstance(spec, dict) else ""
+        full_time = arg.endswith("_time") or "RFC3339" in wants or "ISO 8601" in wants
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            if full_time:
+                return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return value.astimezone(NY).date().isoformat()      # a date-only argument: the New York day
+        if full_time:
+            return f"{value}T23:59:59Z" if end_of_day else f"{value}T00:00:00Z"
+        return value
+
+    if start_arg:
+        out[start_arg] = moment(start_arg, start, False)
+    if end_arg:
+        out[end_arg] = moment(end_arg, end, True)
+    return out
 
 
 def find_bars(data: Any, depth: int = 0) -> list[dict[str, Any]]:

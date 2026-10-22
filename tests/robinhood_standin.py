@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Annotated, Literal
 
@@ -81,6 +81,14 @@ class Standin:
 
     def wrap(self, data):
         return {"data": data, "guide": "Prices are text. Unwrap data first."}
+
+    def minute_bars(self, symbol: str, lo: float = 0.0, hi: float = 2e10, days: int = 12) -> list[tuple]:
+        """Made-up 5-minute bars of the last `days` trading days that start between `lo` and `hi` (UTC
+        seconds), as (t, open, high, low, close, volume) rows."""
+        from tradeassist.intraday import demo_intraday
+        made = demo_intraday(self.demo.history(symbol, "2000-01-01", "2100-01-01"), symbol, days=days)
+        made = made[(made["t"] >= lo) & (made["t"] <= hi)]
+        return list(made[["t", "open", "high", "low", "close", "volume"]].itertuples(index=False, name=None))
 
     def contracts(self, symbol: str, expiration: str) -> list[dict]:
         out = self.demo.chain(symbol, expiration)
@@ -210,6 +218,15 @@ class Standin:
             self.calls.append(("get_equity_historicals", {"symbols": symbols, "interval": interval, "span": span}))
             if span == "5year" and interval != "week":
                 raise ValueError("5year span supports only the week interval")
+            if interval == "5minute":                    # the last week of bars within the day
+                if span != "week":
+                    raise ValueError("5minute bars are available for the week span only")
+                lo = datetime.now(timezone.utc).timestamp() - 7 * 86400
+                rows = [{"begins_at": datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         "open_price": money(o), "high_price": money(h), "low_price": money(l),
+                         "close_price": money(c), "volume": int(v), "interpolated": False}
+                        for t, o, h, l, c, v in self.minute_bars(symbols[0], lo)]
+                return self.wrap({"results": [{"symbol": symbols[0], "interval": interval, "historicals": rows}]})
             bars = demo.history(symbols[0], "2000-01-01", "2100-01-01").tail(252)
             rows = [{"begins_at": f"{d:%Y-%m-%d}T00:00:00Z", "open_price": money(o), "high_price": money(h),
                      "low_price": money(l), "close_price": money(c), "volume": int(v), "interpolated": False}
@@ -259,9 +276,17 @@ class Standin:
                               for i in reversed(ids)])
 
         @srv.tool(annotations=READ_ONLY)
-        def get_stock_historicals(symbol: str, start_date: str, end_date: str) -> dict:
-            """Daily bars between two dates."""
+        def get_stock_historicals(symbol: str, start_date: str, end_date: str,
+                                  interval: Literal["1day", "5min"] = "1day") -> dict:
+            """Daily bars between two dates, or 5-minute bars (the interval spelt differently from variant a)."""
             self.calls.append(("get_stock_historicals", {"symbol": symbol, "start_date": start_date}))
+            if interval == "5min":
+                lo = datetime.fromisoformat(start_date).replace(tzinfo=ZoneInfo("America/New_York")).timestamp()
+                hi = (datetime.fromisoformat(end_date) + timedelta(days=1)).replace(
+                    tzinfo=ZoneInfo("America/New_York")).timestamp()
+                return self.wrap({"bars": [{"time": datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                            "open": o, "high": h, "low": l, "close": c, "volume": int(v)}
+                                           for t, o, h, l, c, v in self.minute_bars(symbol, lo, hi)]})
             bars = demo.history(symbol, start_date, end_date)
             return self.wrap({"bars": [{"date": f"{d:%Y-%m-%d}", "open": o, "high": h, "low": l, "close": c,
                                         "volume": int(v)} for d, o, h, l, c, v in
@@ -349,6 +374,14 @@ class Standin:
             for label, value in (("start_time", start_time), ("end_time", end_time)):
                 if value is not None and not re.fullmatch(RFC3339, value):       # the real server's own complaint
                     raise ValueError(f"{label} must be RFC3339 (e.g. '2026-01-01T00:00:00Z')")
+            if interval == "5minute":                    # bars within the day, each stamped with its start
+                lo = datetime.fromisoformat(start_time.replace("Z", "+00:00")).timestamp()
+                hi = datetime.fromisoformat((end_time or "2100-01-01T00:00:00Z").replace("Z", "+00:00")).timestamp()
+                rows = [{"begins_at": datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         "open_price": money(o), "high_price": money(h), "low_price": money(l),
+                         "close_price": money(c), "volume": int(v), "interpolated": False}
+                        for t, o, h, l, c, v in self.minute_bars(symbols[0], lo, hi)]
+                return self.wrap({"results": [{"symbol": symbols[0], "interval": interval, "bars": rows}]})
             bars = demo.history(symbols[0], start_time[:10], (end_time or "2100-01-01")[:10])
             def midnight_new_york(day) -> str:              # 04:00Z in summer, 05:00Z in winter
                 local = datetime(day.year, day.month, day.day, tzinfo=ZoneInfo("America/New_York"))

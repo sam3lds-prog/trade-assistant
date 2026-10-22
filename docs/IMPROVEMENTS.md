@@ -1547,3 +1547,26 @@ unrelated to it: two Chromium tests of the Analyze screen (`test_analyze_has_an_
 `test_similar_takes_the_window_...`), all demo-data expectations tied to the calendar date. `test_every_cap_and_limit_holds`
 (the blend) failed once in a full run and passed on every rerun, alone, in its file and in suite order; nothing in
 this change touches the blend.
+
+### 2.16.1: the 5-minute-bar request to Robinhood
+
+Reported from the app's own log on the first 5-day chart drawn on the Robinhood connection without a Tradier token:
+`provider_failure source=Robinhood request="intraday GOOGL 5m" error="Robinhood's get_equity_historicals needs
+arguments this app does not know how to fill: start_time"`, and a 502 on `/v2/chart/GOOGL?range=5d` while
+`range=1m` (daily bars) returned 200.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| R1 | `RobinhoodData.intraday` built its request without a time range. Robinhood's `get_equity_historicals` requires `start_time` (the argument layout captured on 6 October 2026, kept in `tests/robinhood_standin.py` as `OBSERVED_SCHEMAS`), so the app's own pre-flight check in `_call` refused the request before it was sent. The daily request (`_history`) filled the range; the 5-minute one, written in 2.12 against the span-based guess at the layout, did not, and no test ran it against the observed layout | High (the 1-day and 5-day charts failed on Robinhood alone) | the range arguments are filled by one function, `range_args`, for both requests: full UTC times for a `*_time` argument or one described as RFC3339/ISO 8601, plain dates otherwise; a moment with a time zone is sent as itself, a date as the whole day. `intraday` is split into `intraday` (Tradier when it is there) and `_intraday` (Robinhood's own) as `history`/`_history` already were | `test_bars_within_the_day_are_asked_for_with_the_time_range_robinhood_requires` (reproduces the logged error without the fix) |
+| R2 | `--robinhood-check` never made the chart's request, so it passed while the chart failed | Medium | a new step, *5-minute bars (the 5-day chart)*, asks Robinhood's own path for the longest window the chart sends (eight days), reports bars, trading days, bars a day and the first and last bar in New York time, and notes bars outside regular hours, bars further apart than five minutes, or fewer than three days; optional only when a Tradier token supplies bars within the day. The reply joins the capture file | `test_check_reports_each_step_and_writes_a_shareable_capture` (all three stand-in layouts) |
+
+The stand-in's three layouts now answer a request for 5-minute bars with made-up bars within the day (`Standin.minute_bars`,
+built on `demo_intraday`): the span-based layout for `span=week`, the renamed layout through an `interval` spelt
+`5min`, and the observed layout for the window between `start_time` and `end_time`, stamped with each bar's start.
+
+Four tests failed on the untouched 2.16.0 tree in this environment before this change and are unrelated to it:
+`test_the_plan_ranks_every_stock_with_the_markets_and_day_trade_cards` (no day-trade cards on the demo data for this
+calendar date), `test_a_morning_blend_opens_on_analyze_opportunity_and_goes_to_paper_trading`,
+`test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_position` (also noted under 2.16) and
+`test_a_combination_is_valued_together_so_hedges_offset`. Everything else passes: 1,149 tests with those files set
+aside, and the whole of `tests/test_robinhood.py` (60 tests, 59 before).

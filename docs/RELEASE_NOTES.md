@@ -18,6 +18,30 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.16.1
+
+A fix from the first 5-day chart drawn on the Robinhood connection without a Tradier token: the chart's
+request for 5-minute bars was refused before it was sent, with
+`get_equity_historicals needs arguments this app does not know how to fill: start_time`, so the 5-day
+and 1-day ranges showed an error while the longer ranges, which use daily bars, worked.
+
+- **The 5-minute-bar request now carries the time range.** Robinhood's price-history tool requires
+  `start_time` (its argument layout was captured on 6 October and the daily request already sent it);
+  the request for bars within the day, added in 2.12 against an earlier guess at the layout, did not.
+  Both requests now fill the range the same way: full UTC times for a `*_time` argument, plain dates for
+  a date argument, and the chart's window itself rather than a whole day when the request is for bars
+  within the day.
+- **The check tries the chart's request too.** `python run.py --robinhood-check` has a new step,
+  *5-minute bars (the 5-day chart)*, between the daily price history and the earnings dates. It asks for
+  the longest window the chart sends (eight days), reports how many bars came back over how many
+  trading days and how far apart they are, and notes anything that would make the chart shorter or
+  coarser than its name says. With a Tradier token the step is recorded but does not decide the
+  result, since bars within the day come from Tradier then. The reply is recorded in the capture file,
+  so a mismatch there can be fixed from the file alone.
+
+No migration, no new setting. If you saw the error, update and reload the chart; there is nothing to
+re-check unless the new step reports FAILED.
+
 ## 2.16.0
 
 **Live news: the five steps and the replay. News-to-trade intelligence, and the evidence on whether a sub-second
