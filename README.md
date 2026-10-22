@@ -282,8 +282,9 @@ python run.py --robinhood-check      # or: python run.py --robinhood-check NVDA
 
 The check opens Robinhood's sign-in page in your browser. After you approve, it
 runs every data call the app makes and prints OK or FAILED for each: stock quote,
-expirations, option chain and Greeks, one live contract quote, price history. If
-all are OK, set `DATA_MODE=robinhood` in `.env` and start the app as usual.
+expirations, option chain and Greeks, one live contract quote, daily price
+history, and the 5-minute bars the 5-day chart asks for. If all are OK, set
+`DATA_MODE=robinhood` in `.env` and start the app as usual.
 
 What the connection can and cannot do:
 
@@ -327,7 +328,7 @@ files the check writes. As of the capture of 6 October 2026:
 | Sign-in, and the list of 84 tools with the arguments each accepts | Seen on the real server |
 | Stock quote reply | Seen; the app reads it (regular and after-hours last trade, bid, ask, their times, prior close) |
 | Option expirations reply, including Robinhood's stated price steps | Seen; the app reads it |
-| Price history request (full start and end times) | Corrected to what the server asked for; the reply has not been seen |
+| Price history requests, daily and 5-minute (full start and end times) | Corrected to what the server asked for (the 5-minute request in 2.16.1); the replies have not been seen |
 | Option contracts, option quotes and Greeks, earnings replies | Not yet seen: written from the two replies that were seen, and may need another adjustment |
 
 The connection reads each tool's own description to decide how to call it,
@@ -369,6 +370,9 @@ Other things to know:
   Robinhood when it supplies at least 80% of the days asked for, and otherwise
   from Tradier if a Tradier token is in `.env`. The check tells you which one the
   app will use, and the terminal log notes each time Tradier is used instead.
+- Bars within the day (the 1-day and 5-day charts) come from Robinhood's 5-minute
+  bars, about a week of them, unless a Tradier token is set, in which case Tradier's
+  prints are used and reach 40 days back. The check tries this request too.
 - Without a Tradier token the app tells market hours from the clock and does not
   know market holidays.
 - Every listed strike of an expiration is loaded and offered, as on Robinhood's own

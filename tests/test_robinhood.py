@@ -2,6 +2,7 @@ import json
 import re
 from datetime import datetime, timedelta
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 from mcp import Client
@@ -412,7 +413,12 @@ def test_check_reports_each_step_and_writes_a_shareable_capture(tmp_path, rh):
     assert result["ok"], result["steps"]
     assert [s["step"] for s in result["steps"]] == ["Connect and list tools", "Stock quote", "Option expirations",
                                                     "Option chain and Greeks", "Live quote for one contract",
-                                                    "Daily price history", "Earnings dates (not used yet)"]
+                                                    "Daily price history", "5-minute bars (the 5-day chart)",
+                                                    "Earnings dates (not used yet)"]
+    minutes = result["steps"][-2]
+    assert minutes["ok"] and not minutes["optional"] and minutes["notes"] == []   # the chart's own request, tried
+    assert re.search(r"Robinhood: \d{3,} bars in regular hours over [3-6] trading days \(\d\d a day\)", minutes["detail"])
+    assert minutes["detail"].endswith("from Robinhood.")
     earnings = result["steps"][-1]
     assert earnings["optional"] and earnings["ok"] == (standin.variant == "c")   # only the real layout has the tool
     capture = json.loads(out.read_text())
@@ -1004,6 +1010,31 @@ def test_requests_follow_the_argument_layouts_robinhood_declares():
         assert bars["date"].tolist() == truth["date"].tolist()      # 04:00Z stamps keep their New York day
         assert bars["close"].tolist() == pytest.approx(truth["close"].tolist())   # and the filler bar is dropped
         assert provider.earnings_raw("AAPL")["data"]["results"][0]["report_date"] == "2026-10-29"
+        assert standin.forbidden_calls == []
+    finally:
+        provider.bridge.close()
+
+
+def test_bars_within_the_day_are_asked_for_with_the_time_range_robinhood_requires():
+    """The 5-day chart's request. Robinhood requires start_time; without it the app refused to send the
+    request at all, so the chart showed an error while the daily history worked."""
+    from datetime import timezone
+    from tradeassist.intraday import regular_session
+    standin, provider = connect("c")
+    try:
+        until = datetime.now(timezone.utc).replace(microsecond=0)
+        since = until - timedelta(days=7)
+        frame = regular_session(provider.intraday("AAPL", "5m", since, until))
+        call = next(args for name, args in standin.calls if name == "get_equity_historicals")
+        assert call == {"symbols": ["AAPL"], "interval": "5minute",
+                        "start_time": since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "end_time": until.strftime("%Y-%m-%dT%H:%M:%SZ")}         # the window itself, as full UTC times
+        assert len(frame) >= 4 * 78 and frame["t"].is_monotonic_increasing       # about a week of 78 bars a day
+        assert since.timestamp() <= frame["t"].iloc[0] and frame["t"].iloc[-1] <= until.timestamp()
+        local = pd.to_datetime(frame["t"], unit="s", utc=True).dt.tz_convert(NY)
+        assert set(local.dt.hour) <= set(range(9, 16)) and (local.dt.minute % 5 == 0).all()
+        with pytest.raises(DataError, match="5-minute bars only"):
+            provider.intraday("AAPL", "1m", since, until)
         assert standin.forbidden_calls == []
     finally:
         provider.bridge.close()
