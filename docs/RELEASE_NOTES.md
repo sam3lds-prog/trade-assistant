@@ -18,6 +18,23 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 2.16.2
+
+A fix from the chart the evening 2.16.1 went out: at 7:24 p.m. New York the daily chart still ended on the day
+before, with no bar for the session that had closed at 4.
+
+- **A day that trades after the bars were fetched is fetched at the next request.** Daily bars are kept in the
+  database and counted as fresh for four hours. A source that sends no bar for today while the session is open,
+  or that publishes it a while after the close, left the saved bars ending on the day before, and nothing
+  asked for the day's bar after the close until those four hours were up: bars fetched at 3:30 p.m. showed the
+  day only from 7:30 p.m. Now the saved bars are fetched again at the first request after the close of any
+  weekday missing from them; if the source has not published the bar yet, again every 15 minutes until it has.
+  After a fetch made before the open, the chart asks once more after 9:30 for today's bar so far. Weekends ask
+  for nothing extra. Market holidays are not known, so on a holiday evening a viewed stock is asked for every
+  15 minutes.
+
+No migration, no new setting. Update and reload the chart: the first request fetches the missing day.
+
 ## 2.16.1
 
 A fix from the first 5-day chart drawn on the Robinhood connection without a Tradier token: the chart's

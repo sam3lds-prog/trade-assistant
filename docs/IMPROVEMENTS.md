@@ -1570,3 +1570,16 @@ calendar date), `test_a_morning_blend_opens_on_analyze_opportunity_and_goes_to_p
 `test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_position` (also noted under 2.16) and
 `test_a_combination_is_valued_together_so_hedges_offset`. Everything else passes: 1,149 tests with those files set
 aside, and the whole of `tests/test_robinhood.py` (60 tests, 59 before).
+
+### 2.16.2: the day's finished bar missing for up to four hours after the close
+
+Reported from the chart: at 7:24 p.m. New York on 22 October the GOOGL daily chart (1M, grouped by day) ended on
+21 October.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| C1 | `Market.bars` counted the saved daily bars as fresh for `BAR_REFRESH_SECONDS` (four hours). Its only early refetch was for a saved *unfinished* bar (one dated after the day settled when it was fetched). Bars from a source that sends no bar for today while the session is open (or publishes it after the close) end on the day before, so there was no unfinished bar to trigger it, and nothing asked for the finished day until four hours after the fetch: fetched at 3:30 p.m., the day appeared at 7:30 p.m. The same gap kept a fetch made before the open from showing today's bar so far for four hours | Medium (every daily view and study a day behind for up to four hours after each close) | `last_session` (the latest weekday that has closed and settled). When the saved bars end before it, they are fetched again at the next request if that session closed after the fetch, and every `PARTIAL_REFRESH_SECONDS` (15 minutes) if the fetch came after the close but the source did not have the bar yet. When a fetch was made before 9:30 and the session has since opened, views that show today's bar (`complete=False`) fetch once more | `test_a_day_that_traded_after_the_fetch_is_not_left_out` (the reported case; a late-publishing source asked every 15 minutes, not on every request; no extra request across Saturday's 4:10 p.m.; one request after the open for the chart, none for finished-bar studies) |
+
+Market holidays are not known to `last_session`, so on a holiday evening a stock that is viewed is asked for every 15
+minutes; the cost is bounded by what is on the screen. The four tests that failed on the untouched tree before 2.16.1
+still fail on it and are unrelated.
