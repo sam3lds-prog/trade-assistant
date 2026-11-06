@@ -85,6 +85,69 @@ def test_todays_bar_is_marked_unfinished_and_refetched_after_the_close(clock):
     assert src.calls == 3
 
 
+def test_a_day_that_traded_after_the_fetch_is_not_left_out(clock):
+    """2.16.2. A source that sends no bar for today until the day is over left the cache ending on the day
+    before, and that cache counted as fresh for four hours: bars fetched at 3:30 p.m. showed no bar for the
+    day until 7:30 p.m. (reported on the chart at 7:24 p.m. New York, the last bar a day old)."""
+    from tradeassist.market import last_session
+    assert last_session(at("2026-10-22T19:24:00")).isoformat() == "2026-10-22"
+    assert last_session(at("2026-10-24T17:00:00")).isoformat() == "2026-10-23"       # a Saturday: Friday
+    assert last_session(at("2026-10-26T09:00:00")).isoformat() == "2026-10-23"       # Monday morning: Friday
+
+    clock["t"] = at("2026-10-22T15:30:00")
+    src = Bars("2026-10-21")                             # in the session: no bar for today from this source
+    m = Market(src, Database(":memory:"), Settings(data_mode="demo"))
+    assert m.bars("GOOGL")["date"].iloc[-1] == pd.Timestamp("2026-10-21") and src.calls == 1
+    clock["t"] = at("2026-10-22T15:50:00")
+    m.bars("GOOGL")
+    assert src.calls == 1                                # nothing new to fetch before the close
+
+    # The close: the day's finished bar is fetched at the next request, not four hours after the last one.
+    src.last = "2026-10-22"
+    clock["t"] = at("2026-10-22T16:30:00")
+    df = m.bars("GOOGL", complete=True)
+    assert src.calls == 2 and df["date"].iloc[-1] == pd.Timestamp("2026-10-22") and df["bar_complete"].all()
+    clock["t"] = at("2026-10-22T19:24:00")
+    m.bars("GOOGL")
+    assert src.calls == 2                                # and then it is left alone
+
+    # A source that publishes the day's bar late: asked again every few minutes until the bar is there.
+    clock["t"] = at("2026-10-23T16:20:00")
+    src.last = "2026-10-22"
+    m2 = Market(src, Database(":memory:"), Settings(data_mode="demo"))
+    src.calls = 0
+    m2.bars("GOOGL")
+    clock["t"] = at("2026-10-23T16:30:00")
+    m2.bars("GOOGL")
+    assert src.calls == 1                                # not on every request
+    clock["t"] = at("2026-10-23T16:40:00")
+    src.last = "2026-10-23"
+    assert m2.bars("GOOGL")["date"].iloc[-1] == pd.Timestamp("2026-10-23") and src.calls == 2
+
+    # The weekend asks for nothing more than the four-hourly refresh: Friday is the latest session until
+    # Monday's close, so passing 4:10 p.m. on Saturday is not a new day to fetch.
+    clock["t"] = at("2026-10-24T14:00:00")
+    m2.bars("GOOGL")
+    assert src.calls == 3                                # the four-hourly refresh, as before
+    for when in ("2026-10-24T16:30:00", "2026-10-24T17:50:00"):
+        clock["t"] = at(when)
+        m2.bars("GOOGL")
+    assert src.calls == 3
+
+    # The session opens after a fetch made before it: today's bar so far is asked for once, by the views
+    # that show it (the chart), not by the studies that use finished bars only.
+    clock["t"] = at("2026-10-26T08:00:00")
+    m3 = Market(src, Database(":memory:"), Settings(data_mode="demo"))
+    src.calls = 0
+    m3.bars("GOOGL")
+    clock["t"] = at("2026-10-26T09:45:00")
+    m3.bars("GOOGL", complete=True)
+    assert src.calls == 1
+    src.last = "2026-10-26"
+    df = m3.bars("GOOGL")
+    assert src.calls == 2 and df["date"].iloc[-1] == pd.Timestamp("2026-10-26") and not df["bar_complete"].iloc[-1]
+
+
 def test_complete_only_and_signal_status_leave_unmarked_frames_alone():
     df = frame("2026-10-06", 30)
     assert complete_only(df) is df and signal_status(df) == CONFIRMED

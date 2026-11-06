@@ -40,6 +40,15 @@ def settled_through(epoch_seconds: float) -> date:
     return moment.date() if moment.time() >= CLOSE_SETTLED else moment.date() - timedelta(days=1)
 
 
+def last_session(epoch_seconds: float) -> date:
+    """The latest weekday whose session had closed and settled at this moment. Market holidays are not known,
+    so on a holiday this is the holiday itself."""
+    day = settled_through(epoch_seconds)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
 def complete_mask(dates: pd.Series, fetched_at: float) -> pd.Series:
     """True for each bar that was finished when the bars were fetched."""
     return dates <= pd.Timestamp(settled_through(fetched_at))
@@ -214,6 +223,22 @@ class Market:
                 fresh = False
             elif not complete and now - meta["fetched_at"] > PARTIAL_REFRESH_SECONDS:
                 fresh = False
+        elif fresh:
+            # 2.16.2: the cache holds no bar for a day that has since traded. A source that sends no bar for
+            # today until the day is over (or until some time after the close) left the cache ending on the
+            # day before, and that cache counted as fresh for BAR_REFRESH_SECONDS: bars fetched at 3:30 p.m.
+            # showed no bar for the day until 7:30 p.m.
+            latest = last_session(now)
+            moment = datetime.fromtimestamp(now, NY)
+            opened = datetime.combine(moment.date(), clock_time(9, 30), tzinfo=NY).timestamp()
+            if meta["last_date"] < latest.isoformat():
+                if settled_through(meta["fetched_at"]) < latest:
+                    fresh = False         # a session closed after the bars were fetched
+                elif now - meta["fetched_at"] > PARTIAL_REFRESH_SECONDS:
+                    fresh = False         # asked after the close, but the source did not have the bar yet
+            elif (not complete and moment.weekday() < 5 and meta["fetched_at"] < opened <= now
+                  and meta["last_date"] < moment.date().isoformat()):
+                fresh = False             # the session opened after the fetch: today's bar so far may be there now
         if not fresh:
             try:
                 frame = self._call(f"history {symbol}", lambda: self.provider.history(symbol, start, end))
