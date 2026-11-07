@@ -18,6 +18,31 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 3.0.0.dev5 — Trade Assistant 3.0, phase 5: the Trading Desk
+
+Write a trade, have it checked, approve it, and watch it fill, on paper. See [V3.md](V3.md#phase-5-the-trading-desk).
+
+- **Proposals.** On the Trading Desk, write a buy or sell of the linked stock. It is checked against your trading
+  policy and the market, and waits for your approval.
+- **Approvals bound to the exact order.** Approving checks the order is still the one you saw. An approval works once
+  and expires after 10 minutes. Change the order and you approve it again.
+- **A risk engine that fails closed.** About twenty plain checks: size, capital, today's buying, positions, today's
+  loss, the quote's age and spread, the limit, the hours, the kill switch. A check it cannot measure blocks the
+  order. Selling what you hold is always allowed.
+- **The trial policy**: $500 of capital, $50 an order, $100 of new buying a day, a $25 daily loss stop, 3 positions,
+  long shares and limit orders only, regular hours. Change it in the Trading policy widget; every change is kept.
+- **Paper fills.** Approved orders fill against the live quote, never better than the market. Nothing reaches a
+  real broker in this version.
+- **Kill switch.** One button cancels working orders and refuses every approval until you switch it off.
+- **Notifications** by email, ntfy and Telegram (set up in .env): approvals waiting, fills, blocks, problems.
+- **The trading daemon** (`./setup_daemon.sh`) keeps the desk working when the browser is closed, and values paper
+  portfolios. After a sleep it does the current work only. An order whose submission was cut off is never sent
+  twice: the desk asks the broker what became of it.
+- **Approve from your phone** over Tailscale, with the link from the notification and your PIN (optional; see
+  V3.md).
+
+No migration. Nothing reaches a real broker.
+
 ## 3.0.0.dev4 — Trade Assistant 3.0, phase 4: Discover
 
 One opportunity list instead of five. See [V3.md](V3.md#phase-4-discover).
