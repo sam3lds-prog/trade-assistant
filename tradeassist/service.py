@@ -96,10 +96,21 @@ class TradeAssistant:
                        "max_spread_pct": s.max_spread_pct, "min_dte": s.min_dte},
             "watchlist": s.watchlist,
             "sec_enabled": self.sec.enabled,
-            "places_orders": False,
+            # Real orders: only with 3.0 live execution switched on, checked ready, and a live policy in force.
+            "places_orders": self._places_real_orders(),
             "features": s.features,
             "schema_version": self.db.schema_version(),
         }
+
+    def _places_real_orders(self) -> bool:
+        desk = getattr(self, "trading", None)
+        if desk is None or not desk.live_ready:
+            return False
+        try:
+            pol = desk.policy()
+        except Exception:  # noqa: BLE001 - unreadable policy: say no
+            return False
+        return pol.account_kind == "live" and pol.mode in ("approval_required", "capped_autopilot")
 
     # --- option chain ------------------------------------------------------
     def expirations(self, symbol: str) -> dict[str, Any]:

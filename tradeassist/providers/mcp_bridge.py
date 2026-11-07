@@ -54,6 +54,15 @@ CALL_TIMEOUT = 20.0
 SIGN_IN_TIMEOUT = 300.0
 
 
+class NoAnswer(DataError):
+    """A request was sent and no answer came back (a timeout, or the connection dropped): whether it took effect
+    is not known."""
+
+
+class Refused(DataError):
+    """The server answered, and said no (a tool error, or a refused request): nothing took effect."""
+
+
 class SignInRequired(DataError):
     """The stored sign-in is missing or no longer valid and a person has to sign in again."""
 
@@ -95,7 +104,7 @@ def parse_tool_result(result: Any) -> Any:
     texts = [getattr(part, "text", None) for part in (getattr(result, "content", None) or [])]
     text = next((t for t in texts if isinstance(t, str) and t.strip()), None)
     if getattr(result, "is_error", False):
-        raise DataError(f"The data source reported an error: {(text or 'no details')[:300]}")
+        raise Refused(f"The data source reported an error: {(text or 'no details')[:300]}")
     payload: Any = None
     if text is not None:
         try:
@@ -230,16 +239,16 @@ class ReadOnlyBridge:
                     session.abandon()
             session.client = None
 
-    def _submit(self, make_coro: Callable[[Any], Any], timeout: float) -> Any:
+    def _submit(self, make_coro: Callable[[Any], Any], timeout: float, retry: bool = True) -> Any:
         """Run one coroutine against the client.
 
         A request is repeated once only when it failed on a connection that was already open (it
-        may simply have gone stale). A request that gets no answer in time, or that the server
-        answers with an error, is not repeated."""
+        may simply have gone stale), and only with `retry` (reads). A request that gets no answer in
+        time, or that the server answers with an error, is not repeated."""
         from mcp import MCPError, types
         dropped = (types.CONNECTION_CLOSED, types.REQUEST_TIMEOUT)
         with self._lock:
-            for attempt in (1, 2):
+            for attempt in ((1, 2) if retry else (1,)):
                 session = self._session
                 reused = session is not None and session.alive()
                 if not reused:
@@ -254,16 +263,18 @@ class ReadOnlyBridge:
                         future.cancel()
                         session.abandon()
                         self._session = None
-                        raise DataError(f"{self.label} did not answer within {timeout:.0f} seconds") from exc
+                        raise NoAnswer(f"{self.label} did not answer within {timeout:.0f} seconds") from exc
                     nested = _flatten(exc)
                     known = next((e for e in nested if isinstance(e, DataError)), None)
                     if known is not None:
                         raise known from exc
                     refused = next((e for e in nested if isinstance(e, MCPError)), None)
                     if refused is not None and getattr(refused, "code", None) not in dropped:
-                        raise DataError(f"{self.label} did not accept the request: {str(refused)[:300]}") from exc
+                        raise Refused(f"{self.label} did not accept the request: {str(refused)[:300]}") from exc
                     self.close()
-                    if attempt == 2 or not reused:
+                    if not retry and reused:                    # sent on an open connection that then dropped
+                        raise NoAnswer(f"The connection to {self.label} dropped before it answered") from exc
+                    if attempt == 2 or not reused or not retry:
                         raise self._translate(exc) from exc
                     log.warning("%s call failed on an open connection, reconnecting once: %s", self.label, exc)
         raise DataError(f"Could not reach {self.label}")      # not reached

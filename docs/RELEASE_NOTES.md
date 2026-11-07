@@ -1,7 +1,9 @@
 # Release notes
 
-The app only advises. No version places, changes or cancels an order, and the Robinhood
-connection stays read-only. The engineering record behind these notes, with the tests for
+Up to 2.x the app only advised: no version placed, changed or cancelled an order, and the Robinhood connection
+was read-only. From 3.0 the Trading Desk can send orders you approve: to a paper broker by default, and to
+Robinhood only when live execution is switched on in `.env` (off by default; see phase 6 below). The market-data
+connection to Robinhood stays read-only. The engineering record behind these notes, with the tests for
 each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 ## Upgrading
@@ -17,6 +19,21 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
    snapshots** to fill what the saved price history allows.
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
+
+## 3.0.0.dev6 — Trade Assistant 3.0, phase 6: live execution through Robinhood (off)
+
+The Trading Desk can send approved share orders to your Robinhood account. **It is off**, and stays off unless you
+switch it on in `.env` and then choose live trading in the policy. See [V3.md](V3.md#phase-6-live-execution-through-robinhood).
+
+- **A separate connection that can act.** The market-data connection still cannot place, review or cancel anything.
+  The new one may only review, place, look up and cancel share orders, by exact tool name. No options, transfers or
+  account settings.
+- **One account.** Orders go only to the account you name, and only if Robinhood lists it for your sign-in. An
+  approval is tied to that account.
+- **A hard ceiling.** `LIVE_MAX_ORDER` (default $100) caps every live order whatever the policy says.
+- **Never sent twice.** If Robinhood does not answer a placement, the desk does not try again. It looks the order up
+  by its reference and records what really happened.
+- **Check live trading** on the Desk widget shows whether every condition holds, and which does not.
 
 ## 3.0.0.dev5 — Trade Assistant 3.0, phase 5: the Trading Desk
 

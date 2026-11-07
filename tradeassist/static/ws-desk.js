@@ -182,6 +182,12 @@
         el("h4", { text: "Notifications" }),
         el("p", { class: "small", text: n.channels.length ? `To ${n.channels.join(", ")}.` : "No channel is set up: SMTP, NTFY_TOPIC or a Telegram bot in .env." }),
         el("div", { class: "ws-row" }, test, tnote),
+        el("h4", { text: "Live trading" }),
+        d.live.enabled ? el("div", {}, el("p", { class: "small" }, statusTag(d.live.ready ? "pass" : "warn", d.live.ready ? `Ready: Robinhood account ${d.live.account}` : "Not ready"),
+          ` Every live order is capped at ${money(d.live.ceiling, 0)} (LIVE_MAX_ORDER).`),
+          d.live.ready ? "" : el("ul", { class: "plain small" }, d.live.reasons.map(r => el("li", { text: r }))),
+          el("div", { class: "ws-row" }, el("button", { class: "ws-btn", type: "button", onclick: async e => { e.currentTarget.disabled = true; await act("/v3/desk/live/check", {}); load(); } }, "Check live trading")))
+          : el("p", { class: "small muted", text: "Off. Orders go to the paper broker. Live trading needs ROBINHOOD_EXECUTION=1 and the account in .env (docs/V3.md, phase 6)." }),
         el("h4", { text: "Phone approvals" }),
         el("p", { class: "small", text: d.remote.enabled ? `On: the daemon serves them at ${d.remote.base_url || "REMOTE_BASE_URL (not set: links cannot be sent)"}.` : "Off. REMOTE_APPROVALS=1 with a PIN and your Tailscale address turns them on (see docs/V3.md)." }));
     }
