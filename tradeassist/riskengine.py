@@ -49,6 +49,8 @@ def assess(terms: C.OrderTerms, policy: TradingPolicy, book: dict[str, Any], quo
             add(_check("account", "Account", "fail", "Live execution is not enabled on this computer"))
         elif data_mode == "demo":
             add(_check("account", "Account", "fail", "Live orders need real prices; the app is on made-up demo data"))
+        elif terms.account_ref != book.get("live_account_ref"):
+            add(_check("account", "Account", "fail", f"The order names account {terms.account_ref}; live trading is bound to {book.get('live_account_ref')}"))
         else:
             add(_check("account", "Account", "pass", f"live account {terms.account_ref or ''}".strip()))
     else:
@@ -111,6 +113,10 @@ def assess(terms: C.OrderTerms, policy: TradingPolicy, book: dict[str, Any], quo
                            terms.limit_price, round(bid * (1 - through), 4)))
 
     # Money: the order, the capital, today's new buying, the number of positions, today's result.
+    if terms.account_kind == "live":
+        ceiling = float(book.get("live_max_order") or 0.0)
+        add(_check("live_ceiling", "Live ceiling", "pass" if notional <= ceiling + 1e-9 else "fail",
+                   f"${notional:,.2f} of the ${ceiling:,.0f} LIVE_MAX_ORDER that no policy can raise", round(notional, 2), ceiling))
     if opening:
         add(_check("order_size", "Order size", "pass" if notional <= policy.max_order + 1e-9 else "fail",
                    f"${notional:,.2f} of ${policy.max_order:,.0f} an order", round(notional, 2), policy.max_order))

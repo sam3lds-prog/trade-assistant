@@ -123,8 +123,15 @@ class TradingDesk:
         self.jobs = Jobs(svc.db)
         self.notifier = notifier or Notifier(svc)
         self.brokers: dict[str, Any] = {"paper": PaperBroker(svc)}
-        self.live_ready = False                 # phase 6: the Robinhood execution adapter sets this when enabled
+        self.live_ready = False                 # phase 6: true only after the Robinhood adapter's checks pass
         self.live_account_ref: str | None = None
+        self.live_reasons: list[str] = ["live execution is off (ROBINHOOD_EXECUTION is not set)"]
+        from ..robinhood_exec import make_execution, mask
+        live = make_execution(svc.settings)
+        if live is not None:
+            self.brokers["live"] = live
+            self.live_account_ref = mask(live.account)
+            self.live_reasons = ["not checked yet: press Check live trading, or start the daemon"]
         self._lock = threading.RLock()
         self.worker: Worker | None = None
         self.worker_mode = svc.settings.desk_worker
@@ -265,6 +272,25 @@ class TradingDesk:
                                            and r["symbol"] not in held}),
                 "kill_switch": self.kill_switch()}
 
+    def check_live(self, max_age: float = 600.0) -> dict[str, Any]:
+        """Whether live orders can go to Robinhood now: the adapter's own checks, plus real prices."""
+        live = self.brokers.get("live")
+        if live is None:
+            self.live_ready = False
+            return {"enabled": False, "ready": False, "reasons": self.live_reasons, "account": None, "tools": {}}
+        r = live.readiness(max_age)
+        reasons = list(r["reasons"])
+        if self.mode == "demo":
+            reasons.append("the app is on made-up demo prices; live orders need real ones")
+        self.live_ready = not reasons
+        self.live_reasons = reasons
+        return {"enabled": True, "ready": self.live_ready, "reasons": reasons, "account": r["account"], "tools": r["tools"],
+                "ceiling": self.svc.settings.live_max_order}
+
+    def live_status(self) -> dict[str, Any]:
+        return {"enabled": "live" in self.brokers, "ready": self.live_ready, "reasons": self.live_reasons, "account": self.live_account_ref,
+                "ceiling": self.svc.settings.live_max_order}
+
     def assess(self, terms: C.OrderTerms, proposal_id: str | None = None) -> C.RiskAssessment:
         pol = self.policy()
         try:
@@ -275,7 +301,10 @@ class TradingDesk:
             market_state = session_state(self.svc.market.clock(), _now())
         except Exception:  # noqa: BLE001 - an unreadable clock is an unknown, which blocks
             market_state = "UNKNOWN"
-        return assess(terms, pol, self.book(terms.account_kind), quote, now=datetime.now(NY), market_state=market_state,
+        book = self.book(terms.account_kind)
+        book["live_account_ref"] = self.live_account_ref
+        book["live_max_order"] = self.svc.settings.live_max_order
+        return assess(terms, pol, book, quote, now=datetime.now(NY), market_state=market_state,
                       data_mode=self.mode, live_ready=self.live_ready, proposal_id=proposal_id)
 
     # --- proposals ------------------------------------------------------------------------------------------
@@ -560,12 +589,14 @@ class TradingDesk:
         return {"expired": n}
 
     # --- execution ----------------------------------------------------------------------------------------------
-    def broker_for(self, account_kind: str) -> Any:
+    def broker_for(self, account_kind: str, sending: bool = True) -> Any:
         if account_kind in ("paper", "shadow"):
             return self.brokers["paper"]
         b = self.brokers.get("live")
-        if b is None or not self.live_ready:
+        if b is None:
             raise BrokerError("live execution is not enabled on this computer")
+        if sending and not self.check_live()["ready"]:
+            raise BrokerError("live execution is not ready: " + "; ".join(self.live_reasons))
         return b
 
     def _order_dict(self, o: Any) -> dict[str, Any]:
@@ -721,7 +752,7 @@ class TradingDesk:
             if order["state"] in ("intent", "submitting") and order["updated_at"] > in_flight:
                 continue                                   # possibly being sent right now; recover() handles a stuck one
             try:
-                broker = self.broker_for(order["account_kind"])
+                broker = self.broker_for(order["account_kind"], sending=False)
                 res = broker.status(order)
             except (BrokerTimeout, BrokerError) as exc:
                 done.append({"order": order["id"], "error": str(exc)[:200]})
@@ -742,7 +773,7 @@ class TradingDesk:
                     self._move(cur, pid, "cancel_requested", "desk", payload.get("reason") or "cancel asked for")
                 cur.execute("UPDATE broker_orders SET state = 'cancel_requested', updated_at = ? WHERE id = ?", (_iso(_now()), order["id"]))
             order["state"] = "cancel_requested"
-            res = self.broker_for(order["account_kind"]).cancel(order)
+            res = self.broker_for(order["account_kind"], sending=False).cancel(order)
             out.append(self._apply(order, res, actor="cancel"))
         return {"cancelled": out}
 
@@ -819,7 +850,7 @@ class TradingDesk:
         counts = {r["status"]: r["n"] for r in self.db.query("SELECT status, COUNT(*) AS n FROM trade_proposals WHERE mode = ? GROUP BY status", (self.mode,))}
         return {"policy": row, "summary": pol.summary(), "mode_words": P.MODE_WORDS[pol.mode], "kill_switch": self.kill_switch(),
                 "live_ready": self.live_ready, "budget": budget, "proposals": counts, "worker": self.worker_status(),
-                "notifications": self.notifier.describe(), "remote": self.remote_status()}
+                "notifications": self.notifier.describe(), "remote": self.remote_status(), "live": self.live_status()}
 
     def remote_status(self) -> dict[str, Any]:
         s = self.svc.settings
@@ -884,6 +915,14 @@ def install(svc: Any) -> None:
         @router.post("/desk/kill")
         def kill(body: KillIn) -> dict[str, Any]:
             return d.set_kill_switch(body.on, body.reason)
+
+        @router.get("/desk/live")
+        def live() -> dict[str, Any]:
+            return d.live_status()
+
+        @router.post("/desk/live/check")
+        def live_check() -> dict[str, Any]:
+            return d.check_live(max_age=0)
 
         @router.get("/desk/positions")
         def positions() -> dict[str, Any]:

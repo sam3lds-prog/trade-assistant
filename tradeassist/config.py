@@ -145,6 +145,11 @@ class Settings:
     brave_daily_limit: int = 40
     live_mover_sweep_minutes: float = 5.0   # 0 switches the "why is it moving?" scan off
 
+    # 3.0 live execution (phase 6): the separate Robinhood trading adapter. Off unless all three are set.
+    robinhood_execution: bool = False
+    robinhood_execution_account: str = field(default="", repr=False)   # the account orders may go to, by number
+    live_max_order: float = 100.0                                       # a ceiling no policy can raise
+
     # 3.0 Trading Desk (phase 5): where its notifications go, who runs its jobs, and phone approvals.
     notify_email: bool = True               # desk notifications by email too, when SMTP is set up
     ntfy_server: str = "https://ntfy.sh"
@@ -255,6 +260,9 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         brave_monthly_limit=max(_int("BRAVE_MONTHLY_LIMIT", 900), 0),
         brave_daily_limit=max(_int("BRAVE_DAILY_LIMIT", 40), 0),
         live_mover_sweep_minutes=max(_float("LIVE_MOVER_SWEEP_MINUTES", 5.0), 0.0),
+        robinhood_execution=_flag("ROBINHOOD_EXECUTION"),
+        robinhood_execution_account=_clean_token(os.getenv("ROBINHOOD_EXECUTION_ACCOUNT")),
+        live_max_order=_float("LIVE_MAX_ORDER", 100.0),
         notify_email=_flag("NOTIFY_EMAIL", True),
         ntfy_server=(os.getenv("NTFY_SERVER") or "").strip().rstrip("/") or "https://ntfy.sh",
         ntfy_topic=_clean_token(os.getenv("NTFY_TOPIC")),
@@ -271,6 +279,8 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         features=load_features(),
         freshness=freshness_thresholds(),
     )
+    if settings.robinhood_execution and not settings.robinhood_execution_account:
+        raise ValueError("ROBINHOOD_EXECUTION=1 needs ROBINHOOD_EXECUTION_ACCOUNT: the number of the one account orders may go to")
     if settings.remote_approvals:
         pin = settings.remote_pin
         if not (pin.isdigit() and len(pin) >= 6):

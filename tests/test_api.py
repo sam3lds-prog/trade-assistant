@@ -21,6 +21,8 @@ V3_WRITES = {
     "/v3/proposals", "/v3/proposals/preview", "/v3/proposals/{pid}/amend", "/v3/proposals/{pid}/recheck",
     "/v3/proposals/{pid}/cancel", "/v3/approvals/{aid}/approve", "/v3/approvals/{aid}/decline", "/v3/desk/policy",
     "/v3/desk/kill", "/v3/desk/reconcile", "/v3/notifications/test",
+    # phase 6: check whether live execution through Robinhood can be used now (it connects; it sends nothing).
+    "/v3/desk/live/check",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.

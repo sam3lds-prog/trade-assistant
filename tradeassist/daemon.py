@@ -58,6 +58,9 @@ def handlers_for(svc: Any) -> tuple[dict[str, Any], list[Schedule]]:
         schedules.append(Schedule("discover.refresh", 1800, 600, when="market"))
     desk = svc.trading
     handlers["jobs.prune"] = lambda _: {"pruned": desk.jobs.prune()}
+    if "live" in desk.brokers:
+        handlers["desk.live_check"] = lambda _: {k: v for k, v in desk.check_live(max_age=0).items() if k != "tools"}
+        schedules.append(Schedule("desk.live_check", 600, 300))
     schedules.append(Schedule("jobs.prune", 86400, 3600))
     return handlers, schedules
 
@@ -67,6 +70,9 @@ def run(settings: Any, *, once: bool = False) -> int:
     desk = svc.trading
     desk.worker_mode = "daemon"                  # this process is the worker; it starts no app worker of its own
     recovered = desk.recover()
+    if "live" in desk.brokers:
+        live = desk.check_live(max_age=0)
+        log.info("Live execution: %s", "ready" if live["ready"] else "not ready: " + "; ".join(live["reasons"]))
     handlers, schedules = handlers_for(svc)
     remote = None
     if settings.remote_approvals:
