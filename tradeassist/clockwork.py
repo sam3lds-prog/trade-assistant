@@ -91,11 +91,23 @@ class Clockwork:
         done: dict[str, Any] = {}
         self.last["tick_at"] = now.isoformat(timespec="seconds")
         if self.paper is not None and self.svc.settings.features.get("paper_trading", True) and self._active_portfolios():
-            done["paper"] = self.paper.tick()
+            if self._daemon_values_paper():
+                done["paper"] = "the trading daemon values the paper portfolios"
+            else:
+                done["paper"] = self.paper.tick()
         prefs = load_prefs(self.svc.db, self.svc.settings)
         done["morning"] = self._morning(now, prefs["morning"])
         done["digest"] = self._digest(prefs["live"]["digest"])
         return done
+
+    def _daemon_values_paper(self) -> bool:
+        """3.0: while the trading daemon runs (its heartbeat is fresh), it values the paper portfolios as a job."""
+        try:
+            from .jobs import last_heartbeat
+            hb = last_heartbeat(self.svc.db, "daemon")
+        except Exception:                             # noqa: BLE001 - a database from before 3.0 has no heartbeats
+            return False
+        return bool(hb and hb["age_seconds"] <= 45 and hb["info"].get("paper"))
 
     def _morning(self, now: datetime, mp: dict[str, Any]) -> str | None:
         if not (mp["auto_refresh"] and self.morning is not None and self.svc.settings.features.get("morning")):

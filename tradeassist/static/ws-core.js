@@ -596,6 +596,8 @@ const WS = (() => {
     window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { for (const t of tabs.values()) applyColumns(t); }, 150); });
     setInterval(refreshStatus, 30000);
     onEvent("desk.", () => refreshStatus());
+    onEvent("proposal.", () => refreshStatus());
+    onEvent("daemon.", () => refreshStatus());
     stream();
   }
 

@@ -242,3 +242,21 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 .ws-part-pts { text-align: right; font-variant-numeric: tabular-nums; font-size: 12.5px; }
 .ws-part-text { grid-column: 1 / -1; padding-left: 0; }
 @media (min-width: 720px) { .ws-part-text { grid-column: 2 / -1; } }
+
+/* ---------- the Trading Desk ---------- */
+.ws-approval { margin-bottom: 10px; }
+.ws-approval-what { font-size: 1rem; margin: 0 0 4px; }
+.ws-grow { flex: 1 1 16rem; } .ws-grow input { width: 100%; box-sizing: border-box; }
+.ws-checks-list li { margin: 2px 0; }
+.ws-prop-detail:not(:empty) { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
+.ws-timeline li { display: grid; grid-template-columns: 6.5em 1fr; gap: 6px; margin: 2px 0; }
+.ws-timeline time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.ws-meters { display: grid; gap: 8px; margin: 8px 0 12px; }
+.ws-meter-top { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+.ws-meter-bar { height: 8px; border-radius: 4px; background: var(--sunk); overflow: hidden; margin-top: 3px; }
+.ws-meter-bar > span { display: block; height: 100%; background: var(--pass); }
+.ws-meter-bar > span.near { background: var(--warn); }
+.ws-meter-bar > span.full { background: var(--fail); }
+.ws-btn.danger { color: var(--fail); border-color: var(--fail); font-weight: 600; }
+.ws-policy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: 6px 10px; margin: 8px 0; }
+.ws-policy-grid input { width: 100%; box-sizing: border-box; }

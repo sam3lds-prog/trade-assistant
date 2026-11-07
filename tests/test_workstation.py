@@ -46,7 +46,7 @@ def test_the_workstation_opens_on_four_workspaces_with_the_status_strip(tmp_path
         assert page.eval_on_selector_all(".ws-tab-btn", "bs => bs.map(b => b.firstChild.textContent)") == \
             ["Discover", "Research", "Trading Desk", "Portfolio"]
         status = page.inner_text("#ws-status")
-        assert "Made-up prices" in status and "Advisory: no orders are sent" in status
+        assert "Made-up prices" in status and "Paper trading: approved orders fill on paper" in status and "Risk checks on" in status
         page.wait_for_selector("#ws-live:has-text('Live updates')", timeout=15000)
         for kind in ("research", "desk", "portfolio", "discover"):
             page.click(f".ws-tab-btn[data-workspace='{kind}']")
@@ -247,4 +247,27 @@ def test_discover_ranks_once_explains_the_score_splits_a_budget_and_studies_an_o
         page.click(".ws-tab-btn[data-workspace='research']")
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] :text('Strategies under the same scenarios')", timeout=90000)
         assert opp["symbol"] in widget(page, "study").locator("h3").first.inner_text()
+    assert errors == []
+
+
+@pytest.mark.clock("2026-10-22T10:30")
+def test_a_proposal_is_written_approved_and_filled_on_paper_from_the_trading_desk(tmp_path):
+    """3.0 phase 5: write a proposal for the linked stock, see it checked, approve it in the queue, and the paper
+    broker fills it: the position, the budget and the activity follow."""
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.root + "#desk")
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='proposals']", timeout=30000)
+        page.evaluate("WS.set('blue', { symbol: 'AMZN' })")
+        pr = widget(page, "proposals")
+        pr.locator("input[aria-label='Thesis']").fill("Bounce off the 50-day; wrong below 27.50")
+        pr.locator("button:text-is('Check')").click()
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='proposals'] :text('Would pass')", timeout=20000)
+        pr.locator("button:text-is('Propose')").click()
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='approvals'] button:text-is('Approve')", timeout=20000)
+        assert "waiting for your approval" in page.inner_text("#ws-status")
+        widget(page, "approvals").locator("button:text-is('Approve')").first.click()
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='deskpositions'] :text('AMZN')", timeout=30000)
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='proposals'] .ws-prop-detail h3:has-text('Filled')", timeout=20000)
+        assert "Nothing is waiting" in widget(page, "approvals").inner_text()
+        assert "1 of 3" in widget(page, "deskstatus").inner_text()
     assert errors == []

@@ -10,6 +10,18 @@ from tradeassist.patterns import PATTERNS
 from tradeassist.providers.demo import DemoData
 from tradeassist.service import TradeAssistant, clean
 
+V3_WRITES = {
+    # phase 2: saved layouts and the session
+    "/v3/workspaces", "/v3/workspaces/{layout_id}/delete", "/v3/workspaces/session",
+    # phase 3: studies, their AI challenge, the forecast's calibration. Models only.
+    "/v3/studies", "/v3/studies/{study_id}/challenge", "/v3/forecast/calibrate",
+    # phase 4: Discover's refresh and the allocator. Records observations; models only.
+    "/v3/discover/refresh", "/v3/discover/allocate",
+    # phase 5: the Trading Desk. Proposals, decisions bound to an order's hash, the policy, the kill switch.
+    "/v3/proposals", "/v3/proposals/preview", "/v3/proposals/{pid}/amend", "/v3/proposals/{pid}/recheck",
+    "/v3/proposals/{pid}/cancel", "/v3/approvals/{aid}/approve", "/v3/approvals/{aid}/decline", "/v3/desk/policy",
+    "/v3/desk/kill", "/v3/desk/reconcile", "/v3/notifications/test",
+}
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.
     "/v2/history/import", "/v2/history/sample", "/v2/history/imports/{import_id}/remove",
@@ -98,6 +110,10 @@ def test_no_endpoint_can_place_an_order(app):
     # so that adding a route means looking at it again.
     v2 = sorted(p for p, methods in paths.items() if "post" in methods and p.startswith("/v2/"))
     assert set(v2) <= V2_WRITES, set(v2) - V2_WRITES
+    # 3.0: every write under /v3 is listed too. The Trading Desk's (phase 5) send orders only to the paper broker
+    # unless live execution is enabled in .env (phase 6); none of their paths says "order".
+    v3 = sorted(p for p, methods in paths.items() if ({"post", "put", "delete"} & set(methods)) and p.startswith("/v3/"))
+    assert set(v3) <= V3_WRITES, set(v3) - V3_WRITES
 
 
 def test_price_returns_ladder_scorecard_and_warnings(app):

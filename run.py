@@ -24,12 +24,17 @@ def main() -> None:
                         help="Build the morning plan and email it (for the 7:00 scheduled job), then exit")
     parser.add_argument("--morning-print", action="store_true",
                         help="Build the morning plan and print it instead of emailing (a dry run), then exit")
+    parser.add_argument("--daemon", action="store_true",
+                        help="Run the trading daemon: the Trading Desk's jobs, notifications and phone approvals (setup_daemon.sh keeps it running)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     from tradeassist.events import protect_logging
     # No credential reaches the log, from any module or from uvicorn, in a message or a traceback.
     protect_logging("uvicorn", "uvicorn.error", "uvicorn.access", "tradeassist")
     settings = load_settings()
+    if args.daemon:
+        from tradeassist.daemon import run as run_daemon
+        raise SystemExit(run_daemon(settings))
     if args.robinhood_signout:
         from tradeassist.providers.mcp_bridge import FileTokenStorage
         FileTokenStorage(settings.robinhood_signin_path).clear()

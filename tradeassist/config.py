@@ -145,6 +145,21 @@ class Settings:
     brave_daily_limit: int = 40
     live_mover_sweep_minutes: float = 5.0   # 0 switches the "why is it moving?" scan off
 
+    # 3.0 Trading Desk (phase 5): where its notifications go, who runs its jobs, and phone approvals.
+    notify_email: bool = True               # desk notifications by email too, when SMTP is set up
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_topic: str = ""                    # a long random name: anyone who knows it can read the topic
+    ntfy_token: str = field(default="", repr=False)
+    telegram_bot_token: str = field(default="", repr=False)
+    telegram_chat_id: str = ""
+    desk_worker: str = "auto"               # auto: the daemon if it runs, else the app; app; daemon; off
+    remote_approvals: bool = False          # the daemon serves the PIN-protected approval pages
+    remote_pin: str = field(default="", repr=False)
+    remote_bind: str = ""                   # the address the approval pages listen on (your Tailscale address)
+    remote_port: int = 8765
+    remote_hosts: list[str] = field(default_factory=list)   # host names a phone uses to reach them (MagicDNS name)
+    remote_base_url: str = ""               # how links in notifications start, e.g. http://mac.tailnet.ts.net:8765
+
     # V2 areas that can be switched off (see features.py)
     features: dict[str, bool] = field(default_factory=lambda: dict(FEATURE_DEFAULTS))
     # Seconds a price may age while the market is open before it is called stale (freshness.py)
@@ -240,9 +255,28 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         brave_monthly_limit=max(_int("BRAVE_MONTHLY_LIMIT", 900), 0),
         brave_daily_limit=max(_int("BRAVE_DAILY_LIMIT", 40), 0),
         live_mover_sweep_minutes=max(_float("LIVE_MOVER_SWEEP_MINUTES", 5.0), 0.0),
+        notify_email=_flag("NOTIFY_EMAIL", True),
+        ntfy_server=(os.getenv("NTFY_SERVER") or "").strip().rstrip("/") or "https://ntfy.sh",
+        ntfy_topic=_clean_token(os.getenv("NTFY_TOPIC")),
+        ntfy_token=_clean_token(os.getenv("NTFY_TOKEN")),
+        telegram_bot_token=_clean_token(os.getenv("TELEGRAM_BOT_TOKEN")),
+        telegram_chat_id=_clean_token(os.getenv("TELEGRAM_CHAT_ID")),
+        desk_worker=_choice("DESK_WORKER", "auto", ("auto", "app", "daemon", "off")),
+        remote_approvals=_flag("REMOTE_APPROVALS"),
+        remote_pin=(os.getenv("REMOTE_PIN") or "").strip(),
+        remote_bind=(os.getenv("REMOTE_BIND") or "").strip(),
+        remote_port=_int("REMOTE_PORT", 8765),
+        remote_hosts=[h.strip().lower() for h in (os.getenv("REMOTE_HOSTS") or "").split(",") if h.strip()],
+        remote_base_url=(os.getenv("REMOTE_BASE_URL") or "").strip().rstrip("/"),
         features=load_features(),
         freshness=freshness_thresholds(),
     )
+    if settings.remote_approvals:
+        pin = settings.remote_pin
+        if not (pin.isdigit() and len(pin) >= 6):
+            raise ValueError("REMOTE_APPROVALS=1 needs REMOTE_PIN: at least six digits")
+        if not settings.remote_bind:
+            raise ValueError("REMOTE_APPROVALS=1 needs REMOTE_BIND: this computer's Tailscale address (tailscale ip -4)")
     for name, value in (("ACCOUNT_SIZE", settings.account_size), ("MAX_RISK_PER_TRADE_PCT", settings.max_risk_per_trade_pct),
                         ("MAX_OPEN_RISK_PCT", settings.max_open_risk_pct),
                         ("DAILY_LOSS_STOP_PCT", settings.daily_loss_stop_pct),
