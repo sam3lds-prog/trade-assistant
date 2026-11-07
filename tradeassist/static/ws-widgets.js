@@ -11,8 +11,9 @@
 
   /* ---------- Stock chart ---------- */
   WS.register("chart", { title: "Stock chart", category: "Research", size: { w: 8, h: 9 }, minW: 4, needs: ["analyze_interactive"], create(w) {
-    let chart = null, shown = null;
+    let chart = null, shown = null, uncross = [];
     function mount(symbol) {
+      for (const off of uncross.splice(0)) off();
       if (chart) { chart.dispose(); chart = null; WS.provide(w, "chart", null); }
       shown = symbol;
       if (!symbol) { w.body.replaceChildren(WS.empty("Pick a stock: press Ctrl K and type a ticker, or click one in a linked widget.")); return; }
@@ -28,6 +29,9 @@
         ...(chart.extras || []), chart.structure || "");
       w.body.replaceChildren(chart.panel, more);
       WS.provide(w, "chart", chart);
+      // 3.1: its crosshair, by day, for a linked option chart (and the option chart's for it).
+      if (chart.crosshair) uncross.push(chart.crosshair.on(day => WS.crosshair.say(w, "stock", day)),
+        WS.crosshair.listen(w, "stock", day => chart && chart.crosshair.set(day)));
       // Lines other widgets ask for (a study's forecast), redrawn whenever the chart reloads.
       chart.subscribe(what => { if (what === "load") overlays(); });
     }
@@ -43,12 +47,18 @@
       },
       refresh() { mount(w.ctx().symbol); },
       onResize() { if (chart && chart.redraw) chart.redraw(); },
-      dispose() { if (chart) chart.dispose(); },
+      dispose() { for (const off of uncross.splice(0)) off(); if (chart) chart.dispose(); },
+      helpFacts() {
+        const a = chart && chart.chartArgs ? chart.chartArgs() : null;
+        return a ? [["Showing", `${a.symbol}, ${a.group_label || a.group}`], ...(a.last_time ? [["Last bar", new Date(a.last_time * 1000).toLocaleString()]] : [])] : [];
+      },
     };
   } });
 
   /* ---------- Scenario explorer: the what-if model drawn on the linked chart ---------- */
-  WS.register("scenario", { title: "Scenario explorer", category: "Research", size: { w: 8, h: 9 }, minW: 4, needs: ["what_if", "analyze_interactive"], create(w) {
+  // 3.1: an advanced panel. Its base line is the 2.x what-if model, not the study's forecast, so it is not in the
+  // standard Research layout; add it (Add widget, Advanced) to stress-test a position under shocks you choose.
+  WS.register("scenario", { title: "Scenario explorer (advanced)", category: "Advanced", size: { w: 8, h: 9 }, minW: 4, needs: ["what_if", "analyze_interactive"], create(w) {
     let widget = null, forChart = null, forSymbol = null;
     function mount() {
       const symbol = w.ctx().symbol, chart = WS.find(w, "chart");
@@ -58,7 +68,8 @@
       if (!symbol) { w.body.replaceChildren(WS.empty("Pick a stock to model its scenarios.")); return; }
       if (!chart) { w.body.replaceChildren(WS.empty("Link a stock chart to this widget (the same link colour): the scenarios are drawn on it.")); return; }
       widget = whatIfWidget(symbol, chart);
-      w.body.replaceChildren(widget.widget, widget.position);
+      w.body.replaceChildren(el("p", { class: "small ws-help-note", text: "Advanced stress test: these paths come from the what-if factor model and the shocks you set. They are not the Research study's forecast; when the two differ, the study's is the one with a record." }),
+        widget.widget, widget.position);
     }
     return { onContext(c, changed) { if (changed.includes("symbol")) mount(); }, onProvider() { mount(); },
       refresh() { if (widget) widget.dispose(); widget = null; forChart = null; mount(); }, dispose() { if (widget) widget.dispose(); } };
@@ -144,6 +155,7 @@
       },
       refresh() { if (symbol) loadExps(); },
       config: () => ({ expiration: expSel.value || w.config.expiration, width: width.value, side }),
+      helpFacts: () => (lastChain ? [["Showing", `${symbol} ${lastChain.expiration}, ${lastChain.dte} days; stock ${money(lastChain.spot)}`]] : []),
     };
   } });
 
@@ -164,8 +176,9 @@
     const list = () => (w.config.symbols && w.config.symbols.length ? w.config.symbols : ((state.status && state.status.watchlist) || ["AAPL", "MSFT", "NVDA"]).slice(0, 20));
     async function load() {
       clearTimeout(timer);
+      if (w.disposed) return;
       try {
-        const d = await api(`/v3/quotes?symbols=${enc(list().join(","))}`);
+        const d = await w.api(`/v3/quotes?symbols=${enc(list().join(","))}`);
         const sel = w.ctx().symbol;
         box.replaceChildren(el("div", { class: "scroll" }, el("table", { class: "ws-table" },
           el("thead", {}, el("tr", {}, el("th", { text: "Stock" }), el("th", { class: "num", text: "Last" }), el("th", { class: "num", text: "Change" }), el("th"))),
@@ -175,7 +188,7 @@
             el("td", { class: `num ${q.change_pct > 0 ? "ws-up" : q.change_pct < 0 ? "ws-down" : ""}`, text: signed(q.change_pct) }),
             el("td", {}, el("button", { class: "ws-wbtn", type: "button", title: `Remove ${q.symbol}`, "aria-label": `Remove ${q.symbol}`, text: "×",
               onclick: e => { e.stopPropagation(); w.config.symbols = list().filter(s => s !== q.symbol); w.save(); load(); } }))))))));
-      } catch (e) { box.replaceChildren(el("p", { class: "error", text: e.message })); }
+      } catch (e) { if (e === WS.GONE) return; box.replaceChildren(el("p", { class: "error", text: e.message })); }
       timer = setTimeout(() => { if (!document.hidden && w.node.isConnected && w.node.offsetParent !== null) load(); else timer = setTimeout(load, 20000); }, 20000);
     }
     load();
@@ -191,11 +204,11 @@
       if (!symbol) { w.body.replaceChildren(WS.empty("Pick a stock to see its headlines and filings.")); return; }
       w.body.replaceChildren(loading("Loading headlines…"));
       try {
-        const n = await api(`/v2/news/${enc(symbol)}`);
+        const n = await w.api(`/v2/news/${enc(symbol)}`);
         if (mine !== ticket) return;
         w.body.replaceChildren(...(n.notes || []).slice(0, 1).map(t => el("p", { class: "small muted", text: t })),
           toneLine(n.tone, "words") || "", headlineList(n.items, { limit: 14, empty: "No headlines or filings in the last week." }));
-      } catch (e) { if (mine === ticket) w.body.replaceChildren(el("p", { class: "error", text: e.message })); }
+      } catch (e) { if (mine === ticket && e !== WS.GONE) w.body.replaceChildren(el("p", { class: "error", text: e.message })); }
     }
     return { onContext(c, changed) { if (changed.includes("symbol")) load(); }, refresh: load };
   } });
@@ -213,12 +226,13 @@
     }).catch(e => out.replaceChildren(el("p", { class: "error", text: e.message })));
     go.addEventListener("click", build);
     async function build() {
-      const symbol = w.ctx().symbol;
+      const symbol = w.ctx().symbol, mine = w.ticket();
       if (!symbol) { out.replaceChildren(WS.empty("Pick a stock first.")); return; }
       w.config.strategy = tpl.value; w.config.dte = Number(dte.value); w.config.contracts = Number(qty.value); w.save();
       out.replaceChildren(loading("Choosing the contracts…"));
       try {
-        const b = await api("/v2/strategies/build", { symbol, strategy: tpl.value, contracts: Number(qty.value) || 1, dte: Number(dte.value) || 30 });
+        const b = await w.api("/v2/strategies/build", { symbol, strategy: tpl.value, contracts: Number(qty.value) || 1, dte: Number(dte.value) || 30 });
+        if (!w.current(mine) || w.ctx().symbol !== symbol) return;
         const legs = b.legs.map(l => ({ expiration: l.expiration, option_type: l.option_type, strike: l.strike, side: l.side, contracts: l.contracts, entry_price: l.mid || undefined }));
         out.replaceChildren(
           el("p", {}, el("strong", { text: b.label }), ` ${b.expiration}: ${b.credit ? "credit" : "debit"} ${money(Math.abs(b.net_mid) , 0)}; most it can lose ${b.unlimited_loss ? "no limit" : money(Math.abs(b.max_loss), 0)}, make ${b.unlimited_gain ? "no limit" : money(b.max_gain, 0)}.`),
@@ -232,9 +246,9 @@
               w.set({ contract: { symbol, option_symbol: l.option_symbol, option_type: String(l.option_type).toLowerCase(), strike: l.strike, expiration: l.expiration, bid: l.bid, ask: l.ask, mid: l.mid } });
             } }, "Price it on the ticket") : el("span", { class: "small muted", text: "Several legs: priced together here; the ticket prices one contract." })),
           ...(b.notes || []).slice(0, 3).map(t => el("p", { class: "small muted", text: t })));
-      } catch (e) { out.replaceChildren(el("p", { class: "error", text: e.message })); }
+      } catch (e) { if (w.current(mine)) out.replaceChildren(el("p", { class: "error", text: e.message })); }
     }
-    return { onContext(c, changed) { if (changed.includes("symbol")) out.replaceChildren(c.symbol ? WS.empty(`Choose a strategy for ${c.symbol} and press Build.`) : WS.empty("Pick a stock first.")); },
+    return { onContext(c, changed) { if (changed.includes("symbol")) { w.ticket(); out.replaceChildren(c.symbol ? WS.empty(`Choose a strategy for ${c.symbol} and press Build.`) : WS.empty("Pick a stock first.")); } },
       config: () => ({ strategy: tpl.value, dte: Number(dte.value), contracts: Number(qty.value) }) };
   } });
 
@@ -319,7 +333,7 @@
     }
     api("/v3/events").then(d => (d.latest > 0 ? api(`/v3/events?after=${Math.max(0, d.latest - 30)}`) : { events: [] }))
       .then(d => d.events.forEach(add)).catch(() => {});
-    WS.onEvent("", ev => { if (w.node.isConnected) add(ev); });
+    w.on("", add);
     return {};
   } });
 
@@ -356,33 +370,80 @@
     return {};
   } });
 
-  /* ---------- the standard layouts ---------- */
+  /* ---------- Portfolio 3.1: native widgets over the 2.x positions and risk engines ---------- */
+  // Holdings: everything you hold from your recorded fills. Recording and correcting fills stays on the classic
+  // Positions screen (Classic screens menu) until it is replaced here.
+  WS.register("holdings", { title: "Holdings", category: "Portfolio", size: { w: 7, h: 9 }, minW: 4, symbolBadge: false, needs: ["unified_positions"], create(w) {
+    const show = el("select", { "aria-label": "Show" }, [["open", "Open"], ["closed", "Closed"], ["all", "All"]].map(([v, t]) => el("option", { value: v, selected: v === (w.config.show || "open") }, t)));
+    const box = el("div");
+    w.body.append(el("div", { class: "ws-row" }, field("Show", show)), box);
+    show.addEventListener("change", () => { w.config.show = show.value; w.save(); load(); });
+    let lastCount = null;
+    async function load() {
+      const mine = w.ticket();
+      box.classList.add("refetching");
+      try {
+        const d = await w.api(`/v2/positions?status=${enc(show.value)}`);
+        if (!w.current(mine)) return;
+        lastCount = d.positions.length;
+        if (!d.positions.length) { box.replaceChildren(WS.empty(show.value === "open" ? "Nothing open. Record your broker fills on the classic Positions screen (Classic screens menu); option-journal trades appear here too." : "None.")); return; }
+        box.replaceChildren(positionSummary(d.positions, show.value),
+          positionTable(d.positions, p => { const sym = (p.legs && p.legs[0] && (p.legs[0].underlying || p.legs[0].symbol)) || p.symbol; if (sym) w.set({ symbol: sym }); }));
+      } catch (e) { if (w.current(mine) && e !== WS.GONE) box.replaceChildren(el("p", { class: "error", text: e.message })); }
+      finally { box.classList.remove("refetching"); }
+    }
+    load();
+    const timer = setInterval(() => { if (!document.hidden && w.node.offsetParent !== null) load(); }, 60000);
+    return { refresh: load, dispose() { clearInterval(timer); }, config: () => ({ show: show.value }),
+      helpFacts: () => (lastCount === null ? [] : [["Positions shown", String(lastCount)]]) };
+  } });
+
+  // Exposure: the book's risk, natively; the stress tests stay on the classic Portfolio risk screen.
+  WS.register("exposure", { title: "Exposure", category: "Portfolio", size: { w: 5, h: 9 }, minW: 3, symbolBadge: false, needs: ["portfolio_risk"], create(w) {
+    const box = el("div");
+    w.body.append(box);
+    let asOf = null;
+    async function load() {
+      const mine = w.ticket();
+      box.classList.add("refetching");
+      try {
+        const r = await w.api("/v2/portfolio/risk");
+        if (!w.current(mine)) return;
+        asOf = new Date();
+        const kids = [];
+        if (!r.count) kids.push(WS.empty("No open positions to measure."));
+        else {
+          kids.push(portfolioStrip(r));
+          const t = r.totals;
+          kids.push(el("div", { class: "metrics" }, metric(isNum(t.long_exposure) ? `${signedMoney(t.long_exposure)} / ${signedMoney(t.short_exposure)}` : "n/a", "Long / short"),
+            metric(isNum(t.spy_equivalent) ? signedMoney(t.spy_equivalent) : "n/a", "SPY-equivalent (beta-weighted)")));
+          for (const [key, title, rows] of [["sector", "Largest sectors", r.by_sector], ["symbol", "Largest stocks", r.by_symbol]]) {
+            if (!rows || !rows.length) continue;
+            const gross = rows.reduce((a, x) => a + (x.gross || 0), 0) || 1;
+            kids.push(el("h4", { text: title }), table([
+              { label: key === "sector" ? "Sector" : "Stock", cell: x => x[key] },
+              { label: "Share of the book", num: true, cell: x => pct(100 * x.gross / gross, 0) },
+              { label: "Net", num: true, cell: x => signedMoney(x.net) }], rows.slice(0, 5),
+              key === "symbol" ? { onRow: x => w.set({ symbol: x.symbol }) } : {}));
+          }
+          if (r.bad_day) kids.push(badDayPanel(r.bad_day));
+        }
+        if (r.data_source === "demo") kids.unshift(el("p", { class: "small muted", text: "Demo data: the prices are made up." }));
+        box.replaceChildren(...kids);
+      } catch (e) { if (w.current(mine) && e !== WS.GONE) box.replaceChildren(el("p", { class: "error", text: e.message })); }
+      finally { box.classList.remove("refetching"); }
+    }
+    load();
+    return { refresh: load, helpFacts: () => (asOf ? [["Measured", asOf.toLocaleTimeString()]] : []) };
+  } });
+
+  /* ---------- the standard layouts (Discover, Research and the Trading Desk set theirs in their own files) ---------- */
   WS.DEFAULT_LAYOUTS = {
-    discover: [
-      { type: "feed", x: 0, y: 0, w: 7, h: 8, group: "blue" },
-      { type: "watchlist", x: 7, y: 0, w: 5, h: 4, group: "blue" },
-      { type: "news", x: 7, y: 4, w: 5, h: 4, group: "blue" },
-      { type: "chart", x: 0, y: 8, w: 12, h: 9, group: "blue" },
-      { type: "classic:morning", x: 0, y: 17, w: 12, h: 11, group: "none" },
-    ],
-    research: [
-      { type: "chart", x: 0, y: 0, w: 8, h: 9, group: "blue" },
-      { type: "chain", x: 8, y: 0, w: 4, h: 9, group: "blue" },
-      { type: "scenario", x: 0, y: 9, w: 8, h: 10, group: "blue" },
-      { type: "strategy", x: 8, y: 9, w: 4, h: 10, group: "blue" },
-      { type: "riskreward", x: 0, y: 19, w: 8, h: 9, group: "blue" },
-      { type: "news", x: 8, y: 19, w: 4, h: 9, group: "blue" },
-    ],
-    desk: [
-      { type: "watchlist", x: 0, y: 0, w: 4, h: 5, group: "blue" },
-      { type: "activity", x: 0, y: 5, w: 4, h: 7, group: "none" },
-      { type: "classic:paper", x: 4, y: 0, w: 8, h: 12, group: "none" },
-    ],
     portfolio: [
-      { type: "classic:positions", x: 0, y: 0, w: 12, h: 9, group: "none" },
-      { type: "classic:portfolio", x: 0, y: 9, w: 6, h: 10, group: "none" },
-      { type: "classic:journal", x: 6, y: 9, w: 6, h: 10, group: "none" },
-      { type: "classic:trades", x: 0, y: 19, w: 12, h: 10, group: "none" },
+      { type: "holdings", x: 0, y: 0, w: 7, h: 9, group: "blue" },
+      { type: "exposure", x: 7, y: 0, w: 5, h: 9, group: "blue" },
+      { type: "classic:trades", x: 0, y: 9, w: 7, h: 10, group: "none" },
+      { type: "classic:journal", x: 7, y: 9, w: 5, h: 10, group: "none" },
     ],
   };
   WS.DEFAULT_DOCK = { type: "ticket", group: "blue" };

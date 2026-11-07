@@ -25,7 +25,7 @@ SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "id
            "lwcharts.js", "chart.js", "whatif.js", "blend.js", "basket.js", "paper.js",
            "help.js")   # in the order classic.html loads them; lwcharts.js is the vendored chart library
 # 3.0: the workstation (index.html) loads the classic scripts, then the grid library and its own.
-WORKSTATION = SCRIPTS + ("gridstack.js", "ws-core.js", "ws-widgets.js", "ws-research.js", "ws-discover.js", "ws-desk.js")
+WORKSTATION = SCRIPTS + ("gridstack.js", "ws-core.js", "ws-help.js", "ws-widgets.js", "ws-research.js", "ws-discover.js", "ws-desk.js")
 VENDORED = ("lwcharts.js", "gridstack.js")   # minified libraries: their top-level names are their own business
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
@@ -53,7 +53,7 @@ def test_both_pages_load_every_script_in_order_with_a_fresh_address():
 
 
 def test_the_workstation_keeps_to_one_global():
-    for name in ("ws-core.js", "ws-widgets.js", "ws-research.js", "ws-discover.js", "ws-desk.js"):
+    for name in ("ws-core.js", "ws-help.js", "ws-widgets.js", "ws-research.js", "ws-discover.js", "ws-desk.js"):
         assert top_level(name) <= {"WS"}, name
     assert "MIT" in (STATIC / "LICENSE-gridstack.txt").read_text() and "GridStack 12.3.3" in (STATIC / "gridstack.js").read_text()[:200]
 

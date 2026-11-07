@@ -319,7 +319,7 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
     # their renderers inside its widgets.
     page_assets = ("app.css", "flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js",
                    "lwcharts.js", "chart.js", "whatif.js", "blend.js", "basket.js", "paper.js", "help.js",
-                   "gridstack.css", "ws.css", "gridstack.js", "ws-core.js", "ws-widgets.js", "ws-research.js", "ws-discover.js", "ws-desk.js")
+                   "gridstack.css", "ws.css", "gridstack.js", "ws-core.js", "ws-help.js", "ws-widgets.js", "ws-research.js", "ws-discover.js", "ws-desk.js")
 
     def page(file: str) -> HTMLResponse:
         html = (STATIC / file).read_text()

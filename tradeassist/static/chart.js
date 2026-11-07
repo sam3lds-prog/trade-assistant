@@ -410,7 +410,22 @@ function interactiveChart(symbol) {
     selectionBox.classList.remove("hidden");
     selectionBox.style.left = `${left}px`; selectionBox.style.width = `${Math.max(2, right - left)}px`;
   }
+  // 3.1: other charts can follow this one's crosshair by day (and move it). A bar's `tl` is New York wall-clock time
+  // written as UTC seconds, so its UTC date is its New York day.
+  const crossFns = new Set();
+  const dayOfTl = tl => new Date(tl * 1000).toISOString().slice(0, 10);
+  let placing = false;
+  function crosshairAt(day) {
+    if (!chart || !series.price || !state_.data) return;
+    placing = true;
+    try {
+      const hits = day ? state_.data.bars.filter(x => dayOfTl(x.tl) === day) : [];
+      const b = hits[hits.length - 1];
+      if (b) chart.setCrosshairPosition(b.close, b.tl, series.price); else chart.clearCrosshairPosition();
+    } finally { placing = false; }
+  }
   function onHover(param) {
+    if (!placing) { const b0 = param && param.time && state_.data ? bar(indexOfTime(param.time)) : null; for (const fn of crossFns) { try { fn(b0 ? dayOfTl(b0.tl) : null); } catch (e) { console.error(e); } } }
     if (!param || !param.time || !state_.data) { return; }
     const i = indexOfTime(param.time);
     const b = bar(i);
@@ -595,5 +610,6 @@ function interactiveChart(symbol) {
   load();
   loadStructure();
   return { panel, extras: [outlookBox, patternBox, turnBox], structure: structBox, dispose,
-    setLines, chartArgs, showAhead, subscribe: fn => { listeners.push(fn); }, redraw: () => { if (state_.data) draw(); } };
+    setLines, chartArgs, showAhead, subscribe: fn => { listeners.push(fn); }, redraw: () => { if (state_.data) draw(); },
+    crosshair: { on: fn => { crossFns.add(fn); return () => crossFns.delete(fn); }, set: crosshairAt } };
 }

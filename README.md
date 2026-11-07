@@ -20,6 +20,11 @@ peers', one calibrated forecast, the option's own price history, every strategy 
 costs), **Trading Desk** (proposals, approvals, a fail-closed risk engine, the kill switch, the
 autopilot) and **Portfolio**. The 2.x screens stay under **Classic screens** (and at `/classic`).
 
+3.1 refines it: an ⓘ on every widget saying what it does, what it uses, how to read it and its limits; a study's
+strategy handed to the Trading Desk as a draft with its context and an honest route (the desk can send it, enter it
+by hand, or research only); ranges called an 80% band only once calibrated; exits labelled software-monitored;
+compact standard layouts; and interrupted studies that can be run again. See `docs/RELEASE_NOTES.md`.
+
 | What | Default | How to change it |
 |---|---|---|
 | Where approved orders go | The paper broker (simulated fills against the quote) | The Trading policy widget; live needs phase 6's settings |

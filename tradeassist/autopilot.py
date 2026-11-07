@@ -22,6 +22,16 @@ be compared with what you did. `paper`: the paper account. `live`: real orders, 
 target recorded from the opportunity, or the time runs out (the close for an intraday trade, five trading days for
 a swing). A sale reduces risk, so the loss stop never blocks it.
 
+**Exits are software-monitored, not broker-protected (3.1).** The stop, the target and the time are checked by this
+job, every five minutes in market hours, only while the daemon or the app runs. No stop order rests at the broker.
+So a process outage, a Mac asleep, a fast move or a gap can leave a position open past its stop or target, and the
+sale written when the check runs again can fill below the stop. Every run says so: a position whose quote is
+missing or older than the policy allows is reported as *not checked* (never silently skipped), an exit written long
+after its time is reported *late* with by how much, and a price found beyond the stop is reported as having
+*gapped through* it. `protection()` and `exit_plans()` say the same to the screens. Before any unattended live use,
+broker-native protective orders must be verified or the strategies restricted to ones whose risk is acceptable
+without a resting stop; this release changes no permission.
+
 Everything it decides, including deciding to do nothing and why, is written to the audit log and the event stream.
 """
 
@@ -39,6 +49,10 @@ from .providers.base import DataError
 from .service import RequestError
 
 HORIZON_DAYS = {"intraday": 0, "swing": 5, "event": 3}
+CHECK_SECONDS = 300            # how often autopilot.run is scheduled (TradingDesk.schedules); exits are checked then
+PROTECTION_WORDS = ("Software-monitored exits: the autopilot checks its stops, targets and time exits about every five minutes "
+                    "in market hours while the daemon or this app runs. They are not stop orders at the broker: an outage, a "
+                    "sleeping Mac, a stale quote or a gap can leave a position open past its stop, and the sale can fill below it.")
 
 
 def _iso(t: datetime) -> str:
@@ -212,19 +226,48 @@ class Autopilot:
                                proposal_id=r["id"], dedupe_key=f"autopilot:{r['id']}")
         return {"symbol": c["symbol"], "proposal": r["id"], "status": r["status"], "quantity": qty}
 
+    def _plans(self, account_kind: str) -> dict[str, Any]:
+        """The plan of its latest buy in each stock it still holds shares of."""
+        mine = self._own_shares(account_kind)
+        rows = self.db.query("""SELECT * FROM trade_proposals WHERE source = 'autopilot' AND side = 'buy' AND account_kind = ? AND mode = ?
+                                AND status IN ('filled', 'partially_filled', 'cancelled', 'expired') ORDER BY created_at DESC""", (account_kind, self.desk.mode))
+        latest = {}
+        for r in rows:
+            if r["symbol"] in mine and r["symbol"] not in latest:
+                latest[r["symbol"]] = r
+        return latest
+
+    def protection(self) -> dict[str, Any]:
+        """What kind of exit protection its positions have, and when its exits were last checked."""
+        last = self.db.one("SELECT at FROM audit_log WHERE actor = 'autopilot' AND action = 'autopilot.run' ORDER BY id DESC LIMIT 1")
+        age = None
+        if last and last["at"]:
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(last["at"])).total_seconds()
+            except ValueError:
+                age = None
+        return {"kind": "software_monitored", "label": "Software-monitored, not broker-protected", "text": PROTECTION_WORDS,
+                "check_seconds": CHECK_SECONDS, "last_check_at": last["at"] if last else None,
+                "last_check_age_seconds": round(age) if age is not None else None,
+                "overdue": age is not None and age > 2 * CHECK_SECONDS}
+
+    def exit_plans(self, account_kind: str) -> dict[str, dict[str, Any]]:
+        """For each stock the autopilot holds in the account: its stop, target and time, and that they are software-monitored."""
+        out = {}
+        for sym, r in self._plans(account_kind).items():
+            plan = json.loads(r["exit_plan_json"] or "{}")
+            out[sym] = {"managed_by": "autopilot", "protection": "software_monitored", "stop": plan.get("stop"), "target": plan.get("target"),
+                        "time_exit": plan.get("time_exit"),
+                        "text": "Software-monitored by the autopilot (not a broker stop): checked about every five minutes while the daemon or the app runs."}
+        return out
+
     def _exits(self, pol: Any, now: datetime) -> list[dict[str, Any]]:
         from .v3.trading import ProposalIn
         d = self.desk
         out = []
         held = {p["symbol"]: p for p in d.positions(pol.account_kind)["positions"]}
         mine = self._own_shares(pol.account_kind)
-        # The plan of its latest buy in each stock it still holds shares of.
-        rows = self.db.query("""SELECT * FROM trade_proposals WHERE source = 'autopilot' AND side = 'buy' AND account_kind = ? AND mode = ?
-                                AND status IN ('filled', 'partially_filled', 'cancelled', 'expired') ORDER BY created_at DESC""", (pol.account_kind, d.mode))
-        latest = {}
-        for r in rows:
-            if r["symbol"] in mine and r["symbol"] not in latest:
-                latest[r["symbol"]] = r
+        latest = self._plans(pol.account_kind)
         open_sells = {p["symbol"] for p in d.book(pol.account_kind)["open_proposals"] if p["side"] == "sell"}
         for sym, r in latest.items():
             pos = held.get(sym)
@@ -235,15 +278,34 @@ class Autopilot:
                 continue
             plan = json.loads(r["exit_plan_json"] or "{}")
             mark = pos.get("mark")
+            age = pos.get("mark_age_seconds")
+            due = datetime.fromisoformat(plan["time_exit"]) if plan.get("time_exit") else None
+            timed_out = due is not None and now >= due
+            # A price it cannot trust is reported, never treated as "nothing to do": the stop is unchecked.
+            stale = mark is not None and age is not None and age > pol.max_quote_age_seconds
+            if (mark is None or stale) and not timed_out:
+                out.append({"symbol": sym, "status": "unchecked",
+                            "why": ("not checked: no quote" if mark is None else f"not checked: the quote is {age:.0f} s old (the policy allows {pol.max_quote_age_seconds:g})")
+                            + "; the stop and target wait for the next run"})
+                continue
             why = None
-            if mark is not None and plan.get("stop") and mark <= plan["stop"]:
+            notes = []
+            if not stale and mark is not None and plan.get("stop") and mark <= plan["stop"]:
                 why = f"the stop: {mark:.2f} at or under {plan['stop']:.2f}"
-            elif mark is not None and plan.get("target") and mark >= plan["target"]:
+                gap = (plan["stop"] - mark) / plan["stop"]
+                if gap > 0.01:
+                    notes.append(f"gapped through the stop by {100 * gap:.1f}%: the sale is written at the price now, below the stop")
+            elif not stale and mark is not None and plan.get("target") and mark >= plan["target"]:
                 why = f"the target: {mark:.2f} at or over {plan['target']:.2f}"
-            elif plan.get("time_exit") and now >= datetime.fromisoformat(plan["time_exit"]):
+            elif timed_out:
                 why = "its time ran out"
+                late = (now - due).total_seconds()
+                if late > 2 * CHECK_SECONDS:
+                    notes.append(f"late by {late / 60:.0f} minutes: the exit check was not running at its time")
             if not why:
                 continue
+            if notes:
+                why = f"{why} ({'; '.join(notes)})"
             try:
                 p = d.create(ProposalIn(symbol=sym, side="sell", quantity=own, thesis=f"Autopilot exit: {why}", source="autopilot"),
                              actor="autopilot")
@@ -257,7 +319,7 @@ class Autopilot:
 
     def status(self) -> dict[str, Any]:
         pol = self.desk.policy()
-        return {"gates": self.gates(), "record": self.record(), "last": self.last,
+        return {"gates": self.gates(), "record": self.record(), "last": self.last, "exit_protection": self.protection(),
                 "limits": {"max_orders_per_day": pol.autopilot_max_orders_per_day, "min_score": pol.autopilot_min_score,
                            "horizons": pol.autopilot_horizons, "shadow_days": pol.autopilot_shadow_days}}
 

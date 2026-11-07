@@ -14,7 +14,7 @@
 </head>
 <body data-app="workstation">
 <header class="ws-top">
-  <div class="ws-brand">Trade Assistant<small>3.0</small></div>
+  <div class="ws-brand">Trade Assistant<small>3.1</small></div>
   <nav class="ws-tabs" id="ws-tabs" role="tablist" aria-label="Workspaces"></nav>
   <div class="ws-tools">
     <button class="ws-btn" id="ws-palette-btn" type="button" title="Find a stock or a command">Find <span class="ws-kbd">Ctrl K</span></button>
@@ -22,6 +22,7 @@
     <button class="ws-btn" id="ws-layout" type="button" aria-haspopup="menu">Layout</button>
     <button class="ws-btn" id="ws-classic" type="button" aria-haspopup="menu">Classic screens</button>
     <button class="ws-btn" id="ws-dock-toggle" type="button" aria-pressed="true">Hide dock</button>
+    <span class="ws-save" id="ws-save" role="status" aria-live="polite" data-state="saved"></span>
   </div>
 </header>
 <div class="ws-status" id="ws-status" aria-live="polite">Connecting…</div>
@@ -54,6 +55,7 @@
 <script src="/help.js"></script>
 <script src="/gridstack.js"></script>
 <script src="/ws-core.js"></script>
+<script src="/ws-help.js"></script>
 <script src="/ws-widgets.js"></script>
 <script src="/ws-research.js"></script>
 <script src="/ws-discover.js"></script>

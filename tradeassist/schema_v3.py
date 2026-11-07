@@ -323,3 +323,17 @@ def study_views(cur: sqlite3.Cursor) -> None:
     columns = {row[1] for row in cur.execute("PRAGMA table_info(studies)").fetchall()}
     if "view_json" not in columns:
         cur.execute("ALTER TABLE studies ADD COLUMN view_json TEXT")
+
+
+@migration(21, "3.1 a running study names its process and beats, so an interrupted one is found")
+def study_heartbeats(cur: sqlite3.Cursor) -> None:
+    """Studies run in a thread of the app. A study cut off by a restart, a crash or a computer that slept stayed
+    'running' for ever. Each now records the process running it and a heartbeat, so the next process can tell an
+    orphan from a study that is still going, mark it failed and offer to run it again."""
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(studies)").fetchall()}
+    if "worker" not in columns:
+        cur.execute("ALTER TABLE studies ADD COLUMN worker TEXT")
+    if "heartbeat_at" not in columns:
+        cur.execute("ALTER TABLE studies ADD COLUMN heartbeat_at TEXT")
+    if "retry_of" not in columns:
+        cur.execute("ALTER TABLE studies ADD COLUMN retry_of TEXT")

@@ -20,6 +20,51 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 3.1.0 — UX and reliability
+
+A refinement release on top of 3.0's seven phases, from an independent review of the 3.0 code (findings and fixes
+in [IMPROVEMENTS.md](IMPROVEMENTS.md#review-of-30-the-31-refinement-cycle)). **No trading permission is broadened**:
+live execution and the live autopilot stay off by default, the default policy still allows long shares only, and a
+draft from Research is never proposed or sent until you press the button.
+
+- **An information icon on every widget.** Every widget's header has an ⓘ first among its controls, drawn by the
+  shared frame, so no widget can be added without one. It says what the widget does, what it uses, how to use it,
+  how to read it, its limits and freshness, and what it changes; trading widgets also say what is paper, what
+  reaches a broker and what needs your approval. Research widgets show the data source, as-of time, model version
+  and calibration under *Right now*. Hover or keyboard focus shows it; a click, Enter, Space or a tap keeps it open;
+  Escape or a click elsewhere closes it. Classic screens inside widgets keep their 2.x help, with what changed in 3.0.
+- **Honest numbers.** The forecast's range is called an 80% band only when the calibration for that horizon passed;
+  otherwise it reads *Model-implied 10th–90th percentile range. Historical coverage has not yet been validated.*
+  *Fill chance* is now *Est. fillability*, a heuristic from the spread. The most it can lose (contract terms), the
+  modeled downside, the expected shortfall and the capital it ties up are named separately everywhere.
+- **Exits say what they are.** The autopilot's stops, targets and time exits are labelled *software-monitored, not
+  broker-protected*, with when they were last checked. A position whose quote is missing or stale is reported as
+  *not checked* rather than passed over, a time exit written late says by how much, and a stop gapped through says
+  so. Desk positions show who manages each exit.
+- **From the study to the Trading Desk in one workflow.** Each strategy in a study shows its *route* now: the desk
+  can send it, enter it by hand at your broker, or research only (decided by your policy and broker, not the
+  strategy). *Draft* hands it to the Trading Desk with its study, opportunity, scenario, model version, size (fitted
+  to your policy's limits), limit, risk, exit plan and the risk checks' verdict; Proposals shows it at the top and
+  *Propose this draft* writes the proposal. A spread or an option your policy does not allow comes with the order to
+  enter by hand instead.
+- **Cleaner standard layouts.** Discover: the feed, the budget split, the chart, the watchlist and the news on one
+  screen (the classic Morning plan is in the catalog; its picks already reach the feed). Research: a larger chart,
+  the study beside it in Summary, Evidence, Forecast and Strategies sections, the chain and the option chart
+  together, and the forecast's record; the what-if Scenario explorer is an *Advanced* widget. Trading Desk:
+  approvals, proposals and the desk (kill switch and mode first) up top, then positions, the autopilot and the
+  activity; the policy starts collapsed. Portfolio: new native *Holdings* and *Exposure* widgets beside the classic
+  trade history and journal. A session saved under 3.0 is offered the new layouts once and kept as it is unless you
+  accept.
+- **Linked charts.** The stock chart's crosshair and a linked option chart's follow each other by trading day.
+- **Reliability.** Widgets remove their event subscriptions when closed, and drop late answers for a stock or a
+  widget that has gone; saves go one at a time with the newest last, and the top bar shows *Saved*, *Saving…* or
+  *Not saved* with a retry. A study cut off by a restart, a crash or a sleep is found, marked failed as interrupted,
+  and can be run again with one click. The workspace tabs are proper tabs (arrow keys, Home, End, Delete closes)
+  with the close button beside the tab instead of inside it. A kill switch is in the status bar on every workspace.
+
+Upgrading from 3.0: no step beyond the usual. The first start migrates the database to migration 21 (studies
+record the process running them and a heartbeat). Your saved workspaces are kept; a notice offers the new layouts.
+
 ## 3.0.0 — Trade Assistant 3.0
 
 The workstation, Research, Discover, the Trading Desk, live execution (off) and the capped autopilot (off), in
