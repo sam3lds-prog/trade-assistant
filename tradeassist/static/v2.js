@@ -600,8 +600,10 @@ function renderAnalysis(d) {
   if (dq) frag.append(el("div", { class: "panel" }, el("h3", {}, "Data checks ", dq.bars_freshness ? el("span", { class: "small muted", text: `daily bars through ${dq.bars_freshness.last_finished_bar || "n/a"} ` }) : "", dq.bars_freshness ? freshTag(dq.bars_freshness, true) : ""),
     el("ul", { class: "plain small" }, dq.checks.map(c => el("li", {}, statusTag(c.level, c.level === "info" ? "Note" : c.level === "warn" ? "Caution" : "Problem"), ` ${c.text}`)))));
   // 2.12: the interactive chart when its feature is on (and its library loaded), else the fixed chart.
-  const tech = featureOn("analyze_interactive") && typeof interactiveChart === "function" && window.LightweightCharts
-    ? interactiveChart(d.symbol) : techPanel(d.symbol);
+  const interactive = featureOn("analyze_interactive") && typeof interactiveChart === "function" && window.LightweightCharts;
+  if (interactive && CHART_ACTIVE) { CHART_ACTIVE.dispose(); CHART_ACTIVE = null; }      // the last analysis's chart
+  const tech = interactive ? interactiveChart(d.symbol) : techPanel(d.symbol);
+  if (interactive) CHART_ACTIVE = { dispose: tech.dispose };
   frag.append(tech.panel);
   // 2.13: the what-if widget and the position under its scenario, between the chart and its readings.
   if (tech.setLines && featureOn("what_if") && typeof whatIfWidget === "function") {

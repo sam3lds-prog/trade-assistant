@@ -242,6 +242,6 @@ def test_feature_overrides_from_the_environment():
 
 def test_the_page_loads_the_v2_script_with_a_fresh_address(client):
     c, _ = client
-    page = c.get("/").text
-    assert '/v2.js?v=' in page and 'data-view="positions"' in page
+    page, classic = c.get("/").text, c.get("/classic").text      # 3.0: the workstation loads the V2 script too
+    assert '/v2.js?v=' in page and '/v2.js?v=' in classic and 'data-view="positions"' in classic
     assert "BUILDERS" in c.get("/v2.js").text

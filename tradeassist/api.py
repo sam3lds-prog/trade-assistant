@@ -314,14 +314,30 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
     # those files do, so an update shows up on an ordinary reload.
     fresh = {"Cache-Control": "no-cache"}
 
+    # Every script and stylesheet a page loads, stamped with the version and file time so a browser never runs an
+    # old copy after an update. The classic screens' scripts load first on both pages: the workstation (3.0) runs
+    # their renderers inside its widgets.
+    page_assets = ("app.css", "flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js",
+                   "lwcharts.js", "chart.js", "whatif.js", "blend.js", "basket.js", "paper.js", "help.js",
+                   "gridstack.css", "ws.css", "gridstack.js", "ws-core.js", "ws-widgets.js")
+
+    def page(file: str) -> HTMLResponse:
+        html = (STATIC / file).read_text()
+        for name in page_assets:
+            if (STATIC / name).is_file():
+                stamp = f"{__version__}-{int((STATIC / name).stat().st_mtime)}"
+                html = html.replace(f'"/{name}"', f'"/{name}?v={stamp}"')
+        return HTMLResponse(html, headers=fresh)
+
     @app.get("/")
     def index():
-        html = (STATIC / "index.html").read_text()
-        for name in ("app.css", "flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js", "lwcharts.js", "chart.js", "whatif.js",
-                     "blend.js", "basket.js", "paper.js", "help.js"):
-            stamp = f"{__version__}-{int((STATIC / name).stat().st_mtime)}"
-            html = html.replace(f'"/{name}"', f'"/{name}?v={stamp}"')
-        return HTMLResponse(html, headers=fresh)
+        """The 3.0 workstation: Discover, Research, Trading Desk and Portfolio."""
+        return page("index.html")
+
+    @app.get("/classic")
+    def classic():
+        """The 2.x screens, as they were, until each is replaced in the workstation and tested there."""
+        return page("classic.html")
 
     @app.get("/{name}")
     def static_file(name: str):

@@ -23,7 +23,10 @@ import pytest
 STATIC = Path(__file__).resolve().parent.parent / "tradeassist" / "static"
 SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "ideas.js", "morning.js", "live.js",
            "lwcharts.js", "chart.js", "whatif.js", "blend.js", "basket.js", "paper.js",
-           "help.js")   # in the order index.html loads them; lwcharts.js is the vendored chart library
+           "help.js")   # in the order classic.html loads them; lwcharts.js is the vendored chart library
+# 3.0: the workstation (index.html) loads the classic scripts, then the grid library and its own.
+WORKSTATION = SCRIPTS + ("gridstack.js", "ws-core.js", "ws-widgets.js")
+VENDORED = ("lwcharts.js", "gridstack.js")   # minified libraries: their top-level names are their own business
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
 
@@ -32,17 +35,27 @@ def top_level(name: str) -> set[str]:
 
 
 def test_no_name_is_declared_at_the_top_of_two_scripts():
-    for i, a in enumerate(SCRIPTS):
-        for b in SCRIPTS[i + 1:]:
+    for i, a in enumerate(WORKSTATION):
+        for b in WORKSTATION[i + 1:]:
             assert top_level(a) & top_level(b) == set(), (a, b)
 
 
-def test_index_loads_every_script_in_order_with_a_fresh_address():
+def test_both_pages_load_every_script_in_order_with_a_fresh_address():
     from tradeassist import api
-    html = (STATIC / "index.html").read_text()
-    found = re.findall(r'<script src="/(\w+\.js)"', html)
-    assert tuple(found) == SCRIPTS
-    assert all(f'"{name}"' in Path(api.__file__).read_text() for name in SCRIPTS)
+    source = Path(api.__file__).read_text()
+    for page, scripts in (("classic.html", SCRIPTS), ("index.html", WORKSTATION)):
+        html = (STATIC / page).read_text()
+        found = re.findall(r'<script src="/([\w-]+\.js)"', html)
+        assert tuple(found) == scripts, page
+        assert all(f'"{name}"' in source for name in scripts)
+    css = re.findall(r'<link rel="stylesheet" href="/([\w-]+\.css)"', (STATIC / "index.html").read_text())
+    assert css == ["app.css", "gridstack.css", "ws.css"] and all(f'"{name}"' in source for name in css)
+
+
+def test_the_workstation_keeps_to_one_global():
+    for name in ("ws-core.js", "ws-widgets.js"):
+        assert top_level(name) <= {"WS"}, name
+    assert "MIT" in (STATIC / "LICENSE-gridstack.txt").read_text() and "GridStack 12.3.3" in (STATIC / "gridstack.js").read_text()[:200]
 
 
 def test_analyze_has_one_thesis_form_and_says_the_trend_turned_sentence_once():
@@ -56,7 +69,7 @@ def test_analyze_has_one_thesis_form_and_says_the_trend_turned_sentence_once():
 
 
 def test_every_navigation_button_has_a_screen():
-    html = (STATIC / "index.html").read_text()
+    html = (STATIC / "classic.html").read_text()
     views = set(re.findall(r'data-view="(\w+)"', html))
     js = "".join((STATIC / name).read_text() for name in SCRIPTS)
     registered = set()
@@ -71,7 +84,7 @@ def test_every_navigation_button_has_a_screen():
 def test_the_scripts_compile_as_one_page(tmp_path):
     # One script made of both files: a clashing declaration is an early SyntaxError when compiled.
     joined = tmp_path / "page.js"
-    joined.write_text("\n;\n".join((STATIC / name).read_text() for name in SCRIPTS))
+    joined.write_text("\n;\n".join((STATIC / name).read_text() for name in WORKSTATION))
     check = "const vm = require('vm'); new vm.Script(require('fs').readFileSync(process.argv[1], 'utf8'));"
     out = subprocess.run(["node", "-e", check, str(joined)], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr[-2000:]
@@ -124,7 +137,8 @@ def demo_page(tmp_path, features=None, prepare=None):
                 pytest.skip(f"Chromium could not start: {exc}")
             page = browser.new_page(viewport={"width": 1280, "height": 900})
             page.on("pageerror", lambda e: errors.append(str(e)))
-            page.base = f"http://127.0.0.1:{port}/"
+            page.base = f"http://127.0.0.1:{port}/classic"            # 3.0: the 2.x screens, as they were
+            page.root = f"http://127.0.0.1:{port}/"                  # the workstation
             yield page, errors
             browser.close()
     finally:
@@ -336,9 +350,9 @@ def test_trade_ideas_lists_simulate_a_trade_and_hand_it_to_decide(tmp_path):
     """2.7: the scan's lists, a simulation of one trade with its exits, and the same levels on Decide."""
     with demo_page(tmp_path) as (page, errors):
         # The screen does not scan by itself; scan the watchlist through the API first.
-        page.request.post(page.base + "v2/ideas/scan", data={"universe": "watchlist"})
+        page.request.post(page.root + "v2/ideas/scan", data={"universe": "watchlist"})
         for _ in range(400):
-            if page.request.get(page.base + "v2/ideas").json()["job"]["state"] != "running":
+            if page.request.get(page.root + "v2/ideas").json()["job"]["state"] != "running":
                 break
             time.sleep(0.3)
         page.goto(page.base + "#ideas")
@@ -377,7 +391,7 @@ def test_simulate_a_trade_still_draws_after_trade_ideas_loads(tmp_path):
         # Trade ideas waits to be asked: opening it starts nothing.
         page.click('.rail button.nav[data-view="ideas"]')
         page.wait_for_selector("text=Not scanned yet", timeout=30000)
-        assert page.request.get(page.base + "v2/ideas?brief=true").json()["job"]["state"] == "idle"
+        assert page.request.get(page.root + "v2/ideas?brief=true").json()["job"]["state"] == "idle"
     assert errors == []
 
 
@@ -415,7 +429,7 @@ def test_the_morning_plan_builds_cards_copies_an_order_and_watches_a_trigger(tmp
         # The plan survives a reload without a rescan (it is kept in the database).
         page.goto(page.base + "#morning")
         page.wait_for_selector("h3:has-text('stocks ranked')", timeout=30000)
-        assert page.request.get(page.base + "v2/morning?brief=true").json()["job"]["state"] in ("done", "idle")
+        assert page.request.get(page.root + "v2/morning?brief=true").json()["job"]["state"] in ("done", "idle")
     assert errors == []
 
 

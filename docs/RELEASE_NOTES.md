@@ -18,6 +18,25 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 3.0.0.dev2 — Trade Assistant 3.0, phase 2: the workstation
+
+The app now opens on a workstation of four workspaces (Discover, Research, Trading Desk and Portfolio) made of
+widgets you can move, resize, collapse, maximize, close and pin to the side. See [V3.md](V3.md#phase-2-the-workstation).
+
+- **Linked widgets.** Each widget has a link colour, shown as the stripe down its header. Pick a stock in any widget,
+  or type one after Ctrl K, and every widget of that colour follows: the chart, the options chain, the scenario
+  explorer, the strategy builder, the risk panel, the news and the order ticket. Click a contract in the chain and
+  the ticket prices it while the risk panel draws what it can make and lose.
+- **Two stocks side by side.** Put a second chart on another colour.
+- **The ticket stays in view** in the dock while you move between workspaces.
+- **Nothing is lost.** Layouts, each link's stock and contract, and the dock are saved as you work and come back
+  after a restart. Save a layout under a name to reopen it, or make it the workspace's default.
+- **Every 2.x screen is still there**, as a widget (the Classic screens menu) or as the old page at
+  `http://127.0.0.1:8000/classic`.
+- On a phone the widgets stack in one column, in reading order.
+
+No migration, no new setting. Nothing places an order.
+
 ## 3.0.0.dev1 — Trade Assistant 3.0, phase 1: a trustworthy foundation
 
 The first of seven steps to 3.0 (see [V3.md](V3.md)). Nothing on the screens moves yet; what changes is what the

@@ -89,11 +89,12 @@ const CHARTX = (() => {
   return { clampWindow, overlayLines, scenarioRows, pinchOf, zoomCentre, zoomRange };
 })();
 
-let CHART_ACTIVE = null;   // the one live instance: a new Analyze disposes the last (its chart and listener)
+// The Analyze screen's live chart: a new analysis disposes the last (v2.js). 3.0: a chart no longer disposes others
+// itself, so the workstation can show several at once; whoever makes one disposes it.
+let CHART_ACTIVE = null;
 
 function interactiveChart(symbol) {
   const lib = window.LightweightCharts;
-  if (CHART_ACTIVE) { CHART_ACTIVE.dispose(); CHART_ACTIVE = null; }
   const state_ = { range: "6m", group: null, start: "", end: "", show: { ...CHART_DEFAULTS }, swing: "2",
     data: null, sim: null, selecting: false, selection: null, userWindow: false, request: 0, minCorr: 0.75, horizon: null, matchesShown: 5,
     view: null,                                // the logical range to show after a draw, when not the range
@@ -593,7 +594,6 @@ function interactiveChart(symbol) {
     notes);
   load();
   loadStructure();
-  CHART_ACTIVE = { dispose };
   return { panel, extras: [outlookBox, patternBox, turnBox], structure: structBox, dispose,
     setLines, chartArgs, showAhead, subscribe: fn => { listeners.push(fn); }, redraw: () => { if (state_.data) draw(); } };
 }
