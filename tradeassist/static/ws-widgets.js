@@ -147,46 +147,7 @@
     };
   } });
 
-  /* ---------- Opportunity feed ---------- */
-  WS.register("feed", { title: "Opportunities", category: "Discover", size: { w: 7, h: 8 }, symbolBadge: false, needs: ["opportunity_blend"], create(w) {
-    const box = el("div");
-    const src = el("select", { "aria-label": "Source" }, [["all", "Every scan"], ["morning", "Morning plan"], ["ideas", "Trade ideas"], ["live", "Live news"]]
-      .map(([v, t]) => el("option", { value: v, selected: v === (w.config.source || "all") }, t)));
-    w.body.append(el("div", { class: "ws-row" }, field("From", src)), box);
-    src.addEventListener("change", () => { w.config.source = src.value; w.save(); load(); });
-    async function load() {
-      box.replaceChildren(loading("Ranking opportunities…"));
-      try {
-        const d = await api(`/v2/opportunities/${enc(src.value)}?limit=60`);
-        if (!d.opportunities.length) {
-          box.replaceChildren(WS.empty("Nothing ranked yet. Build the Morning plan or scan Trade ideas, and their opportunities appear here."),
-            el("div", { class: "ws-row" }, BUILDERS.morning ? el("button", { class: "ws-btn", type: "button", onclick: () => WS.routeClassic("morning") }, "Open the Morning plan") : "",
-              BUILDERS.ideas ? el("button", { class: "ws-btn", type: "button", onclick: () => WS.routeClassic("ideas") }, "Open Trade ideas") : ""));
-          return;
-        }
-        const sel = w.ctx().symbol;
-        box.replaceChildren(table([
-          { label: "Stock", cell: o => el("strong", { text: o.symbol }) },
-          { label: "Way", cell: o => (o.direction === "LONG" ? "Long" : "Short") },
-          { label: "Setup", cell: o => o.setup_label || o.setup },
-          { label: "Horizon", cell: o => (o.horizon === "day" ? "Day" : `${o.horizon_days} days`) },
-          { label: "Score", num: true, cell: o => num(o.score, 0) },
-          { label: "Edge after costs", num: true, cell: o => (o.edge && o.edge.known ? signedPct(o.edge.expected_pct, 2) : "no record") },
-          { label: "From", cell: o => o.source },
-        ], d.opportunities, { onRow: (o, tr) => {
-          for (const r of box.querySelectorAll("tr.sel")) r.classList.remove("sel");
-          tr.classList.add("sel");
-          w.set({ symbol: o.symbol, direction: o.direction, horizon: o.horizon === "day" ? "intraday" : "swing", opportunity: { key: o.key, source: o.source } });
-        } }));
-        for (const tr of box.querySelectorAll("tbody tr")) if (tr.querySelector("strong") && tr.querySelector("strong").textContent === sel) tr.classList.add("sel");
-        const note = Object.entries(d.meta || {}).map(([k, m]) => (m && m.stale ? `${k}: ${m.stale}` : null)).filter(Boolean);
-        if (note.length) box.append(el("p", { class: "small muted", text: note.join(" ") }));
-      } catch (e) { box.replaceChildren(el("p", { class: "error", text: e.message })); }
-    }
-    load();
-    WS.onEvent("opportunity.", () => load());
-    return { refresh: load, config: () => ({ source: src.value }) };
-  } });
+  /* The opportunity feed is Discover 3.0's (ws-discover.js). */
 
   /* ---------- Watchlist ---------- */
   WS.register("watchlist", { title: "Watchlist", category: "Discover", size: { w: 4, h: 5 }, symbolBadge: false, create(w) {

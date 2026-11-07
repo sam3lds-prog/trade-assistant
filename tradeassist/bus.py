@@ -13,6 +13,7 @@ credential (values pass through events.redact), and never the whole object: read
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 from typing import Any
@@ -69,7 +70,10 @@ class EventBus:
         """Events after `after`, waiting up to `timeout` seconds for one to arrive."""
         deadline = time.monotonic() + max(0.0, min(MAX_WAIT_SECONDS, timeout))
         while True:
-            got = self.since(after, topics)
+            try:
+                got = self.since(after, topics)
+            except sqlite3.ProgrammingError:          # the database closed under a waiting request: the app is stopping
+                return []
             left = deadline - time.monotonic()
             if got or left <= 0:
                 return got
