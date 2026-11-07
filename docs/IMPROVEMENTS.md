@@ -1583,3 +1583,41 @@ Reported from the chart: at 7:24 p.m. New York on 22 October the GOOGL daily cha
 Market holidays are not known to `last_session`, so on a holiday evening a stock that is viewed is asked for every 15
 minutes; the cost is bounded by what is on the screen. The four tests that failed on the untouched tree before 2.16.1
 still fail on it and are unrelated.
+
+## 3.0: the workstation, Research, Discover, the Trading Desk, live execution and the autopilot
+
+The design is [V3.md](V3.md); this is the evidence. Seven phases, each its own pull request, each merged only with
+CI green on Python 3.11 and 3.13 (CI now installs Chromium, so the browser tests run there too).
+
+| Phase | Pull request | New or changed tests | Full suite after it (local, 3.13) |
+| --- | --- | --- | --- |
+| 1 Stabilise: fixed test clock, true P&L percentiles, four risk measures, contracts, event stream | #43 | `test_riskmath`, `test_v3_core`, `test_regression_baseline`, clock fixes | green |
+| 2 Workstation: four workspaces of linked GridStack widgets, saved layouts | #44 | `test_workspaces`, `test_workstation` (browser) | 1229 passed, 2 skipped |
+| 3 Research: analogs, one calibrated forecast, premium history, Strategy Studio | #45 | `test_research3` (16), study browser test, read-only allowlists | green (run in two parts) |
+| 4 Discover: one deduplicated feed, comparable rank, one allocator | #46 | `test_discover3` (18), Discover browser test | 1267 passed, 2 skipped |
+| 5 Trading Desk: policy, fail-closed risk, approvals, ledger, daemon, notifications, phone approvals | #47 | `test_desk3` (19), `test_jobs_notify_remote` (17), desk browser test | 1304 passed, 2 skipped |
+| 6 Live execution through a separate Robinhood adapter (off) | #48 | `test_live_exec` (15) with a stand-in order server | see the PR |
+| 7 Capped autopilot, shadow mode, hardening | #49 | `test_autopilot` (11) | see the PR |
+
+### What 3.0 guarantees about orders, and the test that holds each
+
+| Guarantee | Tests |
+| --- | --- |
+| No path under `/v3` (or anywhere) contains "order", and every write is listed for review | `test_api.test_no_endpoint_can_place_an_order` |
+| An approval is bound to the order's hash, used once, expires, and is superseded by an amendment | `test_an_approval_is_bound_to_the_exact_order`, `test_an_approval_works_once_and_expires` |
+| A phone approval needs the PIN session and the one-time link; other hosts and other sites are refused | `test_a_phone_approves_with_the_pin_and_the_link_once`, `test_only_the_tailnet_name_and_only_the_approval_pages_answer`, `test_a_form_from_another_site_is_refused`, `test_wrong_pins_lock_the_pages_and_say_so` |
+| A check that cannot be measured blocks; closing a held position is never blocked by the loss stop | `test_an_unmeasured_check_blocks`, `test_a_position_without_a_quote_leaves_todays_result_unmeasured_which_blocks_buys_not_sells`, `test_the_daily_loss_stop_blocks_new_buys_but_lets_a_position_be_closed` |
+| Risk is checked again just before sending | `test_risk_is_checked_again_just_before_sending` |
+| An unanswered or interrupted submission is never resent; reconciliation settles it | `test_a_timeout_makes_the_order_unknown_and_reconciliation_settles_it_without_resending`, `test_a_submission_cut_off_by_a_crash_is_recovered_as_unknown_never_resent`, `test_a_placement_without_an_answer_is_found_by_reconciliation_and_never_resent`, `test_a_placement_that_never_arrived_fails_and_frees_its_capital` |
+| The market-data connection cannot act; the trading connection calls only its own tools | `test_the_market_data_connection_still_cannot_act`, `test_the_trading_bridge_calls_only_its_own_tools` |
+| Live is off unless every gate holds; LIVE_MAX_ORDER caps every policy; the account is bound | `test_live_trading_is_off_unless_switched_on`, `test_live_orders_need_real_prices`, `test_the_live_ceiling_caps_every_policy`, `test_an_approval_is_bound_to_the_account` |
+| The kill switch cancels working orders (paper and Robinhood) and refuses approvals | `test_the_kill_switch_cancels_working_orders_and_refuses_approvals`, `test_the_kill_switch_cancels_a_working_live_order_at_robinhood` |
+| After a sleep, missed timed work is discarded, not replayed | `test_after_a_sleep_missed_slots_are_not_replayed`, `test_after_a_sleep_a_missed_run_is_not_replayed` |
+| The autopilot acts only under its mode, only on eligible opportunities, within its counts, and live only after its gates | `test_autopilot.py` |
+
+### What was not tested against the real thing
+
+Robinhood does not publish the order tools' arguments or replies. The live adapter reads each tool's declared
+schema and was tested against a stand-in that follows Robinhood's own API shapes; it has not placed a real order.
+The first live use should be one share of an inexpensive stock under the smallest limits, watched on the desk.
+Tailscale, ntfy and Telegram were tested with fakes of their HTTP interfaces, not the services themselves.

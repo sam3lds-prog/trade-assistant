@@ -376,3 +376,14 @@ def test_the_routes(app):
     assert c.post("/v3/proposals", json={"symbol": "AMZN", "quantity": 1, "source": "a rumour"}).status_code == 400
     assert c.post("/v3/notifications/test").status_code == 400          # no channel set up
     assert c.post("/v3/desk/kill", json={"on": True}).json()["on"] is True
+
+
+def test_an_approved_order_that_uses_the_last_of_the_capital_is_still_sent(app):
+    """Its own reservation is in the book when it is checked again before sending; it must not count twice."""
+    _, svc, desk = app
+    ask = svc.market.quote("AMZN")["ask"]
+    limits(desk, trial_capital=round(ask * 2 + 0.01, 2), max_order=round(ask * 2 + 0.01, 2), max_daily_new_buys=round(ask * 2 + 0.01, 2))
+    p = buy(desk, qty=2)
+    assert approve(desk, p)["status"] == "authorized"
+    run_jobs(desk)
+    assert desk.get(p["id"])["status"] == "filled"

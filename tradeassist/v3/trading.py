@@ -302,6 +302,13 @@ class TradingDesk:
         except Exception:  # noqa: BLE001 - an unreadable clock is an unknown, which blocks
             market_state = "UNKNOWN"
         book = self.book(terms.account_kind)
+        if proposal_id:
+            # Its own reservation (made when it was approved) is already in the book: do not count it twice.
+            own = (self._ledger_sum("reserve", account_kind=terms.account_kind, proposal_id=proposal_id)
+                   - self._ledger_sum("release", account_kind=terms.account_kind, proposal_id=proposal_id))
+            if own > 0:
+                book["capital_in_use"] = max(0.0, book["capital_in_use"] - own)
+                book["today_new_buys"] = max(0.0, book["today_new_buys"] - own)
         book["live_account_ref"] = self.live_account_ref
         book["live_max_order"] = self.svc.settings.live_max_order
         return assess(terms, pol, book, quote, now=datetime.now(NY), market_state=market_state,
@@ -477,6 +484,8 @@ class TradingDesk:
                 raise RequestError(f"The proposal is {p['status'].replace('_', ' ')}, not awaiting approval.")
             if self.kill_switch().get("on") and approve:
                 raise RequestError("The kill switch is on: nothing can be approved until it is switched off.")
+            if actor == "autopilot" and (channel != "policy" or self.policy().mode != "capped_autopilot"):
+                raise RequestError("The autopilot approves only under a capped_autopilot policy.")
             now = _iso(_now())
             with self.db.tx() as cur:
                 cur.execute("UPDATE approvals SET decision = ?, decided_at = ?, decided_by = ?, channel = ?, used_at = ? WHERE id = ? AND decision = 'pending'",
@@ -798,12 +807,17 @@ class TradingDesk:
 
     # --- the worker ----------------------------------------------------------------------------------------------
     def handlers(self) -> dict[str, Any]:
-        return {"desk.submit": self.run_submit, "desk.reconcile": self.reconcile, "desk.expire": self.expire_due,
-                "desk.cancel": self.run_cancel, "notify.deliver": self.notifier.deliver_due}
+        out = {"desk.submit": self.run_submit, "desk.reconcile": self.reconcile, "desk.expire": self.expire_due,
+               "desk.cancel": self.run_cancel, "notify.deliver": self.notifier.deliver_due}
+        ap = getattr(self.svc, "autopilot", None)
+        if ap is not None:
+            out["autopilot.run"] = ap.run
+        return out
 
     @staticmethod
     def schedules() -> list[Schedule]:
-        return [Schedule("desk.reconcile", 20, 40), Schedule("desk.expire", 30, 60), Schedule("notify.deliver", 15, 30)]
+        return [Schedule("desk.reconcile", 20, 40), Schedule("desk.expire", 30, 60), Schedule("notify.deliver", 15, 30),
+                Schedule("autopilot.run", 300, 240, when="market")]
 
     def make_worker(self, component: str, defer_to: str | None, extra_handlers: dict[str, Any] | None = None,
                     extra_schedules: list[Schedule] | None = None) -> Worker:
@@ -888,8 +902,10 @@ class TradingDesk:
 
 def install(svc: Any) -> None:
     from ..api_v3 import register, status_part
+    from ..autopilot import Autopilot
     desk = TradingDesk(svc)
     svc.trading = desk
+    svc.autopilot = Autopilot(svc)
     status_part(svc, "trading", desk.strip_trading)
     status_part(svc, "risk", desk.strip_risk)
     status_part(svc, "daemon", desk.strip_daemon)
@@ -907,6 +923,8 @@ def install(svc: Any) -> None:
 
         @router.put("/desk/policy")
         def put_policy(body: dict[str, Any]) -> dict[str, Any]:
+            if body.get("mode") == "capped_autopilot" and body.get("account_kind") == "live" and not svc.settings.autopilot_live:
+                raise RequestError("The autopilot may not trade live: AUTOPILOT_LIVE=1 is not set in .env. Use the shadow or paper account.")
             try:
                 return P.save(d.db, body, live_allowed=d.live_ready)
             except ValueError as exc:
@@ -976,6 +994,14 @@ def install(svc: Any) -> None:
         @router.post("/approvals/{aid}/decline")
         def decline(aid: str, body: DecisionIn) -> dict[str, Any]:
             return d.decide(aid, False, body.order_hash, channel="app")
+
+        @router.get("/autopilot")
+        def autopilot() -> dict[str, Any]:
+            return svc.autopilot.status()
+
+        @router.post("/autopilot/run")
+        def autopilot_run() -> dict[str, Any]:
+            return svc.autopilot.run()
 
         @router.get("/notifications")
         def notifications(limit: int = 30) -> dict[str, Any]:

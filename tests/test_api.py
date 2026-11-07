@@ -23,6 +23,8 @@ V3_WRITES = {
     "/v3/desk/kill", "/v3/desk/reconcile", "/v3/notifications/test",
     # phase 6: check whether live execution through Robinhood can be used now (it connects; it sends nothing).
     "/v3/desk/live/check",
+    # phase 7: run the capped autopilot once now (it acts only under a capped_autopilot policy, within its gates).
+    "/v3/autopilot/run",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.
