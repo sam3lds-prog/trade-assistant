@@ -129,6 +129,14 @@ class TradierData:
         history = body.get("history") or {}
         return bars_frame(dicts(history.get("day")) if isinstance(history, dict) else [])
 
+    def option_history(self, option_symbol: str, start: str, end: str) -> pd.DataFrame:
+        """3.0: one option contract's daily bars, from the same endpoint with its OCC symbol. Days the contract did
+        not trade have no bar."""
+        body = self._get("/markets/history", {"symbol": option_symbol.strip().upper(), "interval": "daily",
+                                              "start": start, "end": end})
+        history = body.get("history") or {}
+        return bars_frame(dicts(history.get("day")) if isinstance(history, dict) else [])
+
     # --- bars within the day (2.12) --------------------------------------
     def intraday_reach(self) -> dict[str, Any]:
         """How many days back each bar size reaches on Tradier's timesales: about 20 days of 1-minute bars

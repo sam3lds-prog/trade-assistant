@@ -233,6 +233,21 @@ class Standin:
                     for d, o, h, l, c, v in bars.itertuples(index=False, name=None)]
             return self.wrap({"results": [{"symbol": symbols[0], "interval": interval, "historicals": rows}]})
 
+        @srv.tool(annotations=READ_ONLY)
+        def get_option_historicals(instrument_ids: list[str], interval: Literal["day", "week"],
+                                   span: Literal["month", "3month", "year"]) -> dict:
+            """Get OHLC price bars for option contracts over a time range (3.0)."""
+            self.calls.append(("get_option_historicals", {"instrument_ids": list(instrument_ids), "interval": interval, "span": span}))
+            c = self.by_id[instrument_ids[0]]
+            bars = demo.history(c["underlying"], "2000-01-01", "2100-01-01").tail(40)
+            sign = 1 if c["option_type"].lower() == "call" else -1
+            rows = []
+            for d, close in zip(bars["date"], bars["close"]):
+                px = max(0.05, sign * (close - c["strike"]) + 2.0)
+                rows.append({"begins_at": f"{d:%Y-%m-%d}T00:00:00Z", "open_price": money(px * 0.98), "high_price": money(px * 1.04),
+                             "low_price": money(px * 0.95), "close_price": money(px), "volume": 120, "interpolated": False})
+            return self.wrap({"results": [{"instrument_id": instrument_ids[0], "historicals": rows}]})
+
     # --- variant b: same information, different names and layout ------------------
     def _register_b(self) -> None:
         srv, demo = self.server, self.demo

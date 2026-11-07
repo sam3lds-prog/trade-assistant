@@ -28,9 +28,19 @@
         ...(chart.extras || []), chart.structure || "");
       w.body.replaceChildren(chart.panel, more);
       WS.provide(w, "chart", chart);
+      // Lines other widgets ask for (a study's forecast), redrawn whenever the chart reloads.
+      chart.subscribe(what => { if (what === "load") overlays(); });
+    }
+    function overlays() {
+      if (!chart) return;
+      for (const fn of WS.chartOverlays || []) { try { fn(chart, w.ctx()); } catch (e) { console.error(e); } }
     }
     return {
-      onContext(c, changed) { if (changed.includes("symbol") && c.symbol !== shown) mount(c.symbol); else if (!chart && c.symbol && shown !== c.symbol) mount(c.symbol); },
+      onContext(c, changed) {
+        if (changed.includes("symbol") && c.symbol !== shown) mount(c.symbol);
+        else if (!chart && c.symbol && shown !== c.symbol) mount(c.symbol);
+        else if (changed.includes("scenario")) overlays();
+      },
       refresh() { mount(w.ctx().symbol); },
       onResize() { if (chart && chart.redraw) chart.redraw(); },
       dispose() { if (chart) chart.dispose(); },
@@ -325,7 +335,7 @@
         const data = await api("/api/price", req);
         if (mine !== ticket) return;
         priced = { request: req, data };
-        out.replaceChildren(renderPrice(data, req));
+        out.replaceChildren(renderPrice(data, extra => ({ ...req, ...extra })));   // the classic pricer asks for its request by function
         if (WS.ticketExtras) for (const f of WS.ticketExtras) { const n = f(w, priced, c); if (n) out.prepend(n); }
       } catch (e) { if (mine === ticket) out.replaceChildren(el("p", { class: "error", text: e.message })); }
     }

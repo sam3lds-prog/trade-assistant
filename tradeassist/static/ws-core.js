@@ -9,7 +9,7 @@
 const WS = (() => {
   const GROUPS = [["blue", "Blue"], ["green", "Green"], ["amber", "Amber"], ["plum", "Plum"], ["none", "Not linked"]];
   const WORKSPACES = { discover: "Discover", research: "Research", desk: "Trading Desk", portfolio: "Portfolio" };
-  const CONTEXT_KEYS = ["symbol", "direction", "horizon", "contract", "strategy", "scenario", "proposal", "opportunity"];
+  const CONTEXT_KEYS = ["symbol", "direction", "horizon", "contract", "strategy", "scenario", "proposal", "opportunity", "study"];
   const TYPES = {};                       // widget type -> definition
   const ctx = {};                         // link group -> shared context
   const providers = {};                   // link group -> {capability: {widget, api}}
@@ -45,7 +45,7 @@ const WS = (() => {
     if (patch.symbol !== undefined && patch.symbol) patch.symbol = String(patch.symbol).trim().toUpperCase();
     // A new stock clears what belonged to the old one, unless the change names it too.
     if (patch.symbol && patch.symbol !== target.symbol) {
-      for (const k of ["contract", "strategy", "scenario", "proposal", "opportunity"]) if (!(k in patch)) patch[k] = null;
+      for (const k of ["contract", "strategy", "scenario", "proposal", "opportunity", "study"]) if (!(k in patch)) patch[k] = null;
     }
     const changed = Object.keys(patch).filter(k => JSON.stringify(target[k]) !== JSON.stringify(patch[k]));
     if (!changed.length) return;

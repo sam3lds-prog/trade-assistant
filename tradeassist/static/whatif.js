@@ -317,6 +317,7 @@ function whatIfWidget(symbol, chartApi) {
     aiBox.replaceChildren(
       el("div", { class: "wi-model" }, el("span", { class: "wi-swatch", style: `background:${WI_AI_COLOR}` }),
         el("strong", { text: `${r.label} (${r.model}): ${signedPct(sc.expected_pct, 2)} at the horizon` }),
+        isNum(sc.stated_expected_pct) ? el("div", { class: "small muted", text: `The model's figure under ${r.label}'s settings. ${r.label} itself said ${signedPct(sc.stated_expected_pct, 2)}; that figure is not drawn.` }) : "",
         el("span", { class: "muted", text: ` (${money(sc.expected_price)}); its 10-90 range ${signedPct(sc.low_pct[last], 1)} to ${signedPct(sc.high_pct[last], 1)}; confidence ${Math.round(100 * sc.confidence)}%.` })),
       el("p", { class: "small", text: sc.rationale || "(no rationale given)" }),
       sc.risks && sc.risks.length ? el("ul", { class: "plain small" }, sc.risks.map(x => el("li", { text: `Risk: ${x}` }))) : "",

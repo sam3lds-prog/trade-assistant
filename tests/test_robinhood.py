@@ -39,8 +39,9 @@ def rh(request):
 # --- the read-only guard -----------------------------------------------------------
 
 def test_only_the_listed_market_data_tools_may_be_called():
+    # 3.0 adds one plain read, get_option_historicals (an option contract's own daily bars, for the Research chart).
     assert ALLOWED_TOOLS == {"get_equity_quotes", "get_option_chains", "get_option_instruments", "get_option_quotes",
-                             "get_equity_historicals", "get_stock_historicals", "get_earnings_results"}
+                             "get_equity_historicals", "get_stock_historicals", "get_earnings_results", "get_option_historicals"}
     for name in ALLOWED_TOOLS:
         assert is_read_only(name, None, ALLOWED_TOOLS) and is_market_data_tool(name), name
     refused = [
@@ -1162,3 +1163,21 @@ def test_a_listed_contract_with_no_quote_is_still_shown():
         assert analysis.find(blank[0]["symbol"])["mid"] is None
     finally:
         provider.bridge.close()
+
+
+
+def test_an_option_contracts_history_is_a_plain_read_of_its_own_bars(tmp_path):
+    """3.0: get_option_historicals for one contract, found by its id in the chain; nothing else is touched."""
+    standin = Standin("a")
+    bridge = ReadOnlyBridge(lambda: Client(standin.server), ALLOWED_TOOLS, label="Robinhood")
+    try:
+        provider = RobinhoodData(bridge)
+        exp = provider.expirations("AAPL")[1]
+        occ = [c for c in provider.chain("AAPL", exp) if c["option_type"].lower() == "call"][3]["symbol"]
+        frame = provider.option_history(occ, "2026-08-01", "2026-12-31")
+        assert len(frame) > 10 and (frame["close"] > 0).all() and list(frame.columns)[:5] == ["date", "open", "high", "low", "close"]
+        call = [c for c in standin.calls if c[0] == "get_option_historicals"][-1][1]
+        assert call["interval"] == "day" and len(call["instrument_ids"]) == 1
+        assert standin.forbidden_calls == []
+    finally:
+        bridge.close()
