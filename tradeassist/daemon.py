@@ -89,6 +89,8 @@ def run(settings: Any, *, once: bool = False) -> int:
         worker.step()
         return 0
 
+    worker.beat_in_background()
+
     def stop(signum: int, _frame: Any) -> None:
         log.info("Trading daemon stopping (signal %s)", signum)
         worker.stop.set()

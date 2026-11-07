@@ -192,3 +192,25 @@ def test_the_routes(ap):
     st = client.get("/v3/autopilot").json()
     assert not st["gates"]["ok"] and st["record"] == {"days": 0, "result": 0.0}
     assert "off" in client.post("/v3/autopilot/run").json()["skipped"]
+
+
+def test_it_never_sells_shares_you_bought(ap):
+    svc, pilot, _ = ap
+    policy(svc)
+    candidate(svc, stop=10.0, target=90.0)
+    pilot.run()
+    run_jobs(svc)
+    desk = svc.trading
+    mine = desk.create(ProposalIn(symbol="AMZN", side="buy", quantity=2))           # you buy two more yourself
+    desk.decide(desk._ask_approval(mine["id"], notify=False)["id"], True, mine["order_hash"])
+    run_jobs(svc)
+    held = desk.positions("paper")["positions"][0]["quantity"]
+    candidate(svc, stop=29.5, target=90.0)                                             # its stop is now hit
+    with svc.db.tx() as cur:
+        cur.execute("UPDATE trade_proposals SET exit_plan_json = ? WHERE source = 'autopilot'", ('{"stop": 99.0}',))
+    r = pilot.run()
+    sell = svc.trading.get(r["exits"][0]["proposal"])
+    assert held == 5 and sell["terms"]["quantity"] == 3                                 # its three, not your two
+    run_jobs(svc)
+    assert desk.positions("paper")["positions"][0]["quantity"] == 2
+    assert pilot.run()["exits"] == []                                                  # nothing of its own is left

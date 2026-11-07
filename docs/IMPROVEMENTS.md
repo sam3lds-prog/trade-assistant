@@ -1621,3 +1621,26 @@ Robinhood does not publish the order tools' arguments or replies. The live adapt
 schema and was tested against a stand-in that follows Robinhood's own API shapes; it has not placed a real order.
 The first live use should be one share of an inexpensive stock under the smallest limits, watched on the desk.
 Tailscale, ntfy and Telegram were tested with fakes of their HTTP interfaces, not the services themselves.
+
+### 3.0 security review
+
+An independent review of the code that can send orders, done by a separate agent that had not seen the work's
+reasoning. It judged the code against the guarantees above, probing on temporary databases. It confirmed the
+approval binding and single use, the loss-stop exemption for sales, `LIVE_MAX_ORDER`, the read-only bridge's name
+filters, the phone pages' host, CSRF and PIN lockout, atomic job claims, and the unique client order and fill ids.
+It found the defects below, all fixed in phase 7, each with a test. A twelfth (the check before sending counted an
+order's own reservation twice) had been found and fixed just before.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| R1 | A live placement whose answer could not be read was recorded as failed, though the order could be live | High | An unreadable answer is `unknown`, found by its reference | `test_an_unreadable_answer_to_a_placement_is_unknown_and_found` |
+| R2 | One empty order list settled an unknown live order as failed | High | Never-received needs a conclusive answer (the paper broker) or three empty look-ups over at least 15 minutes; until then the capital stays held | `test_a_placement_that_never_arrived_fails_and_frees_its_capital`, `test_an_unknown_order_the_broker_never_received_fails_and_releases_its_capital` |
+| R3 | The kill switch skipped orders in an unknown or sending state | High | It queues a cancel for every unfinished order; the cancel looks an unknown order up first, and reconciling an order found working while the switch is on cancels it | `test_the_kill_switch_reaches_an_order_whose_state_was_not_yet_known` |
+| R4 | A cancel that got no answer was never tried again, and reconciling undid it | High | Cancels are retried, a cancel-requested order stays so while the broker says it is working, and the cancel is asked again | `test_a_cancel_that_gets_no_answer_is_tried_again_and_not_undone_by_reconciling` |
+| R5 | The autopilot's exit could sell shares you bought, and your result counted toward its live promotion | High | It sells and counts only its own shares (its buys' fills less its sales') | `test_it_never_sells_shares_you_bought` |
+| R6 | A reservation from an earlier day, released today, lowered today's new buying | Medium | Only releases of today's reservations count | `test_yesterdays_reservation_released_today_does_not_free_todays_buying` |
+| R7 | Re-approving after a block at submission never sent the order | Medium | One submission per approval | `test_re_approving_after_a_block_at_submission_sends_it` |
+| R8 | Approval links with their tokens were kept in the outbox | Medium | Tokens are derived from a key kept beside the database (owner-only file) and added only as a message is sent | `test_an_approval_link_is_not_kept_in_the_outbox` |
+| R9 | The app could take over from a daemon busy with a long job, mark its submission unknown, and the ledger over-release | Medium | The daemon's heartbeat runs in its own thread; recovery only touches submissions over three minutes old, and the app recovers only while no daemon is alive; a fill never releases more than is reserved | `test_a_fill_never_releases_more_than_was_reserved`, `test_a_submission_cut_off_by_a_crash_is_recovered_as_unknown_never_resent` |
+| R10 | Only the account's last four digits were bound into the order | Medium | The order names the account by its last four digits and a hash of the whole number; the adapter refuses an order written for another | `test_another_account_with_the_same_last_digits_is_another_account`, `test_the_adapter_refuses_an_order_written_for_another_account` |
+| R11 | A cumulative answer then an executions answer could count the same shares twice | Medium | Fills are the part beyond what is recorded, whichever form the answer takes | `test_cumulative_and_execution_answers_never_count_the_same_shares_twice` |

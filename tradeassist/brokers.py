@@ -2,7 +2,8 @@
 
     place(order)   send it; returns {state, broker_order_id, fills, message}
     status(order)  what became of it; same shape. For an order whose submission was never confirmed, a broker
-                   that has no record of its client order id answers state "not_found": it was never placed.
+                   that has no record of its client order id answers state "not_found"; with "conclusive" it is
+                   sure the order was never placed, otherwise the desk asks again before it believes it.
     cancel(order)  ask to cancel; same shape
 
 `order` is the desk's `broker_orders` row as a dict (terms, client_order_id, broker_order_id, created_at, ...). Fills
@@ -93,7 +94,7 @@ class PaperBroker:
     def status(self, order: dict[str, Any]) -> dict[str, Any]:
         if order.get("state") in ("intent", "submitting", "unknown") and not order.get("broker_order_id"):
             # The paper broker places in the same step it records; a crash before that means it was never placed.
-            return {"state": "not_found", "broker_order_id": None, "fills": [], "message": "never reached the paper broker"}
+            return {"state": "not_found", "conclusive": True, "broker_order_id": None, "fills": [], "message": "never reached the paper broker"}
         return self._try_fill(order)
 
     def cancel(self, order: dict[str, Any]) -> dict[str, Any]:

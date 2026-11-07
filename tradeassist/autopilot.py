@@ -68,19 +68,27 @@ class Autopilot:
                                       WHERE l.kind = 'realized' AND l.account_kind = ? AND l.mode = ? AND p.source = 'autopilot'""",
                                    (kind, d.mode))["s"]
             result += float(realized or 0)
-            mine = self._own_positions(kind)
+            mine = self._own_shares(kind)
             for pos in d.positions(kind)["positions"]:
-                if pos["key"] in mine:
-                    if pos.get("unrealized") is None:
+                own = min(mine.get(pos["key"], 0.0), pos["quantity"])
+                if own > 0:
+                    if pos.get("mark") is None:
                         measured = False
                     else:
-                        result += pos["unrealized"]
+                        result += (pos["mark"] - pos["avg_cost"]) * own * pos["multiplier"]      # its shares only, not yours
         return {"days": int(days or 0), "result": round(result, 2) if measured else None}
 
-    def _own_positions(self, account_kind: str) -> set[str]:
-        rows = self.db.query("""SELECT DISTINCT symbol FROM trade_proposals WHERE source = 'autopilot' AND account_kind = ? AND mode = ?
-                                AND side = 'buy' AND status IN ('filled', 'partially_filled')""", (account_kind, self.desk.mode))
-        return {r["symbol"] for r in rows}
+    def _own_shares(self, account_kind: str) -> dict[str, float]:
+        """The shares the autopilot itself holds in each stock: what its own buys filled, less what its own sales filled.
+        Shares you bought in the same stock are never its to sell or to count."""
+        rows = self.db.query("""SELECT p.symbol, p.side, COALESCE(SUM(f.quantity), 0) AS q FROM trade_proposals p
+                                JOIN broker_orders o ON o.proposal_id = p.id JOIN broker_fills f ON f.order_id = o.id
+                                WHERE p.source = 'autopilot' AND p.account_kind = ? AND p.mode = ? GROUP BY p.symbol, p.side""",
+                             (account_kind, self.desk.mode))
+        out: dict[str, float] = {}
+        for r in rows:
+            out[r["symbol"]] = out.get(r["symbol"], 0.0) + (float(r["q"]) if r["side"] == "buy" else -float(r["q"]))
+        return {k: v for k, v in out.items() if v > 1e-9}
 
     def gates(self) -> dict[str, Any]:
         d = self.desk
@@ -209,13 +217,21 @@ class Autopilot:
         d = self.desk
         out = []
         held = {p["symbol"]: p for p in d.positions(pol.account_kind)["positions"]}
+        mine = self._own_shares(pol.account_kind)
+        # The plan of its latest buy in each stock it still holds shares of.
         rows = self.db.query("""SELECT * FROM trade_proposals WHERE source = 'autopilot' AND side = 'buy' AND account_kind = ? AND mode = ?
-                                AND status IN ('filled', 'partially_filled') ORDER BY created_at""", (pol.account_kind, d.mode))
-        open_sells = {p["symbol"] for p in d.book(pol.account_kind)["open_proposals"] if p["side"] == "sell"}
+                                AND status IN ('filled', 'partially_filled', 'cancelled', 'expired') ORDER BY created_at DESC""", (pol.account_kind, d.mode))
+        latest = {}
         for r in rows:
-            sym = r["symbol"]
+            if r["symbol"] in mine and r["symbol"] not in latest:
+                latest[r["symbol"]] = r
+        open_sells = {p["symbol"] for p in d.book(pol.account_kind)["open_proposals"] if p["side"] == "sell"}
+        for sym, r in latest.items():
             pos = held.get(sym)
             if not pos or sym in open_sells:
+                continue
+            own = min(mine[sym], pos["quantity"])               # never more than it bought itself
+            if own <= 0:
                 continue
             plan = json.loads(r["exit_plan_json"] or "{}")
             mark = pos.get("mark")
@@ -229,7 +245,7 @@ class Autopilot:
             if not why:
                 continue
             try:
-                p = d.create(ProposalIn(symbol=sym, side="sell", quantity=pos["quantity"], thesis=f"Autopilot exit: {why}", source="autopilot"),
+                p = d.create(ProposalIn(symbol=sym, side="sell", quantity=own, thesis=f"Autopilot exit: {why}", source="autopilot"),
                              actor="autopilot")
             except RequestError as exc:
                 out.append({"symbol": sym, "why": str(exc)})

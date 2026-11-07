@@ -4,7 +4,11 @@ reconciliation and never sent again; a ceiling no policy can raise; the kill swi
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta
+
 import pytest
+import time_machine
 from mcp import Client, types
 
 from tests.robinhood_trading_standin import ACCOUNT, TradingStandin
@@ -13,6 +17,7 @@ from tradeassist.api import create_app
 from tradeassist.brokers import BrokerError
 from tradeassist.config import Settings
 from tradeassist.db import Database
+from tradeassist.optionmath import NY
 from tradeassist.providers.demo import DemoData
 from tradeassist.providers.mcp_bridge import ReadOnlyBridge, acceptable_tool_name
 from tradeassist.providers.robinhood import ALLOWED_TOOLS
@@ -121,7 +126,7 @@ def test_live_orders_need_real_prices(live, monkeypatch):
 def test_a_live_order_is_reviewed_then_placed_once_with_its_reference_then_reconciled(live):
     svc, desk, standin = live
     p = approved(desk)
-    assert p["terms"]["account_ref"] == f"…{ACCOUNT[-4:]}" and p["account_kind"] == "live"
+    assert p["terms"]["account_ref"].startswith(f"…{ACCOUNT[-4:]}-") and p["account_kind"] == "live"
     run(desk)
     f = desk.get(p["id"])
     names = [c[0] for c in standin.calls]
@@ -174,6 +179,10 @@ def test_a_placement_that_never_arrived_fails_and_frees_its_capital(live):
     standin.place_mode = "hang"
     p = approved(desk)
     run(desk)
+    assert desk.get(p["id"])["status"] == "unknown" and desk.get(p["id"])["reserved"] > 0
+    with time_machine.travel(datetime.now(NY) + timedelta(minutes=16), tick=True):
+        for _ in range(3):
+            desk.reconcile()
     f = desk.get(p["id"])
     assert f["status"] == "failed" and standin.orders == {} and f["reserved"] == pytest.approx(0)
     assert len(placed(standin)) == 1
@@ -228,3 +237,57 @@ def test_the_status_says_real_orders_can_be_sent_only_when_they_can(live):
     desk.check_live(0)
     P.save(svc.db, {**P.current(svc.db).model_dump(), "mode": "paper", "account_kind": "paper"}, live_allowed=True)
     assert svc.status()["places_orders"] is False
+
+
+# --- from the independent review of the order path (3.0 phase 7) ------------------------------------------------------
+
+def test_an_unreadable_answer_to_a_placement_is_unknown_and_found(live, monkeypatch):
+    _, desk, standin = live
+    ex = desk.brokers["live"]
+    real = ex.bridge.call
+
+    def garble(name, arguments=None):
+        out = real(name, arguments)
+        return {"data": "Order submitted"} if name == "place_equity_order" else out
+    monkeypatch.setattr(ex.bridge, "call", garble)
+    p = approved(desk)
+    run(desk)
+    f = desk.get(p["id"])
+    assert "unknown" in [e["to_status"] for e in f["events"]] and f["status"] == "submitted"     # found by its reference
+    assert len(placed(standin)) == 1 and f["reserved"] > 0
+
+
+def test_cumulative_and_execution_answers_never_count_the_same_shares_twice(live):
+    _, desk, standin = live
+    p = approved(desk, qty=2)
+    run(desk)
+    oid = desk.get(p["id"])["orders"][0]["broker_order_id"]
+    standin.fill(oid, quantity=1, price=28.9)
+    o = standin.orders[oid]
+    executions = o["executions"]
+    o["executions"] = []                               # this answer gives only the cumulative figures
+    desk.reconcile()
+    o["executions"] = executions                       # the next lists the executions
+    desk.reconcile()
+    standin.fill(oid, quantity=1, price=28.8)
+    desk.reconcile()
+    g = desk.get(p["id"])
+    assert sum(f["quantity"] for f in g["orders"][0]["fills"]) == 2 and g["status"] == "filled"
+    assert desk.positions("live")["positions"][0]["quantity"] == 2
+
+
+def test_another_account_with_the_same_last_digits_is_another_account():
+    from tradeassist.robinhood_exec import account_ref
+    a, b = account_ref("5QR99887766"), account_ref("7XY00117766")
+    assert a.startswith("…7766-") and b.startswith("…7766-") and a != b
+
+
+def test_the_adapter_refuses_an_order_written_for_another_account(live):
+    _, desk, standin = live
+    p = approved(desk)
+    with desk.db.tx() as cur:
+        terms = {**p["terms"], "account_ref": "…7766-0000000000"}
+        cur.execute("UPDATE broker_orders SET terms_json = ? WHERE proposal_id = ?", (json.dumps(terms), p["id"]))
+    with pytest.raises(BrokerError, match="different account"):
+        desk.brokers["live"].place({"terms": terms, "client_order_id": "x", "created_at": "2026-10-22T14:30:00+00:00"})
+    assert placed(standin) == []
