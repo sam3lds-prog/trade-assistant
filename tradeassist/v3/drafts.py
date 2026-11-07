@@ -219,8 +219,6 @@ def build(svc: Any, req: DraftIn) -> dict[str, Any]:
     # The exit: the opportunity's levels when it came from one, otherwise the forecast range's edge at the horizon.
     opp = None
     d3 = getattr(svc, "discover3", None)
-    if st.get("opportunity_id") is None:
-        st["opportunity_id"] = None
     row = svc.db.one("SELECT opportunity_id FROM studies WHERE id = ?", (st["id"],))
     opp_id = row["opportunity_id"] if row else None
     if opp_id and d3 is not None:

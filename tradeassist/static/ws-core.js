@@ -705,7 +705,7 @@ const WS = (() => {
     if (WS.missingHelp) { const gaps = WS.missingHelp(); if (gaps.length) console.error(`Widgets without help: ${gaps.join(", ")}`); }
     // A change made in the last moment before the page closes is still saved.
     window.addEventListener("pagehide", () => {
-      if (!saveTimer) return;
+      if (!saveTimer && !saveAgain) return;                  // nothing waiting (a change behind a save in flight counts)
       try { fetch("/v3/workspaces/session", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify(sessionBody()) }); }
       catch (e) { /* the page is going */ }
     });
