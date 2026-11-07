@@ -18,6 +18,24 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 3.0.0.dev4 — Trade Assistant 3.0, phase 4: Discover
+
+One opportunity list instead of five. See [V3.md](V3.md#phase-4-discover).
+
+- **Each trade appears once.** When the Morning plan, Trade ideas, Live news, Reversals and the Scanner flag the same
+  stock the same way over the same horizon, the **Opportunities** widget shows one row that lists every scan that
+  found it.
+- **One score that means the same whoever found it**: the trade's record after costs, the setup, a catalyst,
+  liquidity, freshness, less the spread and less a conflict (the opposite trade also flagged). Pick a row to see
+  each part, with the points it adds.
+- **Autopilot eligibility is shown, with reasons.** Only a trade with a validated record (30 or more past cases,
+  positive after costs), no conflict, enough volume and real prices is eligible. Nothing trades automatically yet.
+- **Study it** runs a Research study of the opportunity and links the two.
+- **Budget split** divides a budget across the top opportunities on correlated price paths, after taking off what
+  open orders hold. With no edge it keeps the cash.
+
+No migration. Nothing places an order.
+
 ## 3.0.0.dev3 — Trade Assistant 3.0, phase 3: Research
 
 One study of a stock instead of six screens. See [V3.md](V3.md#phase-3-research).

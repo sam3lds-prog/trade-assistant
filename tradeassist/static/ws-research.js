@@ -137,7 +137,17 @@
 
     async function loadFor(c) {
       if (c.study && c.study !== shown) {
-        try { const s = await api(`/v3/studies/${enc(c.study)}`); if (s.symbol === c.symbol && s.study) { render(s); return; } } catch (e) { /* gone */ }
+        try {
+          const s = await api(`/v3/studies/${enc(c.study)}`);
+          if (s.symbol === c.symbol && s.study) { render(s); return; }
+          if (s.symbol === c.symbol && s.status === "running") {      // started elsewhere (Discover's "Study it"): follow it
+            horizon.value = String(s.horizon_days); thesis.value = s.thesis;
+            run.disabled = true; status.textContent = `Studying ${s.symbol}…`; shown = s.id;
+            out.replaceChildren(loading(`Studying ${s.symbol}: the trend, past situations, peers, the options market and the forecast…`));
+            poll(s.id);
+            return;
+          }
+        } catch (e) { /* gone */ }
       }
       if (!c.study) {
         out.replaceChildren(WS.empty(c.symbol ? `Run a study of ${c.symbol}: the trend, its past situations and its peers', the options market, one forecast and every strategy compared.` : "Pick a stock first."));

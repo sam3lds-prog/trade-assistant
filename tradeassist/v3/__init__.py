@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-AREAS: tuple[str, ...] = ("workspaces", "research")
+AREAS: tuple[str, ...] = ("workspaces", "research", "discover")
 
 
 def install(svc: Any) -> None:

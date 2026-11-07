@@ -217,3 +217,34 @@ def test_a_study_runs_draws_its_forecast_and_sends_a_contract_to_the_ticket_and_
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] :text('Strategies under the same scenarios')", timeout=30000)
         assert page.evaluate("WS.ctx.blue.study") == study_id
     assert errors == []
+
+
+def test_discover_ranks_once_explains_the_score_splits_a_budget_and_studies_an_opportunity(tmp_path):
+    """3.0 phase 4: the one feed, a picked opportunity's parts and autopilot reasons, the budget split across the
+    feed, and "Study it", which Research then shows."""
+    with demo_page(tmp_path) as (page, errors):
+        page.goto(page.root + "#discover")
+        feed = widget(page, "feed")
+        feed.wait_for(timeout=30000)
+        feed.locator("button:text-is('Refresh the scans')").click()
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='feed'] tbody tr", timeout=90000)
+        rows = feed.locator("tbody tr")
+        keys = page.eval_on_selector_all("section.ws-tabset:not(.hidden) .ws-widget[data-type='feed'] tbody tr",
+                                         "trs => trs.map(t => t.children[1].textContent + t.children[2].textContent + t.children[3].textContent)")
+        assert len(keys) == len(set(keys))                                   # each stock, direction and horizon once
+        rows.first.click()
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='feed'] :text('How the score is made')", timeout=20000)
+        text = feed.inner_text()
+        for words in ("Historical support", "Setup quality", "Liquidity", "Conflict", "Not eligible: demo prices are made up", "What found it"):
+            assert words in text, words
+        opp = page.evaluate("WS.ctx.blue.opportunity")
+        assert opp["id"].startswith("opp_") and page.evaluate("WS.ctx.blue.symbol") == opp["symbol"]
+        alloc = widget(page, "allocator")
+        alloc.locator("button:text-is('Split the budget')").click()
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='allocator'] :text('most it can lose')", timeout=60000)
+        feed.locator("button:text-is('Study it')").click()
+        page.wait_for_function("WS.ctx.blue.study && WS.ctx.blue.study.startsWith('study_')", timeout=20000)
+        page.click(".ws-tab-btn[data-workspace='research']")
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] :text('Strategies under the same scenarios')", timeout=90000)
+        assert opp["symbol"] in widget(page, "study").locator("h3").first.inner_text()
+    assert errors == []

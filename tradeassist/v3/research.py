@@ -117,6 +117,9 @@ class Research:
             t = threading.Thread(target=self._run_safely, args=(study_id, req), name=f"study-{req.symbol}", daemon=True)
             self._running[study_id] = t
             t.start()
+        d3 = getattr(self.svc, "discover3", None)
+        if req.opportunity_id and d3 is not None:
+            d3.link_study(req.opportunity_id, study_id, req.symbol)
         self.svc.bus.publish("study.started", study_id, symbol=req.symbol, horizon_days=req.horizon_days)
         return {"id": study_id, "status": "running", "symbol": req.symbol}
 
