@@ -204,12 +204,17 @@
     const FIELDS = [["trial_capital", "Capital ($)"], ["max_order", "Largest order ($)"], ["max_daily_new_buys", "New buying a day ($)"],
       ["max_daily_loss", "Daily loss stop ($)"], ["max_open_positions", "Positions at most"], ["max_spread_bps", "Widest spread (bp)"],
       ["max_quote_age_seconds", "Oldest quote (s)"], ["max_limit_through_bps", "Limit past the quote (bp)"], ["approval_minutes", "Minutes to approve"],
-      ["proposal_minutes", "Minutes a proposal lives"]];
+      ["proposal_minutes", "Minutes a proposal lives"], ["autopilot_max_orders_per_day", "Autopilot buys a day"],
+      ["autopilot_min_score", "Autopilot's lowest score"], ["autopilot_shadow_days", "Practice days before live"]];
     async function load() {
       let d;
       try { d = await api("/v3/desk/policy"); } catch (e) { box.replaceChildren(el("p", { class: "error", text: e.message })); return; }
       const p = d.policy;
       const mode = el("select", { "aria-label": "Mode" }, Object.entries(d.modes).map(([k, t]) => el("option", { value: k, selected: k === p.mode }, t)));
+      const account = el("select", { "aria-label": "Account" }, [["paper", "Paper"], ["shadow", "Shadow (the autopilot's own paper book)"], ["live", "Live (Robinhood)"]]
+        .map(([k, t]) => el("option", { value: k, selected: k === p.account_kind }, t)));
+      const sync = () => { if (mode.value === "paper") account.value = "paper"; if (mode.value === "approval_required") account.value = "live"; account.disabled = ["paper", "approval_required"].includes(mode.value); };
+      mode.addEventListener("change", sync); sync();
       const inputs = Object.fromEntries(FIELDS.map(([k]) => [k, el("input", { type: "number", step: "any", value: String(p[k]), "aria-label": k })]));
       const ws = el("input", { type: "text", value: p.window_start, size: "5", "aria-label": "From" }), we = el("input", { type: "text", value: p.window_end, size: "5", "aria-label": "Until" });
       const allow = el("input", { type: "text", value: p.symbols_allowed.join(", "), placeholder: "any stock", "aria-label": "Only these stocks" });
@@ -217,7 +222,7 @@
       const save = el("button", { class: "ws-btn primary", type: "button" }, "Save the policy");
       const note = el("p", { class: "small" });
       save.addEventListener("click", async () => {
-        const body = { ...p, mode: mode.value, account_kind: mode.value === "approval_required" ? "live" : mode.value === "paper" ? "paper" : p.account_kind,
+        const body = { ...p, mode: mode.value, account_kind: account.value,
           window_start: ws.value.trim(), window_end: we.value.trim(),
           symbols_allowed: allow.value.split(",").map(s => s.trim()).filter(Boolean), symbols_blocked: block.value.split(",").map(s => s.trim()).filter(Boolean) };
         for (const [k] of FIELDS) body[k] = Number(inputs[k].value);
@@ -229,7 +234,7 @@
           WS.toast("Policy saved.");
         } catch (e) { note.replaceChildren(el("span", { class: "error", text: e.message })); }
       });
-      box.replaceChildren(field("Mode", mode),
+      box.replaceChildren(el("div", { class: "ws-row" }, field("Mode", mode), field("Account", account)),
         el("div", { class: "ws-policy-grid" }, FIELDS.map(([k, t]) => field(t, inputs[k]))),
         el("div", { class: "ws-row" }, field("From (New York)", ws), field("Until", we)),
         el("div", { class: "ws-row" }, el("label", { class: "field ws-grow" }, el("span", { text: "Only these stocks" }), allow)),
@@ -270,6 +275,35 @@
     return { refresh: load };
   } });
 
+  /* ---------- the capped autopilot ---------- */
+  WS.register("autopilot", { title: "Autopilot", category: "Trading", size: { w: 4, h: 10 }, symbolBadge: false, create(w) {
+    const box = el("div");
+    w.body.append(box);
+    async function load() {
+      let d;
+      try { d = await api("/v3/autopilot"); } catch (e) { box.replaceChildren(el("p", { class: "error", text: e.message })); return; }
+      const g = d.gates, on = g.checks.find(c => c.key === "mode").status === "pass";
+      const note = el("p", { class: "small" });
+      const runNow = el("button", { class: "ws-btn", type: "button", disabled: !on }, "Run it once now");
+      runNow.addEventListener("click", async () => { runNow.disabled = true; const r = await act("/v3/autopilot/run", {}, note); if (r) { note.textContent = r.skipped && !r.entries ? r.skipped : `${r.entries.length} bought, ${r.exits.length} sold, ${r.skipped.length} passed over.`; load(); } runNow.disabled = false; });
+      const last = d.last && d.last.at ? d.last : null;
+      box.replaceChildren(
+        el("p", {}, statusTag(on ? (g.ok ? "pass" : "warn") : "", on ? (g.ok ? `On, ${g.account_kind} account` : "On, held back by a gate") : "Off")),
+        el("p", { class: "small muted", text: on ? `At most ${d.limits.max_orders_per_day} buys a day, score ${d.limits.min_score} or more, ${d.limits.horizons.join(" and ")} trades, only autopilot-eligible opportunities.`
+          : "It acts only when the trading policy's mode is Capped autopilot. In the shadow account its orders fill on paper in a book of their own." }),
+        el("ul", { class: "plain small ws-checks-list" }, g.checks.map(c => el("li", { class: c.status === "pass" ? "pos-text" : "neg-text" }, el("strong", { text: `${c.label}: ` }), c.text))),
+        el("p", { class: "small", text: `Practice record: ${d.record.days} day${d.record.days === 1 ? "" : "s"} decided in the shadow or paper account, ${d.record.result === null ? "result not measured" : `${signedMoney(d.record.result)} in all`}. Live needs ${d.limits.shadow_days} days and AUTOPILOT_LIVE=1.` }),
+        last ? el("div", {}, el("h4", { text: `Last run ${new Date(last.at).toLocaleTimeString()}` }),
+          el("ul", { class: "plain small" }, [...last.entries.map(x => el("li", { text: `Bought: ${x.symbol} ×${x.quantity || ""} (${x.status})` })),
+            ...last.exits.map(x => el("li", { text: `Sold: ${x.symbol}: ${x.why}` })),
+            ...last.skipped.slice(0, 6).map(x => el("li", { class: "muted", text: `${x.symbol ? `${x.symbol}: ` : ""}${x.why}` }))])) : "",
+        el("div", { class: "ws-row" }, runNow), note);
+    }
+    load();
+    WS.onEvent("autopilot.", load); WS.onEvent("desk.", load);
+    return { refresh: load };
+  } });
+
   /* ---------- the Trading Desk's standard layout, 3.0 ---------- */
   WS.DEFAULT_LAYOUTS.desk = [
     { type: "approvals", x: 0, y: 0, w: 4, h: 9, group: "blue" },
@@ -278,6 +312,7 @@
     { type: "deskpositions", x: 4, y: 13, w: 8, h: 6, group: "blue" },
     { type: "activity", x: 4, y: 19, w: 4, h: 7, group: "none" },
     { type: "policy", x: 8, y: 19, w: 4, h: 13, group: "none" },
-    { type: "classic:paper", x: 0, y: 32, w: 12, h: 12, group: "none" },
+    { type: "autopilot", x: 0, y: 23, w: 4, h: 11, group: "none" },
+    { type: "classic:paper", x: 0, y: 34, w: 12, h: 12, group: "none" },
   ];
 })();

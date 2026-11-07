@@ -288,13 +288,20 @@ def test_an_unknown_order_the_broker_never_received_fails_and_releases_its_capit
     approve(desk, p)
     run_jobs(desk)
     f = desk.get(p["id"])
+    assert f["status"] == "unknown" and f["reserved"] > 0          # one empty answer is not proof: it may not be listed yet
+    for _ in range(3):
+        desk.reconcile()
+    assert desk.get(p["id"])["status"] == "unknown"                # nor are three in a minute
+    with time_machine.travel(datetime.now(NY) + timedelta(minutes=16), tick=True):
+        desk.reconcile()
+    f = desk.get(p["id"])
     assert f["status"] == "failed" and f["reserved"] == pytest.approx(0) and len(fake.placed) == 1
     assert desk.db.one("SELECT COUNT(*) AS n FROM notifications WHERE kind = 'order.unknown'")["n"] == 1
 
 
 def test_a_submission_cut_off_by_a_crash_is_recovered_as_unknown_never_resent(app):
     _, _, desk = app
-    fake = FakeBroker(place=filled_at(29.0), status=lambda o: {"state": "not_found", "broker_order_id": None, "fills": []})
+    fake = FakeBroker(place=filled_at(29.0), status=lambda o: {"state": "not_found", "conclusive": True, "broker_order_id": None, "fills": []})
     desk.brokers["paper"] = fake
     p = buy(desk)
     approve(desk, p)
@@ -303,9 +310,11 @@ def test_a_submission_cut_off_by_a_crash_is_recovered_as_unknown_never_resent(ap
                        VALUES ('ord_x', ?, 'demo', 'paper', 'fake', 'ta-x', 'submitting', '2026-10-22T14:00:00+00:00', '2026-10-22T14:00:00+00:00', ?)""",
                     (p["id"], json.dumps(p["terms"])))
         desk._move(cur, p["id"], "submitting", "desk", "sending")
-    assert desk.recover()["recovered"] == 1
-    assert desk.get(p["id"])["status"] == "unknown"
-    run_jobs(desk)                       # the queued submit job sees the state and does not send; reconcile settles it
+    assert desk.recover()["recovered"] == 0                     # under three minutes: the other process may still be sending it
+    with time_machine.travel(datetime.now(NY) + timedelta(minutes=4), tick=True):
+        assert desk.recover()["recovered"] == 1
+        assert desk.get(p["id"])["status"] == "unknown"
+        run_jobs(desk)                   # the queued submit job sees the state and does not send; reconcile settles it
     assert fake.placed == [] and desk.get(p["id"])["status"] == "failed"
 
 
@@ -376,3 +385,111 @@ def test_the_routes(app):
     assert c.post("/v3/proposals", json={"symbol": "AMZN", "quantity": 1, "source": "a rumour"}).status_code == 400
     assert c.post("/v3/notifications/test").status_code == 400          # no channel set up
     assert c.post("/v3/desk/kill", json={"on": True}).json()["on"] is True
+
+
+def test_an_approved_order_that_uses_the_last_of_the_capital_is_still_sent(app):
+    """Its own reservation is in the book when it is checked again before sending; it must not count twice."""
+    _, svc, desk = app
+    ask = svc.market.quote("AMZN")["ask"]
+    limits(desk, trial_capital=round(ask * 2 + 0.01, 2), max_order=round(ask * 2 + 0.01, 2), max_daily_new_buys=round(ask * 2 + 0.01, 2))
+    p = buy(desk, qty=2)
+    assert approve(desk, p)["status"] == "authorized"
+    run_jobs(desk)
+    assert desk.get(p["id"])["status"] == "filled"
+
+
+# --- from the independent review of the order path (3.0 phase 7) ------------------------------------------------------
+
+def test_the_kill_switch_reaches_an_order_whose_state_was_not_yet_known(app):
+    _, _, desk = app
+    working = {"state": "submitted", "broker_order_id": "B-1", "fills": []}
+    fake = FakeBroker(place=BrokerTimeout("no answer"), status=lambda o: dict(working))
+    desk.brokers["paper"] = fake
+    p = buy(desk)
+    approve(desk, p)
+    desk.make_worker("t", None).run_once()               # the submit: no answer, so unknown
+    assert desk.get(p["id"])["status"] == "unknown"
+    desk.set_kill_switch(True, "stop")
+    run_jobs(desk)                                        # the look-up finds it working; the cancel follows
+    assert desk.get(p["id"])["status"] == "cancelled"
+
+
+def test_a_cancel_that_gets_no_answer_is_tried_again_and_not_undone_by_reconciling(app):
+    _, svc, desk = app
+    ask = svc.market.quote("AMZN")["ask"]
+    p = desk.create(ProposalIn(symbol="AMZN", side="buy", quantity=1, limit_price=round(ask * 0.9, 2)))
+    approve(desk, p)
+    run_jobs(desk)
+    paper = desk.brokers["paper"]
+    tries = {"n": 0}
+
+    class Flaky:
+        name = "paper"
+
+        def place(self, order):
+            return paper.place(order)
+
+        def status(self, order):
+            return paper.status({**order, "state": "submitted"})
+
+        def cancel(self, order):
+            tries["n"] += 1
+            if tries["n"] == 1:
+                raise BrokerTimeout("no answer to the cancel")
+            return paper.cancel(order)
+    desk.brokers["paper"] = Flaky()
+    desk.cancel(p["id"])
+    run_jobs(desk)
+    assert desk.get(p["id"])["status"] == "cancel_requested"
+    desk.reconcile()                                      # the broker still says working: stays cancel_requested
+    assert desk.get(p["id"])["status"] == "cancel_requested"
+    with time_machine.travel(datetime.now(NY) + timedelta(minutes=2), tick=True):
+        run_jobs(desk)
+    assert desk.get(p["id"])["status"] == "cancelled" and tries["n"] >= 2 and desk.get(p["id"])["reserved"] == pytest.approx(0)
+
+
+def test_yesterdays_reservation_released_today_does_not_free_todays_buying(app):
+    _, _, desk = app
+    p = buy(desk)
+    approve(desk, p)                                     # reserved today, then make it yesterday's
+    with desk.db.tx() as cur:
+        cur.execute("UPDATE budget_ledger SET at = '2026-10-21T15:00:00+00:00' WHERE kind = 'reserve'")
+    desk.cancel(p["id"])                                 # released today, as unfilled
+    assert desk.book()["today_new_buys"] == pytest.approx(0)
+
+
+def test_re_approving_after_a_block_at_submission_sends_it(app):
+    _, _, desk = app
+    p = buy(desk)
+    approve(desk, p)
+    limits(desk, mode="disabled")
+    run_jobs(desk)
+    assert desk.get(p["id"])["status"] == "blocked"
+    limits(desk, mode="paper")
+    again = desk.recheck(p["id"])
+    assert approve(desk, again)["status"] == "authorized"
+    run_jobs(desk)
+    assert desk.get(p["id"])["status"] == "filled"
+
+
+def test_a_fill_never_releases_more_than_was_reserved(app):
+    _, _, desk = app
+    p = buy(desk)
+    approve(desk, p)
+    run_jobs(desk)
+    order = desk._order_dict(desk.db.one("SELECT * FROM broker_orders WHERE proposal_id = ?", (p["id"],)))
+    extra = {"state": "filled", "fills": [*order["fills"], {"at": datetime.now(NY).isoformat(), "quantity": 1, "price": 28.0, "fees": 0, "external_id": "late"}]}
+    desk._apply(order, extra)
+    assert desk.get(p["id"])["reserved"] == pytest.approx(0) and desk.book()["reserved"] >= 0
+
+
+def test_an_approval_link_is_not_kept_in_the_outbox(app):
+    _, svc, desk = app
+    import dataclasses
+    svc.settings = dataclasses.replace(svc.settings, remote_approvals=True, remote_base_url="http://mac.ts.net:8765")
+    p = buy(desk)
+    asked = desk._ask_approval(p["id"])
+    row = desk.db.one("SELECT link FROM notifications WHERE kind = 'proposal.approval' ORDER BY id DESC")
+    assert row["link"].endswith(f"/remote/a/{asked['id']}") and asked["token"] not in row["link"]
+    assert desk.notifier._link(dict(row)) == asked["link"]                     # the token is added as it is sent
+    assert not any(asked["token"] in str(tuple(r)) for r in desk.db.query("SELECT * FROM notifications"))

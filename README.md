@@ -5,9 +5,33 @@ the trade against a list of known ways option buyers lose money, tests chart
 patterns on real history before you rely on them, and keeps a journal so you can
 see whether any of it is working.
 
-It is advisory only. There is no code in it that places an order: you enter trades
-in Robinhood yourself. It is not financial advice, and passing every check does not
+Up to version 2 it was advisory only: you entered trades in Robinhood yourself. **Version 3**
+adds a Trading Desk that can send orders you approve, to a paper broker by default; real orders
+go to Robinhood only if you switch live execution on in `.env` and choose it in the trading
+policy (see "Version 3" below). It is not financial advice, and passing every check does not
 make a trade safe. Buying an option always puts the whole premium at risk.
+
+## Version 3: the workstation
+
+3.0 turns the screens into one workstation of four workspaces built from linked, movable
+widgets: **Discover** (one ranked list of opportunities, each found once, with the parts of its
+score and a budget split), **Research** (one study of a stock: its past situations and its
+peers', one calibrated forecast, the option's own price history, every strategy compared after
+costs), **Trading Desk** (proposals, approvals, a fail-closed risk engine, the kill switch, the
+autopilot) and **Portfolio**. The 2.x screens stay under **Classic screens** (and at `/classic`).
+
+| What | Default | How to change it |
+|---|---|---|
+| Where approved orders go | The paper broker (simulated fills against the quote) | The Trading policy widget; live needs phase 6's settings |
+| Trading limits | $500 capital, $50 an order, $100 of new buying a day, $25 daily loss stop, 3 positions, long shares, limit orders | The Trading policy widget (every change is kept) |
+| Background work | Runs in the app while it is open | `./setup_daemon.sh` keeps the trading daemon running (launchd) |
+| Notifications | Email if SMTP is set | `NTFY_TOPIC`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` |
+| Approving from a phone | Off | `REMOTE_APPROVALS=1`, a PIN and your Tailscale address in `.env` |
+| Live orders at Robinhood | Off | `ROBINHOOD_EXECUTION=1` and `ROBINHOOD_EXECUTION_ACCOUNT`, then the policy; `LIVE_MAX_ORDER` caps each order |
+| The autopilot | Off | Policy mode *Capped autopilot*, in the shadow or paper account first; live also needs `AUTOPILOT_LIVE=1` and its practice record |
+
+The design and the evidence for each phase are in `docs/V3.md`; what changed for you is in
+`docs/RELEASE_NOTES.md`.
 
 Version 2 adds position intelligence: stock you are long or short and the calls and puts
 you hold, in one place with correct accounting; a trend engine that shows its evidence;
@@ -247,6 +271,11 @@ What to put in `.env`:
 | `RTPR_API_KEY` | Optional (rtpr.io; the paid plan, about $139 a month, streams press releases within about a second, and the free plan is five minutes late). The fastest source for Live news. In RTPR's dashboard, create the "All articles" rule: the stream sends what your rules match. Never sent anywhere but rtpr.io, and never logged. |
 | `ANTHROPIC_API_KEY` | Optional. Lets Claude write market and stock briefs with web sources, read headline tone, and read trade descriptions. Billed by Anthropic to that API account; capped by `AI_DAILY_REQUESTS`. Never sent to the browser or logged. |
 | `SMTP_USER`, `SMTP_PASSWORD` | Optional. The 7:00 morning email and trigger alerts. With Gmail, an app password from myaccount.google.com/apppasswords (2-Step Verification must be on). Any SMTP provider works through `SMTP_HOST`/`SMTP_PORT`; `EMAIL_TO` if the destination differs. The password never leaves `.env` except to the verified mail server. |
+
+To keep the Trading Desk working while the browser is closed (sending approved orders, checking
+them with the broker, notifications, phone approvals), run `./setup_daemon.sh` once; it starts
+the trading daemon at login and restarts it if it stops (`./setup_daemon.sh --remove` takes it
+away). Without it the app does that work itself while it is open.
 
 With no token the app runs on made-up demo data so you can learn the screens.
 Demo data is stored in a separate database file and never mixes with real history.

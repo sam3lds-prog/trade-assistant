@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -68,8 +69,18 @@ class Notifier:
                 out = out.replace(secret, "[secret]")
         return out[:300]
 
+    def _link(self, n: dict[str, Any]) -> str | None:
+        """An approval link gets its one-time token only here, as it is sent; the outbox keeps the link without it."""
+        link = n.get("link")
+        m = re.search(r"/remote/a/(appr_[A-Za-z0-9]+)$", link or "")
+        if m:
+            from .v3.trading import approval_token
+            link = f"{link}?t={approval_token(self.settings, m.group(1))}"
+        return link
+
     def _send(self, channel: str, n: dict[str, Any]) -> None:
         s = self.settings
+        n = {**n, "link": self._link(n)}
         text = n["body"] + (f"\n\n{n['link']}" if n.get("link") else "")
         if channel == "email":
             mailer.send(s, f"Trade Assistant: {n['subject']}", text)

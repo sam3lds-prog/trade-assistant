@@ -308,7 +308,7 @@
   WS.register("activity", { title: "Activity", category: "Trading", size: { w: 4, h: 7 }, symbolBadge: false, create(w) {
     const list = el("ul", { class: "ws-activity" });
     const words = { "proposal.": "Proposal", "desk.": "Trading Desk", "daemon.": "Daemon", "study.": "Research", "opportunity.": "Discover",
-      "workspace.": "Workspace", "notification.": "Notification", "order.": "Order", "policy.": "Policy" };
+      "workspace.": "Workspace", "notification.": "Notification", "order.": "Order", "policy.": "Policy", "autopilot.": "Autopilot" };
     w.body.append(list, el("p", { class: "small muted", text: "What the app and its background work change, as it happens." }));
     function add(ev) {
       const area = Object.entries(words).find(([p]) => ev.topic.startsWith(p));

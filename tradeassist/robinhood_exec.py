@@ -28,6 +28,7 @@ received). A review the server answers with an error stops the order before it i
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -59,6 +60,12 @@ STATE_MAP = {"queued": "submitted", "unconfirmed": "submitted", "confirmed": "su
 
 def mask(account: str) -> str:
     return f"…{account[-4:]}" if account else ""
+
+
+def account_ref(account: str) -> str:
+    """How an order names its account: the last four digits to read, and a hash of the whole number so that another
+    account ending in the same digits is a different account (an approval for one never sends to the other)."""
+    return f"{mask(account)}-{hashlib.sha256(account.strip().encode()).hexdigest()[:10]}" if account else ""
 
 
 def ref_id(client_order_id: str) -> str:
@@ -230,20 +237,24 @@ class RobinhoodExecution:
         raw = str(o.get("state") or o.get("status") or "").lower()
         state = STATE_MAP.get(raw, "submitted" if raw else "submitted")
         boid = str(o.get("id") or o.get("order_id") or order.get("broker_order_id") or "") or None
-        fills = []
-        for e in o.get("executions") or []:
-            q, p = _num(e.get("quantity")), _num(e.get("price"))
-            if q and p is not None:
-                fills.append({"at": str(e.get("timestamp") or e.get("settlement_date") or datetime.now(timezone.utc).isoformat()),
-                              "quantity": q, "price": p, "fees": _num(e.get("fees")) or 0.0, "external_id": str(e.get("id") or f"{boid}-{e.get('timestamp')}")})
-        if not fills:
-            cum, avg = _num(o.get("cumulative_quantity") or o.get("filled_quantity")), _num(o.get("average_price"))
-            have = sum(float(f["quantity"]) for f in order.get("fills") or [])
-            if cum and avg and cum > have + 1e-9:
-                paid = sum(float(f["quantity"]) * float(f["price"]) for f in order.get("fills") or [])
-                fills = [*(order.get("fills") or []),
-                         {"at": str(o.get("updated_at") or datetime.now(timezone.utc).isoformat()), "quantity": cum - have,
-                          "price": round((avg * cum - paid) / (cum - have), 6), "fees": _num(o.get("fees")) or 0.0, "external_id": f"{boid}-cum-{cum:g}"}]
+        # What has filled in all, from the executions when the answer lists them, else from the cumulative figures. Only
+        # the part beyond what the desk has recorded becomes a new fill, so the same shares are never counted twice
+        # whichever form the next answer takes.
+        execs = [(_num(e.get("quantity")), _num(e.get("price")), _num(e.get("fees")) or 0.0) for e in o.get("executions") or []]
+        execs = [(q, pr, fe) for q, pr, fe in execs if q and pr is not None]
+        if execs:
+            total, cost, fees = sum(q for q, _, _ in execs), sum(q * pr for q, pr, _ in execs), sum(fe for _, _, fe in execs)
+        else:
+            total = _num(o.get("cumulative_quantity") or o.get("filled_quantity")) or 0.0
+            avg = _num(o.get("average_price"))
+            cost, fees = (avg * total if avg is not None else None), _num(o.get("fees")) or 0.0
+        have = sum(float(f["quantity"]) for f in order.get("fills") or [])
+        paid = sum(float(f["quantity"]) * float(f["price"]) for f in order.get("fills") or [])
+        fees_had = sum(float(f.get("fees") or 0) for f in order.get("fills") or [])
+        fills = list(order.get("fills") or [])
+        if total > have + 1e-9 and cost is not None:
+            fills.append({"at": str(o.get("updated_at") or datetime.now(timezone.utc).isoformat()), "quantity": round(total - have, 8),
+                          "price": round((cost - paid) / (total - have), 6), "fees": max(0.0, fees - fees_had), "external_id": f"{boid}-filled-{total:g}"})
         msg = o.get("reject_reason") or o.get("rejection_reason") or o.get("message") or raw
         return {"state": state, "broker_order_id": boid, "fills": fills, "message": str(msg)[:300]}
 
@@ -252,6 +263,8 @@ class RobinhoodExecution:
         if not ready["ready"]:
             raise BrokerError("live execution is not ready: " + "; ".join(ready["reasons"]))
         tools = ready["tools"]
+        if order["terms"].get("account_ref") != account_ref(self.account):
+            raise BrokerError("the order names a different account from the one live trading is bound to")
         values = self._values(order)
         if tools.get("review"):
             try:
@@ -272,7 +285,11 @@ class RobinhoodExecution:
             raise BrokerTimeout(str(exc)) from exc
         except DataError as exc:                                     # anything else after sending: not known
             raise BrokerTimeout(str(exc)) from exc
-        return self._answer(_order_of(payload), order)
+        placed = _order_of(payload)
+        if not placed or not (placed.get("id") or placed.get("order_id")):
+            # It answered, but not with an order the desk can follow: the order may well be live. Find it by its reference.
+            raise BrokerTimeout(f"Robinhood's answer to the placement could not be read ({str(unwrap(payload))[:120]})")
+        return self._answer(placed, order)
 
     def status(self, order: dict[str, Any]) -> dict[str, Any]:
         tools = self.readiness()["tools"]
@@ -330,4 +347,4 @@ def make_execution(settings: Any) -> RobinhoodExecution | None:
     return RobinhoodExecution(bridge, settings.robinhood_execution_account)
 
 
-__all__ = ["RobinhoodExecution", "TradingBridge", "EXEC_TOOLS", "make_execution", "ref_id", "mask", "acceptable_exec_name"]
+__all__ = ["RobinhoodExecution", "TradingBridge", "EXEC_TOOLS", "make_execution", "ref_id", "mask", "account_ref", "acceptable_exec_name"]

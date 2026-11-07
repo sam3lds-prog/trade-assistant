@@ -241,6 +241,21 @@ class Worker:
                 log.exception("Worker pass failed")
             self.stop.wait(poll_seconds)
 
+    def beat_in_background(self, every: float = 10.0) -> threading.Thread:
+        """Keep the heartbeat going from a thread of its own (the daemon): a job that takes minutes must not let the
+        app's worker conclude the daemon has stopped and take over its work."""
+        def beat() -> None:
+            while not self.stop.is_set():
+                try:
+                    heartbeat(self.db, self.component, worker=self.name, **self.info())
+                    self._beat = time.time()
+                except Exception:  # noqa: BLE001 - the next beat tries again
+                    log.exception("Heartbeat failed")
+                self.stop.wait(every)
+        t = threading.Thread(target=beat, name=f"{self.component}-heartbeat", daemon=True)
+        t.start()
+        return t
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return

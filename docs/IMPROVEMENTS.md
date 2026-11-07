@@ -1583,3 +1583,64 @@ Reported from the chart: at 7:24 p.m. New York on 22 October the GOOGL daily cha
 Market holidays are not known to `last_session`, so on a holiday evening a stock that is viewed is asked for every 15
 minutes; the cost is bounded by what is on the screen. The four tests that failed on the untouched tree before 2.16.1
 still fail on it and are unrelated.
+
+## 3.0: the workstation, Research, Discover, the Trading Desk, live execution and the autopilot
+
+The design is [V3.md](V3.md); this is the evidence. Seven phases, each its own pull request, each merged only with
+CI green on Python 3.11 and 3.13 (CI now installs Chromium, so the browser tests run there too).
+
+| Phase | Pull request | New or changed tests | Full suite after it (local, 3.13) |
+| --- | --- | --- | --- |
+| 1 Stabilise: fixed test clock, true P&L percentiles, four risk measures, contracts, event stream | #43 | `test_riskmath`, `test_v3_core`, `test_regression_baseline`, clock fixes | green |
+| 2 Workstation: four workspaces of linked GridStack widgets, saved layouts | #44 | `test_workspaces`, `test_workstation` (browser) | 1229 passed, 2 skipped |
+| 3 Research: analogs, one calibrated forecast, premium history, Strategy Studio | #45 | `test_research3` (16), study browser test, read-only allowlists | green (run in two parts) |
+| 4 Discover: one deduplicated feed, comparable rank, one allocator | #46 | `test_discover3` (18), Discover browser test | 1267 passed, 2 skipped |
+| 5 Trading Desk: policy, fail-closed risk, approvals, ledger, daemon, notifications, phone approvals | #47 | `test_desk3` (19), `test_jobs_notify_remote` (17), desk browser test | 1304 passed, 2 skipped |
+| 6 Live execution through a separate Robinhood adapter (off) | #48 | `test_live_exec` (15) with a stand-in order server | see the PR |
+| 7 Capped autopilot, shadow mode, hardening | #49 | `test_autopilot` (11) | see the PR |
+
+### What 3.0 guarantees about orders, and the test that holds each
+
+| Guarantee | Tests |
+| --- | --- |
+| No path under `/v3` (or anywhere) contains "order", and every write is listed for review | `test_api.test_no_endpoint_can_place_an_order` |
+| An approval is bound to the order's hash, used once, expires, and is superseded by an amendment | `test_an_approval_is_bound_to_the_exact_order`, `test_an_approval_works_once_and_expires` |
+| A phone approval needs the PIN session and the one-time link; other hosts and other sites are refused | `test_a_phone_approves_with_the_pin_and_the_link_once`, `test_only_the_tailnet_name_and_only_the_approval_pages_answer`, `test_a_form_from_another_site_is_refused`, `test_wrong_pins_lock_the_pages_and_say_so` |
+| A check that cannot be measured blocks; closing a held position is never blocked by the loss stop | `test_an_unmeasured_check_blocks`, `test_a_position_without_a_quote_leaves_todays_result_unmeasured_which_blocks_buys_not_sells`, `test_the_daily_loss_stop_blocks_new_buys_but_lets_a_position_be_closed` |
+| Risk is checked again just before sending | `test_risk_is_checked_again_just_before_sending` |
+| An unanswered or interrupted submission is never resent; reconciliation settles it | `test_a_timeout_makes_the_order_unknown_and_reconciliation_settles_it_without_resending`, `test_a_submission_cut_off_by_a_crash_is_recovered_as_unknown_never_resent`, `test_a_placement_without_an_answer_is_found_by_reconciliation_and_never_resent`, `test_a_placement_that_never_arrived_fails_and_frees_its_capital` |
+| The market-data connection cannot act; the trading connection calls only its own tools | `test_the_market_data_connection_still_cannot_act`, `test_the_trading_bridge_calls_only_its_own_tools` |
+| Live is off unless every gate holds; LIVE_MAX_ORDER caps every policy; the account is bound | `test_live_trading_is_off_unless_switched_on`, `test_live_orders_need_real_prices`, `test_the_live_ceiling_caps_every_policy`, `test_an_approval_is_bound_to_the_account` |
+| The kill switch cancels working orders (paper and Robinhood) and refuses approvals | `test_the_kill_switch_cancels_working_orders_and_refuses_approvals`, `test_the_kill_switch_cancels_a_working_live_order_at_robinhood` |
+| After a sleep, missed timed work is discarded, not replayed | `test_after_a_sleep_missed_slots_are_not_replayed`, `test_after_a_sleep_a_missed_run_is_not_replayed` |
+| The autopilot acts only under its mode, only on eligible opportunities, within its counts, and live only after its gates | `test_autopilot.py` |
+
+### What was not tested against the real thing
+
+Robinhood does not publish the order tools' arguments or replies. The live adapter reads each tool's declared
+schema and was tested against a stand-in that follows Robinhood's own API shapes; it has not placed a real order.
+The first live use should be one share of an inexpensive stock under the smallest limits, watched on the desk.
+Tailscale, ntfy and Telegram were tested with fakes of their HTTP interfaces, not the services themselves.
+
+### 3.0 security review
+
+An independent review of the code that can send orders, done by a separate agent that had not seen the work's
+reasoning. It judged the code against the guarantees above, probing on temporary databases. It confirmed the
+approval binding and single use, the loss-stop exemption for sales, `LIVE_MAX_ORDER`, the read-only bridge's name
+filters, the phone pages' host, CSRF and PIN lockout, atomic job claims, and the unique client order and fill ids.
+It found the defects below, all fixed in phase 7, each with a test. A twelfth (the check before sending counted an
+order's own reservation twice) had been found and fixed just before.
+
+| # | Finding | Severity | Fix | Test |
+| --- | --- | --- | --- | --- |
+| R1 | A live placement whose answer could not be read was recorded as failed, though the order could be live | High | An unreadable answer is `unknown`, found by its reference | `test_an_unreadable_answer_to_a_placement_is_unknown_and_found` |
+| R2 | One empty order list settled an unknown live order as failed | High | Never-received needs a conclusive answer (the paper broker) or three empty look-ups over at least 15 minutes; until then the capital stays held | `test_a_placement_that_never_arrived_fails_and_frees_its_capital`, `test_an_unknown_order_the_broker_never_received_fails_and_releases_its_capital` |
+| R3 | The kill switch skipped orders in an unknown or sending state | High | It queues a cancel for every unfinished order; the cancel looks an unknown order up first, and reconciling an order found working while the switch is on cancels it | `test_the_kill_switch_reaches_an_order_whose_state_was_not_yet_known` |
+| R4 | A cancel that got no answer was never tried again, and reconciling undid it | High | Cancels are retried, a cancel-requested order stays so while the broker says it is working, and the cancel is asked again | `test_a_cancel_that_gets_no_answer_is_tried_again_and_not_undone_by_reconciling` |
+| R5 | The autopilot's exit could sell shares you bought, and your result counted toward its live promotion | High | It sells and counts only its own shares (its buys' fills less its sales') | `test_it_never_sells_shares_you_bought` |
+| R6 | A reservation from an earlier day, released today, lowered today's new buying | Medium | Only releases of today's reservations count | `test_yesterdays_reservation_released_today_does_not_free_todays_buying` |
+| R7 | Re-approving after a block at submission never sent the order | Medium | One submission per approval | `test_re_approving_after_a_block_at_submission_sends_it` |
+| R8 | Approval links with their tokens were kept in the outbox | Medium | Tokens are derived from a key kept beside the database (owner-only file) and added only as a message is sent | `test_an_approval_link_is_not_kept_in_the_outbox` |
+| R9 | The app could take over from a daemon busy with a long job, mark its submission unknown, and the ledger over-release | Medium | The daemon's heartbeat runs in its own thread; recovery only touches submissions over three minutes old, and the app recovers only while no daemon is alive; a fill never releases more than is reserved | `test_a_fill_never_releases_more_than_was_reserved`, `test_a_submission_cut_off_by_a_crash_is_recovered_as_unknown_never_resent` |
+| R10 | Only the account's last four digits were bound into the order | Medium | The order names the account by its last four digits and a hash of the whole number; the adapter refuses an order written for another | `test_another_account_with_the_same_last_digits_is_another_account`, `test_the_adapter_refuses_an_order_written_for_another_account` |
+| R11 | A cumulative answer then an executions answer could count the same shares twice | Medium | Fills are the part beyond what is recorded, whichever form the answer takes | `test_cumulative_and_execution_answers_never_count_the_same_shares_twice` |

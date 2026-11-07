@@ -20,6 +20,23 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 3.0.0 — Trade Assistant 3.0
+
+The workstation, Research, Discover, the Trading Desk, live execution (off) and the capped autopilot (off), in
+seven phases; each phase's notes follow. Phase 7 adds:
+
+- **The capped autopilot.** Set the policy's mode to *Capped autopilot* and it buys the best autopilot-eligible
+  opportunities within your limits (two buys a day at most by default), and sells them at their stop, their target
+  or when their time is up. Every order passes the same checks as yours, and its reasons are kept.
+- **Shadow mode.** Put the autopilot in the shadow account and it trades a paper book of its own, so you can compare
+  its choices with yours.
+- **Live only after practice.** The autopilot may trade real money only with `AUTOPILOT_LIVE=1`, live execution
+  ready, ten trading days of practice in the shadow or paper account, and a practice record that has not lost
+  more than one day's loss stop.
+
+Upgrading from 2.x: no step beyond the usual (the first start migrates the database, to migration 20). Nothing
+trades for real unless you switch it on.
+
 ## 3.0.0.dev6 — Trade Assistant 3.0, phase 6: live execution through Robinhood (off)
 
 The Trading Desk can send approved share orders to your Robinhood account. **It is off**, and stays off unless you

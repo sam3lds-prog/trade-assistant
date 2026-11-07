@@ -149,6 +149,7 @@ class Settings:
     robinhood_execution: bool = False
     robinhood_execution_account: str = field(default="", repr=False)   # the account orders may go to, by number
     live_max_order: float = 100.0                                       # a ceiling no policy can raise
+    autopilot_live: bool = False                                        # the autopilot may trade live (phase 7), if it has earned it
 
     # 3.0 Trading Desk (phase 5): where its notifications go, who runs its jobs, and phone approvals.
     notify_email: bool = True               # desk notifications by email too, when SMTP is set up
@@ -263,6 +264,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         robinhood_execution=_flag("ROBINHOOD_EXECUTION"),
         robinhood_execution_account=_clean_token(os.getenv("ROBINHOOD_EXECUTION_ACCOUNT")),
         live_max_order=_float("LIVE_MAX_ORDER", 100.0),
+        autopilot_live=_flag("AUTOPILOT_LIVE"),
         notify_email=_flag("NOTIFY_EMAIL", True),
         ntfy_server=(os.getenv("NTFY_SERVER") or "").strip().rstrip("/") or "https://ntfy.sh",
         ntfy_topic=_clean_token(os.getenv("NTFY_TOPIC")),

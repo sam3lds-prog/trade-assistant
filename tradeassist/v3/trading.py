@@ -28,10 +28,12 @@ result from it and from the desk's fills.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import logging
+import os
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
@@ -55,6 +57,8 @@ from ..service import RequestError
 log = logging.getLogger(__name__)
 
 PRE_SUBMIT = ("draft", "awaiting_approval", "blocked", "authorized")
+NOT_FOUND_MISSES = 3          # an unknown order is called never-received only after this many empty look-ups...
+NOT_FOUND_SECONDS = 900       # ...spread over at least this long, unless the broker's answer is conclusive (the paper broker)
 WORKING = ("submitted", "partially_filled", "cancel_requested", "unknown", "submitting")
 SIDE_WORDS = {"buy": "Buy", "sell": "Sell", "sell_short": "Sell short", "buy_to_cover": "Buy to cover", "buy_to_open": "Buy to open",
               "sell_to_close": "Sell to close", "sell_to_open": "Sell to open", "buy_to_close": "Buy to close"}
@@ -108,6 +112,33 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def link_key(settings: Any) -> bytes:
+    """The key approval links are made from, kept beside the database (readable by you only) and never in it, so a
+    copy of the database or a backup holds no usable link."""
+    path = settings.db_path.parent / "approval_links.key"
+    try:
+        data = path.read_bytes()
+        if len(data) >= 32:
+            return data
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = secrets.token_bytes(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:                     # the other process made it a moment ago
+        return path.read_bytes()
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    return data
+
+
+def approval_token(settings: Any, approval_id: str) -> str:
+    return base64.urlsafe_b64encode(hmac.new(link_key(settings), approval_id.encode(), hashlib.sha256).digest()).decode().rstrip("=")
+
+
 def describe(terms: dict[str, Any]) -> str:
     what = terms["option"]["option_symbol"] if terms.get("option") else terms["symbol"]
     qty = terms["quantity"]
@@ -126,11 +157,11 @@ class TradingDesk:
         self.live_ready = False                 # phase 6: true only after the Robinhood adapter's checks pass
         self.live_account_ref: str | None = None
         self.live_reasons: list[str] = ["live execution is off (ROBINHOOD_EXECUTION is not set)"]
-        from ..robinhood_exec import make_execution, mask
+        from ..robinhood_exec import account_ref, make_execution
         live = make_execution(svc.settings)
         if live is not None:
             self.brokers["live"] = live
-            self.live_account_ref = mask(live.account)
+            self.live_account_ref = account_ref(live.account)
             self.live_reasons = ["not checked yet: press Check live trading, or start the daemon"]
         self._lock = threading.RLock()
         self.worker: Worker | None = None
@@ -167,9 +198,10 @@ class TradingDesk:
                                   + (f": {value['reason']}" if value["reason"] else ".")
                                   + " Working orders are being cancelled; approvals are refused until it is switched off.",
                                   severity="critical")
-            for o in self.db.query("SELECT proposal_id FROM broker_orders WHERE state IN ('submitted', 'accepted', 'partially_filled')"):
+            open_states = sorted(C.OPEN_ORDER_STATES - {"intent"})
+            for o in self.db.query(f"SELECT DISTINCT proposal_id FROM broker_orders WHERE state IN ({','.join('?' * len(open_states))})", open_states):
                 self.jobs.enqueue("desk.cancel", {"proposal_id": o["proposal_id"], "reason": "the kill switch"},
-                                  dedupe_key=f"cancel:{o['proposal_id']}:kill:{value['at']}")
+                                  dedupe_key=f"cancel:{o['proposal_id']}:kill:{value['at']}", max_attempts=6)
             self.ensure_worker()
         return value
 
@@ -256,8 +288,12 @@ class TradingDesk:
         today = datetime.now(NY).date().isoformat()
         reserved = self._ledger_sum("reserve", account_kind=account_kind) - self._ledger_sum("release", account_kind=account_kind)
         cost = sum(p["cost"] for p in pos["positions"])
-        today_buys = (self._ledger_sum("reserve", since_day=today, account_kind=account_kind)
-                      - self._ledger_sum("release", since_day=today, account_kind=account_kind, note_like="unfilled%"))
+        start = _iso(datetime.fromisoformat(today).replace(tzinfo=NY))
+        r = self.db.one("""SELECT COALESCE(SUM(CASE WHEN kind = 'reserve' THEN amount ELSE -amount END), 0) AS s FROM budget_ledger
+                           WHERE mode = ? AND account_kind = ? AND at >= ? AND (kind = 'reserve' OR (kind = 'release' AND note LIKE 'unfilled%'
+                           AND proposal_id IN (SELECT proposal_id FROM budget_ledger WHERE kind = 'reserve' AND mode = ? AND account_kind = ? AND at >= ?)))""",
+                        (self.mode, account_kind, start, self.mode, account_kind, start))
+        today_buys = float(r["s"] or 0.0)
         open_rows = self.db.query(f"""SELECT id, symbol, side, status FROM trade_proposals WHERE mode = ? AND account_kind = ?
                                       AND status NOT IN ({','.join('?' * len(C.TERMINAL_STATES))})""",
                                   (self.mode, account_kind, *sorted(C.TERMINAL_STATES)))
@@ -302,6 +338,13 @@ class TradingDesk:
         except Exception:  # noqa: BLE001 - an unreadable clock is an unknown, which blocks
             market_state = "UNKNOWN"
         book = self.book(terms.account_kind)
+        if proposal_id:
+            # Its own reservation (made when it was approved) is already in the book: do not count it twice.
+            own = (self._ledger_sum("reserve", account_kind=terms.account_kind, proposal_id=proposal_id)
+                   - self._ledger_sum("release", account_kind=terms.account_kind, proposal_id=proposal_id))
+            if own > 0:
+                book["capital_in_use"] = max(0.0, book["capital_in_use"] - own)
+                book["today_new_buys"] = max(0.0, book["today_new_buys"] - own)
         book["live_account_ref"] = self.live_account_ref
         book["live_max_order"] = self.svc.settings.live_max_order
         return assess(terms, pol, book, quote, now=datetime.now(NY), market_state=market_state,
@@ -432,16 +475,16 @@ class TradingDesk:
         """A new single-use approval for the proposal's current terms; any earlier one is superseded."""
         p = self._proposal(pid)
         pol = self.policy()
-        token = secrets.token_urlsafe(24)
         now = _now()
         expires = min(now + timedelta(minutes=pol.approval_minutes), datetime.fromisoformat(p["expires_at"]))
         aid = C.new_id("appr")
+        token = approval_token(self.svc.settings, aid)
         with self.db.tx() as cur:
             cur.execute("UPDATE approvals SET decision = 'superseded', decided_at = ? WHERE proposal_id = ? AND decision = 'pending'", (_iso(now), pid))
             cur.execute("INSERT INTO approvals (id, proposal_id, created_at, expires_at, token_hash, order_hash, decision) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
                         (aid, pid, _iso(now), _iso(expires), token_hash(token), p["order_hash"]))
         s = self.svc.settings
-        link = f"{s.remote_base_url}/remote/a/{aid}?t={token}" if s.remote_approvals and s.remote_base_url else None
+        link = f"{s.remote_base_url}/remote/a/{aid}" if s.remote_approvals and s.remote_base_url else None   # the token is added when sent
         if notify:
             risk = p.get("risk") or {}
             ny = expires.astimezone(NY)
@@ -454,7 +497,7 @@ class TradingDesk:
                                   link=link, proposal_id=pid, dedupe_key=f"approval:{aid}")
         self.bus.publish("proposal.awaiting_approval", pid, approval_id=aid, expires_at=_iso(expires))
         self.ensure_worker()
-        return {"id": aid, "expires_at": _iso(expires), "token": token, "link": link}
+        return {"id": aid, "expires_at": _iso(expires), "token": token, "link": f"{link}?t={token}" if link else None}
 
     def decide(self, approval_id: str, approve: bool, order_hash: str, *, actor: str = "you", channel: str = "app",
                token: str | None = None) -> dict[str, Any]:
@@ -477,6 +520,8 @@ class TradingDesk:
                 raise RequestError(f"The proposal is {p['status'].replace('_', ' ')}, not awaiting approval.")
             if self.kill_switch().get("on") and approve:
                 raise RequestError("The kill switch is on: nothing can be approved until it is switched off.")
+            if actor == "autopilot" and (channel != "policy" or self.policy().mode != "capped_autopilot"):
+                raise RequestError("The autopilot approves only under a capped_autopilot policy.")
             now = _iso(_now())
             with self.db.tx() as cur:
                 cur.execute("UPDATE approvals SET decision = ?, decided_at = ?, decided_by = ?, channel = ?, used_at = ? WHERE id = ? AND decision = 'pending'",
@@ -501,7 +546,7 @@ class TradingDesk:
                         self._ledger(cur, "reserve", terms.notional(), p, note=f"approved: {describe(p['terms'])}")
         self.bus.publish("proposal.authorized" if risk.ok else "proposal.blocked", p["id"])
         if risk.ok:
-            self.jobs.enqueue("desk.submit", {"proposal_id": p["id"]}, dedupe_key=f"submit:{p['id']}:{p['version']}")
+            self.jobs.enqueue("desk.submit", {"proposal_id": p["id"]}, dedupe_key=f"submit:{p['id']}:{approval_id}")
             self.ensure_worker()
         else:
             self.notifier.enqueue("proposal.blocked", f"Blocked at approval: {describe(p['terms'])}", risk.text, severity="warn",
@@ -512,10 +557,14 @@ class TradingDesk:
         cur.execute("INSERT INTO budget_ledger (at, mode, account_kind, policy_id, proposal_id, order_id, kind, amount, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (_iso(_now()), p["mode"], p["account_kind"], p.get("policy_id"), p["id"], order_id, kind, round(float(amount), 6), note[:300]))
 
-    def _release_rest(self, cur: Any, p: dict[str, Any], why: str) -> None:
+    @staticmethod
+    def _reserved_rest(cur: Any, pid: str) -> float:
         r = cur.execute("""SELECT COALESCE(SUM(CASE WHEN kind = 'reserve' THEN amount WHEN kind = 'release' THEN -amount ELSE 0 END), 0) AS r
-                           FROM budget_ledger WHERE proposal_id = ?""", (p["id"],)).fetchone()
-        rest = float(r["r"] or 0.0)
+                           FROM budget_ledger WHERE proposal_id = ?""", (pid,)).fetchone()
+        return max(0.0, float(r["r"] or 0.0))
+
+    def _release_rest(self, cur: Any, p: dict[str, Any], why: str) -> None:
+        rest = self._reserved_rest(cur, p["id"])
         if rest > 1e-9:
             self._ledger(cur, "release", rest, p, note=f"unfilled: {why}")
 
@@ -563,8 +612,8 @@ class TradingDesk:
                     cur.execute("UPDATE approvals SET decision = 'superseded', decided_at = ? WHERE proposal_id = ? AND decision = 'pending'", (_iso(_now()), pid))
                     self._move(cur, pid, "cancelled", actor, reason)
                     self._release_rest(cur, p, reason)
-            elif p["status"] in ("submitted", "partially_filled"):
-                self.jobs.enqueue("desk.cancel", {"proposal_id": pid, "reason": reason}, dedupe_key=f"cancel:{pid}:{_iso(_now())}")
+            elif p["status"] in ("submitted", "partially_filled", "cancel_requested", "unknown"):
+                self.jobs.enqueue("desk.cancel", {"proposal_id": pid, "reason": reason}, dedupe_key=f"cancel:{pid}:{_iso(_now())}", max_attempts=6)
                 self.ensure_worker()
             else:
                 raise RequestError(f"A proposal that is {p['status'].replace('_', ' ')} cannot be cancelled.")
@@ -676,12 +725,22 @@ class TradingDesk:
             p = self._proposal(order["proposal_id"])
             state = res.get("state") or order["state"]
             if state == "not_found":
+                prior = json.loads(order.get("response_json") or "{}") if isinstance(order.get("response_json"), str) else {}
+                misses = int(prior.get("misses") or 0) + 1
+                age = (_now() - datetime.fromisoformat(order["created_at"])).total_seconds()
+                if not (res.get("conclusive") or (misses >= NOT_FOUND_MISSES and age >= NOT_FOUND_SECONDS)):
+                    # One empty answer is not proof: the broker may not list it yet. Keep it unknown, and its capital held.
+                    with self.db.tx() as cur:
+                        cur.execute("UPDATE broker_orders SET response_json = ?, last_reconciled_at = ? WHERE id = ?",
+                                    (json.dumps({"misses": misses, "message": res.get("message")}), _iso(_now()), order["id"]))
+                    return {"state": order["state"], "proposal": p["status"], "fills": 0, "still_looking": misses}
                 state = "failed"
                 res = {**res, "message": res.get("message") or "the broker has no record of it: it was never placed"}
             terms = order["terms"]
             mult = float(terms["option"]["multiplier"]) if terms.get("option") else 1.0
             opening = terms["side"] in OPENING_SIDES
             new_fills = []
+            recancel = False
             with self.db.tx() as cur:
                 known = {r["external_id"] for r in cur.execute("SELECT external_id FROM broker_fills WHERE order_id = ?", (order["id"],)).fetchall()}
                 avg_cost = None
@@ -696,8 +755,10 @@ class TradingDesk:
                                 (order["id"], f["at"], float(f["quantity"]), float(f["price"]), float(f.get("fees") or 0), f["external_id"]))
                     new_fills.append(f)
                     if opening:
-                        self._ledger(cur, "release", float(f["quantity"]) * float(terms["limit_price"] or f["price"]) * mult, p,
-                                     note=f"fill: {f['quantity']:g} at {f['price']:.2f}", order_id=order["id"])
+                        rest = self._reserved_rest(cur, p["id"])
+                        amount = min(rest, float(f["quantity"]) * float(terms["limit_price"] or f["price"]) * mult)
+                        if amount > 1e-9:
+                            self._ledger(cur, "release", amount, p, note=f"fill: {f['quantity']:g} at {f['price']:.2f}", order_id=order["id"])
                     elif avg_cost is not None:
                         pnl = (float(f["price"]) - avg_cost) * float(f["quantity"]) * mult - float(f.get("fees") or 0)
                         self._ledger(cur, "realized", pnl, p, note=f"sold {f['quantity']:g} at {f['price']:.2f}", order_id=order["id"])
@@ -708,6 +769,9 @@ class TradingDesk:
                     pass                                    # a part-filled order that ended: the fills stand
                 elif filled and filled < float(terms["quantity"]) - 1e-9 and state in ("submitted", "accepted"):
                     state = "partially_filled"
+                if order["state"] == "cancel_requested" and state in ("submitted", "accepted", "partially_filled"):
+                    state = "cancel_requested"              # still working at the broker: the cancel is asked again below
+                    recancel = True
                 cur.execute("""UPDATE broker_orders SET state = ?, broker_order_id = COALESCE(?, broker_order_id), updated_at = ?, response_json = ?,
                                filled_quantity = ?, average_fill_price = ?, last_reconciled_at = ?, error = ? WHERE id = ?""",
                             (state, res.get("broker_order_id"), _iso(_now()), json.dumps(res, default=str)[:4000], filled, avg, _iso(_now()),
@@ -721,6 +785,9 @@ class TradingDesk:
                 if state in ("filled", "cancelled", "expired", "rejected", "failed") and opening:
                     self._release_rest(cur, p, state)
         final = self._proposal(p["id"])["status"]
+        if state in ("submitted", "accepted", "partially_filled", "cancel_requested") and (recancel or self.kill_switch().get("on")):
+            self.jobs.enqueue("desk.cancel", {"proposal_id": p["id"], "reason": "the kill switch" if self.kill_switch().get("on") else "cancel asked for"},
+                              dedupe_key=f"cancel:{p['id']}:{_iso(_now())[:16]}", max_attempts=6)
         self.bus.publish(f"proposal.{final}", p["id"], fills=len(new_fills))
         if new_fills:
             qty = sum(float(f["quantity"]) for f in new_fills)
@@ -765,8 +832,20 @@ class TradingDesk:
     def run_cancel(self, payload: dict[str, Any]) -> dict[str, Any]:
         pid = payload["proposal_id"]
         out = []
-        for o in self.db.query("SELECT * FROM broker_orders WHERE proposal_id = ? AND state IN ('submitted', 'accepted', 'partially_filled')", (pid,)):
+        rows = self.db.query("""SELECT * FROM broker_orders WHERE proposal_id = ?
+                                AND state IN ('submitted', 'accepted', 'partially_filled', 'cancel_requested', 'unknown', 'submitting')""", (pid,))
+        for o in rows:
             order = self._order_dict(o)
+            if order["state"] in ("unknown", "submitting") or not order.get("broker_order_id"):
+                # Find it first: nothing can be cancelled by an id the desk never heard. Retried until it is found or settled.
+                res = self.broker_for(order["account_kind"], sending=False).status(order)
+                if res.get("state") not in ("submitted", "accepted", "partially_filled"):
+                    got = self._apply(order, res, actor="cancel (look-up)")
+                    if got["state"] in ("unknown", "submitting"):
+                        raise BrokerTimeout("the order is not found yet; the cancel will be tried again")
+                    out.append(got)
+                    continue
+                order = {**order, "broker_order_id": res.get("broker_order_id") or order.get("broker_order_id")}
             p = self._proposal(pid)
             with self.db.tx() as cur:
                 if C.can_move(p["status"], "cancel_requested"):
@@ -777,9 +856,11 @@ class TradingDesk:
             out.append(self._apply(order, res, actor="cancel"))
         return {"cancelled": out}
 
-    def recover(self) -> dict[str, Any]:
-        """On start: a submission that was cut off is unknown, and is reconciled, never sent again."""
-        stuck = self.db.query("SELECT id FROM trade_proposals WHERE status = 'submitting'")
+    def recover(self, older_than_seconds: float = 180.0) -> dict[str, Any]:
+        """On start: a submission that was cut off is unknown, and is reconciled, never sent again. Only one written
+        more than three minutes ago: a younger one may still be in the hands of the other process."""
+        cutoff = _iso(_now() - timedelta(seconds=older_than_seconds))
+        stuck = self.db.query("SELECT id FROM trade_proposals WHERE status = 'submitting' AND updated_at <= ?", (cutoff,))
         for r in stuck:
             self._to_unknown(self._proposal(r["id"]), "the app or daemon stopped during the submission")
         return {"recovered": len(stuck)}
@@ -798,12 +879,17 @@ class TradingDesk:
 
     # --- the worker ----------------------------------------------------------------------------------------------
     def handlers(self) -> dict[str, Any]:
-        return {"desk.submit": self.run_submit, "desk.reconcile": self.reconcile, "desk.expire": self.expire_due,
-                "desk.cancel": self.run_cancel, "notify.deliver": self.notifier.deliver_due}
+        out = {"desk.submit": self.run_submit, "desk.reconcile": self.reconcile, "desk.expire": self.expire_due,
+               "desk.cancel": self.run_cancel, "notify.deliver": self.notifier.deliver_due}
+        ap = getattr(self.svc, "autopilot", None)
+        if ap is not None:
+            out["autopilot.run"] = ap.run
+        return out
 
     @staticmethod
     def schedules() -> list[Schedule]:
-        return [Schedule("desk.reconcile", 20, 40), Schedule("desk.expire", 30, 60), Schedule("notify.deliver", 15, 30)]
+        return [Schedule("desk.reconcile", 20, 40), Schedule("desk.expire", 30, 60), Schedule("notify.deliver", 15, 30),
+                Schedule("autopilot.run", 300, 240, when="market")]
 
     def make_worker(self, component: str, defer_to: str | None, extra_handlers: dict[str, Any] | None = None,
                     extra_schedules: list[Schedule] | None = None) -> Worker:
@@ -818,7 +904,8 @@ class TradingDesk:
             if self.worker is None:
                 self.worker = self.make_worker("app-worker", "daemon" if self.worker_mode == "auto" else None)
                 try:
-                    self.recover()
+                    if not alive(self.db, "daemon"):
+                        self.recover()
                 except Exception:  # noqa: BLE001
                     log.exception("Desk recovery failed")
             self.worker.start()
@@ -888,8 +975,10 @@ class TradingDesk:
 
 def install(svc: Any) -> None:
     from ..api_v3 import register, status_part
+    from ..autopilot import Autopilot
     desk = TradingDesk(svc)
     svc.trading = desk
+    svc.autopilot = Autopilot(svc)
     status_part(svc, "trading", desk.strip_trading)
     status_part(svc, "risk", desk.strip_risk)
     status_part(svc, "daemon", desk.strip_daemon)
@@ -907,6 +996,8 @@ def install(svc: Any) -> None:
 
         @router.put("/desk/policy")
         def put_policy(body: dict[str, Any]) -> dict[str, Any]:
+            if body.get("mode") == "capped_autopilot" and body.get("account_kind") == "live" and not svc.settings.autopilot_live:
+                raise RequestError("The autopilot may not trade live: AUTOPILOT_LIVE=1 is not set in .env. Use the shadow or paper account.")
             try:
                 return P.save(d.db, body, live_allowed=d.live_ready)
             except ValueError as exc:
@@ -976,6 +1067,14 @@ def install(svc: Any) -> None:
         @router.post("/approvals/{aid}/decline")
         def decline(aid: str, body: DecisionIn) -> dict[str, Any]:
             return d.decide(aid, False, body.order_hash, channel="app")
+
+        @router.get("/autopilot")
+        def autopilot() -> dict[str, Any]:
+            return svc.autopilot.status()
+
+        @router.post("/autopilot/run")
+        def autopilot_run() -> dict[str, Any]:
+            return svc.autopilot.run()
 
         @router.get("/notifications")
         def notifications(limit: int = 30) -> dict[str, Any]:
