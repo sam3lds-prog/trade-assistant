@@ -264,7 +264,7 @@ def test_a_proposal_is_written_approved_and_filled_on_paper_from_the_trading_des
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='proposals'] :text('Would pass')", timeout=20000)
         pr.locator("button:text-is('Propose')").click()
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='approvals'] button:text-is('Approve')", timeout=20000)
-        assert "waiting for your approval" in page.inner_text("#ws-status")
+        page.wait_for_selector("#ws-status :text('waiting for your approval')", timeout=15000)     # the strip follows the event
         widget(page, "approvals").locator("button:text-is('Approve')").first.click()
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='deskpositions'] :text('AMZN')", timeout=30000)
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='proposals'] .ws-prop-detail h3:has-text('Filled')", timeout=20000)
