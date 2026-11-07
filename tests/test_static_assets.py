@@ -25,7 +25,7 @@ SCRIPTS = ("flow.js", "app.js", "v2.js", "lab.js", "decide.js", "trades.js", "id
            "lwcharts.js", "chart.js", "whatif.js", "blend.js", "basket.js", "paper.js",
            "help.js")   # in the order classic.html loads them; lwcharts.js is the vendored chart library
 # 3.0: the workstation (index.html) loads the classic scripts, then the grid library and its own.
-WORKSTATION = SCRIPTS + ("gridstack.js", "ws-core.js", "ws-widgets.js")
+WORKSTATION = SCRIPTS + ("gridstack.js", "ws-core.js", "ws-widgets.js", "ws-research.js")
 VENDORED = ("lwcharts.js", "gridstack.js")   # minified libraries: their top-level names are their own business
 TOP_LEVEL = re.compile(r"^(?:async\s+)?(?:const|let|var|function\*?|class)\s+([A-Za-z_$][\w$]*)", re.M)
 
@@ -53,7 +53,7 @@ def test_both_pages_load_every_script_in_order_with_a_fresh_address():
 
 
 def test_the_workstation_keeps_to_one_global():
-    for name in ("ws-core.js", "ws-widgets.js"):
+    for name in ("ws-core.js", "ws-widgets.js", "ws-research.js"):
         assert top_level(name) <= {"WS"}, name
     assert "MIT" in (STATIC / "LICENSE-gridstack.txt").read_text() and "GridStack 12.3.3" in (STATIC / "gridstack.js").read_text()[:200]
 
@@ -645,7 +645,9 @@ def test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_posi
         page.wait_for_selector("text=The market lead and the upgrade carry it.", timeout=30000)
         assert page.is_enabled("button:text-is(\"Use the AI's pick\")")
         ai = page.inner_text(".wi-ai")
-        assert "ChatGPT (fake-gpt): +5.00%" in ai and "Risk: a probe" in ai and "Bull call spread" in ai and "us_market +2.00" in ai
+        # 3.0: the AI's settings, the app's path: ChatGPT's own +5% is named, not drawn.
+        assert "ChatGPT (fake-gpt): " in ai and "ChatGPT itself said +5.00%; that figure is not drawn" in ai
+        assert "Risk: a probe" in ai and "Bull call spread" in ai and "us_market +2.00" in ai
         assert FakeGPT.prompts and "FACTORS" in FakeGPT.prompts[0] and "THE APP'S MODEL" in FakeGPT.prompts[0]
         page.click("button:text-is(\"Use ChatGPT's settings\")")
         page.wait_for_function("document.querySelector(\"input[aria-label='US market (S&P 500) scenario']\").value === '2'", timeout=20000)

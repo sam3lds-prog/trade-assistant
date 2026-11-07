@@ -188,3 +188,32 @@ def test_a_saved_layout_opens_as_a_new_workspace_tab(tmp_path):
         page.wait_for_function("document.querySelectorAll('.ws-tab-btn').length === 6", timeout=10000)
         assert page.locator("section.ws-tabset:not(.hidden) .ws-widget[data-type='chain']").count() == 1
     assert errors == []
+
+
+def test_a_study_runs_draws_its_forecast_and_sends_a_contract_to_the_ticket_and_option_chart(tmp_path):
+    """3.0 phase 3: one study of the linked stock; its forecast goes to the linked chart, a strategy row to the
+    ticket and the option chart, and the study is still there after a reload."""
+    with demo_page(tmp_path) as (page, errors):
+        open_research(page)
+        study = widget(page, "study")
+        study.locator("button:text-is('Run the study')").click()
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] button:text-is('Draw on the linked chart')", timeout=60000)
+        text = study.inner_text()
+        for words in ("Not calibrated", "Other paths to test against", "What would prove it wrong", "Strategies under the same scenarios",
+                      "Missing or not yet trusted", "Similar past situations"):
+            assert words in text, words
+        study.locator("button:text-is('Draw on the linked chart')").click()
+        page.wait_for_function("WS.ctx.blue.scenario && WS.ctx.blue.scenario.kind === 'forecast' && WS.ctx.blue.scenario.base.path_pct.length === 5",
+                               timeout=10000)
+        study.locator("tbody tr:has-text('Long call')").first.click()
+        page.wait_for_function("document.querySelector(\"#ws-dock .ws-widget[data-type='ticket'] .ws-badge\").textContent.endsWith('CALL')", timeout=30000)
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='optionchart'] :text('Theoretical, not traded')", timeout=30000)
+        assert widget(page, "optionchart").locator("canvas").count() >= 1
+        study_id = page.evaluate("WS.ctx.blue.study")
+        assert study_id and study_id.startswith("study_")
+        saved(page)
+        page.reload()
+        open_research(page)
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] :text('Strategies under the same scenarios')", timeout=30000)
+        assert page.evaluate("WS.ctx.blue.study") == study_id
+    assert errors == []

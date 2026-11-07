@@ -18,6 +18,30 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 3.0.0.dev3 — Trade Assistant 3.0, phase 3: Research
+
+One study of a stock instead of six screens. See [V3.md](V3.md#phase-3-research).
+
+- **Run the study** (Research workspace) gathers the trend and the market's regime, the stock's signals, what
+  options price (implied volatility, the move priced for earnings), the news, and **similar past situations** in the
+  stock's own history and its peers'. It then gives one forecast and compares every strategy. Each piece of evidence
+  says whether it is for or against your direction, and what could not be read is listed.
+- **Similar past situations** match today's event (a gap, a big move, a volume spike, a pullback, a breakout) and
+  conditions, never use data from after the day they describe, and count overlapping cases once.
+- **One forecast** with an 80% band instead of three competing lines. Its weights are learned on history and checked
+  on later dates they never saw (**Run the calibration** in the Forecast record widget). Until then it says "Not
+  calibrated" and draws a flat path. On made-up demo prices it finds no direction, as it should. Alternative paths
+  (an earnings beat, a guidance cut, a market rally or sell-off) are labelled assumptions, with no probabilities.
+- **The option chart** shows a contract's own traded prices (Tradier, or Robinhood's read-only option history), or,
+  where neither has them, its theoretical value, labelled and drawn differently.
+- **Strategies under the same scenarios**, after trading costs, with the volatility collapse after earnings and an
+  estimated fill chance; the comparison says to hold cash when nothing clears its costs. Click one to send it to the
+  ticket and the risk panel.
+- **The AI challenges a thesis in words** (what supports it, what contradicts it, what would prove it wrong) and no
+  longer draws its own price path in the scenario explorer: it chooses the settings and the app computes the path.
+
+Migration 20 (a column for saved studies). Nothing places an order.
+
 ## 3.0.0.dev2 — Trade Assistant 3.0, phase 2: the workstation
 
 The app now opens on a workstation of four workspaces (Discover, Research, Trading Desk and Portfolio) made of

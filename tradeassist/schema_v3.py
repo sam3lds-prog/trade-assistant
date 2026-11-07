@@ -314,3 +314,12 @@ def decision_records(cur: sqlite3.Cursor) -> None:
         data_json  TEXT NOT NULL DEFAULT '{}'
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_app_events_topic ON app_events (topic, id)")
+
+
+@migration(20, "3.0 studies keep what the research screen shows")
+def study_views(cur: sqlite3.Cursor) -> None:
+    """The study's own record is the contract (evidence, forecast, strategies); the screen also shows the analog
+    table, the peers and the forecast's chart overlay. Kept beside it so a saved study reopens exactly as it ran."""
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(studies)").fetchall()}
+    if "view_json" not in columns:
+        cur.execute("ALTER TABLE studies ADD COLUMN view_json TEXT")

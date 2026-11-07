@@ -145,9 +145,19 @@ def test_client_only_reads_market_data():
     assert all("/markets/" in url for url, _ in session.calls)
     public = [name for name in dir(TradierData) if not name.startswith("_")]
     # 2.12 adds two reads of /markets/timesales (bars within the day); 2.16 two more (trade prints, for the news
-    # replay). Still no order, account or write method.
-    assert sorted(public) == ["chain", "clock", "expirations", "history", "intraday", "intraday_reach", "quotes",
+    # replay); 3.0 one read of /markets/history for an option contract. Still no order, account or write method.
+    assert sorted(public) == ["chain", "clock", "expirations", "history", "intraday", "intraday_reach", "option_history", "quotes",
                               "tick_reach", "ticks"]
+
+
+def test_an_option_contracts_history_is_a_market_data_read_of_its_occ_symbol():
+    body = {"history": {"day": [{"date": "2026-10-20", "open": 3.1, "high": 3.6, "low": 3.0, "close": 3.4, "volume": 120},
+                                {"date": "2026-10-21", "open": 3.4, "high": 3.5, "low": 2.9, "close": 3.0, "volume": 80}]}}
+    c, session = client([FakeResponse(body=body)])
+    df = c.option_history("aapl261218c00200000", "2026-10-01", "2026-10-22")
+    url, params = session.calls[-1]
+    assert url.endswith("/markets/history") and params["symbol"] == "AAPL261218C00200000" and params["interval"] == "daily"
+    assert df["close"].tolist() == [3.4, 3.0]
 
 
 def test_ticks_read_every_session_of_timesales_and_keep_the_order_within_a_second():

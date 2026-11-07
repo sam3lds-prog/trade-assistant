@@ -283,13 +283,18 @@ def test_the_ai_is_sent_every_input_and_its_answer_is_read_and_checked(tmp_path)
         assert word in prompt, word
     sc = out["scenario"]
     assert out["provider"] == "chatgpt" and out["model"] == "fake-gpt" and out["usage"]["input_tokens"] == 10
-    assert sc["path_pct"] == [1, 2, 3, 3, 3] and sc["expected_pct"] == 3                     # padded to the horizon
-    assert sc["high_pct"][2] == 100 and sc["low_pct"] == [0, 0, 0, 0, 0] and len(sc["sd_pct"]) == 5   # clipped
     assert sc["variables"] == {"us_market": 1.5, "news": 0.5, "pattern_weight": 0.9}        # unknown keys dropped, pattern weight wins
+    # 3.0: the AI chose the settings; the path is the app's model under them, never the AI's own numbers.
+    cur = w.model("AAPL", scenario={}, include={}, horizon=5, peers=["TSM"])
+    expect = w.model("AAPL", scenario={**cur["scenario"], **sc["variables"]}, include={**cur["include"], **sc["include"]},
+                     horizon=5, peers=["TSM"])["model"]
+    assert sc["path_pct"] == pytest.approx(expect["path_pct"]) and sc["expected_pct"] == pytest.approx(expect["path_pct"][-1])
+    assert sc["stated_expected_pct"] == 3 and sc["computed_by"].startswith("the app's model") and "not drawn" in out["note"]
+    assert len(sc["sd_pct"]) == 5 and all(lo <= p <= hi for lo, p, hi in zip(sc["low_pct"], sc["path_pct"], sc["high_pct"]))
     assert sc["include"] == {"oil_brent": False, "pattern": True}
     assert sc["strategy"]["kind"] == "bull_call_spread" and sc["risks"] == ["earnings", "42"]
     assert sc["strategy"]["combination"] == ["bull_call_spread", "shares"]                  # the kind first; unknowns dropped
-    assert len(sc["path"]) == 5 and len(sc["times"]) == 5 and sc["path"][-1] == pytest.approx(sc["last"] * 1.03)
+    assert len(sc["path"]) == 5 and len(sc["times"]) == 5 and sc["path"][-1] == pytest.approx(sc["last"] * (1 + sc["expected_pct"] / 100))
     # An unusable strategy falls back to one that fits the path's direction; a non-list path is replaced by the model's.
     gpt.answer = {"path_pct": "no", "strategy": {"kind": "moon"}}
     sc2 = w.ask_ai("AAPL", provider="chatgpt", horizon=5)["scenario"]
@@ -311,7 +316,8 @@ def test_claude_answers_the_same_question_through_the_existing_client(tmp_path):
     svc.ai = SimpleNamespace(ask=ask, configured=True, status=lambda: {"configured": True, "reason": None, "model": "claude-x"})
     out = whatif(svc).ask_ai("AAPL", provider="claude", horizon=3)
     assert asked["purpose"] == "what_if" and asked["web_search"] is False and "FACTORS" in asked["prompt"]
-    assert out["label"] == "Claude" and out["scenario"]["path_pct"] == [2, 2, 2] and out["scenario"]["strategy"]["kind"] == "long_call"
+    assert out["label"] == "Claude" and out["scenario"]["stated_expected_pct"] == 2 and len(out["scenario"]["path_pct"]) == 3
+    assert out["scenario"]["strategy"]["kind"] == "long_call"
     assert out["scenario"]["strategy"]["combination"] == ["long_call"]
 
 

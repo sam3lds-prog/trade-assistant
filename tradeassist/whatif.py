@@ -489,11 +489,23 @@ class WhatIf:
             parsed, model_name, usage = extract_json(reply["text"]), reply["model"], reply["usage"]
             if not isinstance(parsed, dict):
                 raise AIError("Claude's answer was not the JSON this app asked for. Try again.")
+        scenario = self._read_ai(parsed, s, current["model"])
+        # 3.0: the AI proposes settings and explains them; the app computes the path. Its own stated path is kept
+        # only as a note, never drawn, so a language model's guess never competes with the model on the chart.
+        stated = scenario["expected_pct"]
+        settings = {**current["scenario"], **scenario["variables"]}
+        inc = {**current["include"], **scenario["include"]}
+        modeled = self.model(symbol, scenario=settings, include=inc, horizon=horizon, peers=peers, **chart_args)["model"]
+        scenario.update(path_pct=modeled["path_pct"], low_pct=modeled["low_pct"], high_pct=modeled["high_pct"],
+                        sd_pct=modeled["sd_pct"], expected_pct=modeled["path_pct"][-1], stated_expected_pct=stated,
+                        computed_by="the app's model under the AI's settings")
+        scenario.update(self._in_prices(scenario, s["price"], s["future_times"]))
         return {"provider": provider, "label": PROVIDERS[provider], "model": model_name, "usage": usage,
-                "seconds": round(time.time() - started, 1), "scenario": self._read_ai(parsed, s, current["model"]),
+                "seconds": round(time.time() - started, 1), "scenario": scenario,
                 "prompt_chars": len(prompt), "sent": {"factors": len(s["factors"]), "headlines": len(s["news"]["items"][:10]),
                                                        "analyst_calls": len(s["analysts"]["items"])},
-                "note": f"{PROVIDERS[provider]}'s scenario is what a language model wrote from the inputs shown; it can be wrong. "
+                "note": f"{PROVIDERS[provider]} chose the settings and wrote the reasons; the path is the app's model under those "
+                        f"settings ({PROVIDERS[provider]}'s own figure, {stated:+.2f}%, is not drawn). It can be wrong. "
                         "Billed to your own API key; counts against AI_DAILY_REQUESTS."}
 
     def _read_ai(self, p: dict[str, Any], s: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
@@ -561,7 +573,7 @@ class WhatIf:
                                            horizon_bars=horizon_bars, group=group, last=last, dte=dte))
 
     def _position(self, symbol: str, *, kind: str, quantity: int, expected_pct: float, sd_pct: float, horizon_bars: int,
-                  group: str, last: float | None = None, dte: int | None = None) -> dict[str, Any]:
+                  group: str, last: float | None = None, dte: int | None = None, iv_shift: float = 0.0) -> dict[str, Any]:
         symbol = self.svc._symbol(symbol)
         kind = (kind or "").lower()
         if kind not in STRATEGY_KINDS:
@@ -602,7 +614,7 @@ class WhatIf:
                 legs = [{"expiration": l["expiration"], "option_type": l["option_type"], "strike": l["strike"], "side": l["side"],
                          "contracts": l["contracts"], "entry_price": l["mid"]} for l in built["legs"]]
                 sim = self.svc.simulate(symbol=symbol, legs=legs, eval_date=min(when, datetime.strptime(built["expiration"], "%Y-%m-%d").date()).isoformat(),
-                                        range_pct=min(90.0, max(10.0, 4 * sd_pct + abs(expected_pct) + 5)))
+                                        range_pct=min(90.0, max(10.0, 4 * sd_pct + abs(expected_pct) + 5)), iv_shift=iv_shift)
             except (StrategyError, DataError, ValueError, RequestError) as exc:
                 raise RequestError(f"{self.strategy_choices()[kind]['label']}: {exc}") from exc
             cp, cv = np.array(sim["curve"]["prices"], dtype=float), np.array(sim["curve"]["pnl_at_date"], dtype=float)

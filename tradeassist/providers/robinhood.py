@@ -45,13 +45,16 @@ TOOLS: dict[str, tuple[str, ...]] = {
     "option contracts": ("get_option_instruments",),
     "option quotes": ("get_option_quotes",),
     "price history": ("get_equity_historicals", "get_stock_historicals"),
+    # 3.0: an option contract's own daily bars (the Research option chart). A plain read, like the rest.
+    "option history": ("get_option_historicals",),
     # Read by the check command only, so the reply can be studied; the app does not use it yet.
     "earnings dates": ("get_earnings_results",),
 }
 ALLOWED_TOOLS = frozenset(name for names in TOOLS.values() for name in names)
 # Words that help a person find the right tool when the server uses another name (for messages only).
 SIMILAR = {"stock quotes": ("quote",), "option expirations": ("chain", "expir"), "option contracts": ("instrument", "contract"),
-           "option quotes": ("quote",), "price history": ("histor", "bar", "candle"), "earnings dates": ("earning",)}
+           "option quotes": ("quote",), "price history": ("histor", "bar", "candle"), "earnings dates": ("earning",),
+           "option history": ("histor", "option")}
 DEFAULT_BATCH = 20            # Robinhood documents 20 symbols per equity-quote request
 OPTION_QUOTE_BATCH = 100      # contracts per option-quote request when the tool states no limit of its own
 WHOLE_CHAIN_LIMIT = 600       # an expiration with more contracts than this is quoted only near the stock price
@@ -691,6 +694,40 @@ class RobinhoodData:
                         continue
                 return frame.reset_index(drop=True)
         raise last_error or DataError("Robinhood returned no price bars this app could read")
+
+    # --- an option contract's own history (3.0) ----------------------------
+    def option_history(self, option_symbol: str, start: str, end: str) -> pd.DataFrame:
+        """Daily bars of one contract from get_option_historicals. The contract's Robinhood id comes from its
+        chain (read first when this session has not seen it)."""
+        from ..premium import parse_occ
+        terms = parse_occ(option_symbol)
+        occ = option_symbol.strip().upper()
+        with self._lock:
+            if occ not in self._contracts:
+                self.chain(terms["underlying"], terms["expiration"])
+            contract = self._contracts.get(occ)
+            if contract is None:
+                raise DataError(f"Robinhood lists no contract {occ}")
+            tool = self._tool("option history")
+            props = properties(tool)
+            id_arg = choose(props, "instrument_ids", "option_ids", "ids", "instrument_id", "option_id", "id")
+            if id_arg is None:
+                raise DataError(f"Robinhood's {tool.name} does not take a contract id this app recognises. {HELP}")
+            args: dict[str, Any] = {id_arg: many(props[id_arg], [contract["id"]]) if id_arg.endswith("s") else contract["id"]}
+            if "interval" in props:
+                args["interval"] = from_enum(props["interval"], ("day", "1d", "daily", "1day", "d"), "day")
+            if "bounds" in props:
+                args["bounds"] = from_enum(props["bounds"], ("regular",), "regular")
+            if "span" in props:
+                years = (date.fromisoformat(end) - date.fromisoformat(start)).days / 365.25
+                args["span"] = from_enum(props["span"], ("year", "1y") if years > 0.25 else ("3month", "month", "year"), "year")
+            args.update(range_args(props, start, end))
+            payload = self._call(tool, args)
+        bars = find_bars(unwrap(payload))
+        frame = bars_frame(bars) if bars else bars_frame([])
+        if len(frame):
+            frame = frame[(frame["date"] >= pd.Timestamp(start)) & (frame["date"] <= pd.Timestamp(end))]
+        return frame.reset_index(drop=True)
 
     # --- bars within the day (2.12) ---------------------------------------
     def intraday_reach(self) -> dict[str, Any]:

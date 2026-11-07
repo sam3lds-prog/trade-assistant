@@ -110,10 +110,12 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 .ws-link::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--panel); border: 2px solid var(--link); }
 .ws-widget[data-group="none"] .ws-link::after { background: transparent; border: 2px dashed var(--link-none); width: 8px; height: 8px; }
 .ws-link:focus-visible { outline: 2px solid var(--focus); outline-offset: -3px; }
-.ws-wtitle { font-weight: 600; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ws-badge { font-size: 0.86rem; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ws-wtitle { font-weight: 600; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 3em; }
+.ws-badge { font-size: 0.86rem; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; overflow: hidden;
+  text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
 .ws-badge:empty { display: none; }
-.ws-whead .ws-gap { flex: 1; }
+.ws-whead .ws-gap { flex: 1 1 0; min-width: 0; }
+.ws-wtools { display: inline-flex; flex: none; }
 .ws-wbtn {
   all: unset; cursor: pointer; width: 26px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
   border-radius: 3px; color: var(--muted);
