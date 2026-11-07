@@ -18,6 +18,27 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 3.0.0.dev1 — Trade Assistant 3.0, phase 1: a trustworthy foundation
+
+The first of seven steps to 3.0 (see [V3.md](V3.md)). Nothing on the screens moves yet; what changes is what the
+numbers mean and what the next steps build on.
+
+- **The downside and upside figures are percentiles of the P&L.** What-if's "Downside (10th pct)", "Middle" and
+  "Upside" were the P&L at the 10th, 50th and 90th percentile *prices*. For shares, a single call or put, or any
+  position that only gains or only loses as the price rises, nothing changes. For a straddle, strangle, butterfly
+  or condor the old figure flattered the downside: a straddle loses most when the stock stands still, which is
+  in the middle of the price range, not at its 10th percentile. These now report their real 10th percentile.
+- **"Most it can lose" comes from the contract terms.** A combination's figure was the worst point of its curve
+  inside the scenario's range, which is not a cap. It is now the floor of the combined payoff at expiration (a
+  covered call, for instance, now shows its real limit instead of "no limit"), and the worst modeled outcome is
+  shown beside it as a scenario figure. Each position also says what capital it ties up and by which rule.
+- **The tests give the same answer whenever they run**, so a failing check now means something changed in the code.
+- The records the workstation, research studies, opportunity feed and Trading Desk will keep are created in the
+  database (migration 19). Nothing writes to them yet.
+
+Upgrade as usual (`./update.sh`); the first start copies the database to `data/backups/` and adds the new tables.
+Nothing places an order.
+
 ## 2.16.2
 
 A fix from the chart the evening 2.16.1 went out: at 7:24 p.m. New York the daily chart still ended on the day

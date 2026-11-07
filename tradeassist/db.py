@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS attempts (
 """
 
 
+BUSY_SECONDS = 15.0
+
+
 class Database:
     """Small wrapper over sqlite3. One connection, guarded by a lock; fine for a single-user app."""
 
@@ -102,9 +105,12 @@ class Database:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         existed = self.path != ":memory:" and Path(self.path).is_file() and Path(self.path).stat().st_size > 0
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        # 3.0: the trading daemon is a second process on the same file, so a writer waits for the other's lock
+        # (up to BUSY_SECONDS) instead of failing at once.
+        self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=BUSY_SECONDS)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute(f"PRAGMA busy_timeout = {int(BUSY_SECONDS * 1000)}")
         if self.path != ":memory:":
             self._conn.execute("PRAGMA journal_mode = WAL")
         self.backup_before_migration: Path | None = None
@@ -140,7 +146,7 @@ class Database:
 
     def _backup_if_migrations_pending(self) -> Path | None:
         """Copy an existing database file before migrations change it (backup.py)."""
-        from . import schema_v2  # noqa: F401 - registers the migrations
+        from . import schema_v2, schema_v3  # noqa: F401 - registers the migrations
         from .backup import backup_connection, backup_path, prune
         from .migrations import MIGRATIONS
         has_table = self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"

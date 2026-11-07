@@ -583,6 +583,8 @@ def test_analyze_has_an_interactive_chart_with_patterns_and_outcomes(tmp_path):
 
 
 @pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+# Before the open, so the scenario starts at today's readings and the factors' shared parts show (the last check).
+@pytest.mark.clock("2026-10-22T08:30")
 def test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_position(tmp_path):
     """2.13: the widget lists the factors with readings and betas, remodels as a value changes (the orange line),
     asks a (fake) ChatGPT and draws its line in purple, applies its settings, sizes shares and a spread, and ranks
@@ -618,11 +620,11 @@ def test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_posi
                      "Earnings ahead", "Similar patterns", "Model:", "at the horizon", "β"):
             assert word in text, word
         assert "demo data, made up" in text
-        before = page.inner_text(".wi-summary")
-        # A bigger market move remodels the line.
+        # A bigger market move remodels the line. (3.0: wait for the market's term itself; the summary can still be
+        # changing from the first model when the value is typed, which made the old "text changed" wait flaky.)
         page.fill("input[aria-label='US market (S&P 500) scenario']", "4")
-        page.wait_for_function("(b) => document.querySelector('.wi-summary').textContent !== b", arg=before, timeout=20000)
-        assert "US market (S&P 500) +" in page.inner_text(".wi-summary")
+        page.wait_for_function("document.querySelector('.wi-summary').textContent.includes('US market (S&P 500) +')",
+                               timeout=20000)
         # The AI's scenario, drawn and applied.
         assert page.is_disabled("button:text-is(\"Use the AI's pick\")")
         page.click("button:text-is('Ask ChatGPT')")
@@ -672,7 +674,7 @@ def test_analyze_has_a_what_if_widget_that_remodels_asks_the_ai_and_sizes_a_posi
         assert "on its own part" in page.inner_text(".wi-row[data-factor='sector']")
         page.locator("input[aria-label='Include US market (S&P 500)']").click()
         page.wait_for_function("document.querySelector(\".wi-row[data-factor='us_market'] .wi-unique\").textContent.includes('switched off')", timeout=20000)
-        assert page.locator(".wi-term[title*='already in the factors above']").count() >= 1
+        page.wait_for_selector(".wi-term[title*='already in the factors above']", timeout=20000)
         # 2.14: a trackpad pinch (ctrl+wheel) zooms the price axis too; Fit range puts it back.
         page.locator(".lw-chart").scroll_into_view_if_needed()
         box = page.locator(".lw-chart").bounding_box()
@@ -731,6 +733,7 @@ def test_every_screen_has_an_info_icon_that_opens_on_hover_or_click_and_closes_w
 
 
 @pytest.mark.skipif(_browser() is None, reason="Playwright is not installed")
+@pytest.mark.clock("2026-10-22T10:00")                    # the plan's opportunities are opened in the session
 def test_a_morning_blend_opens_on_analyze_opportunity_and_goes_to_paper_trading(tmp_path, monkeypatch):
     import tradeassist.clockwork as cw
     import tradeassist.morning as morning_mod

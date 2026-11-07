@@ -583,6 +583,8 @@ def test_the_universe_is_the_250_largest_plus_the_watchlist():
     assert set(names) - {"ZZZZ"} <= set(live_universe([]))          # Live news keeps its wider list
 
 
+# Day-trade cards are built in the morning session; after the close the plan rightly offers none.
+@pytest.mark.clock("2026-10-22T10:00")
 def test_the_plan_ranks_every_stock_with_the_markets_and_day_trade_cards(svc, monkeypatch):
     from tradeassist.opportunities import Runs, save_prefs
     names = ["AAPL", "MSFT", "KO", "JPM", "NVDA", "CAT", "PG", "XOM", "UNH", "TSLA"]

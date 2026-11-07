@@ -38,6 +38,7 @@ from .factors import NON_PRICE_FACTORS, Factors, earnings_days, factor_terms, mo
 from .optionmath import NY
 from .options.evaluator import horizon_date
 from .options.strategies import TEMPLATES, Strategies, StrategyError
+from . import riskmath
 from .providers.base import DataError
 
 log = logging.getLogger(__name__)
@@ -589,10 +590,9 @@ class WhatIf:
         if kind in ("shares", "short"):
             sign = 1 if kind == "shares" else -1
             pnl = sign * quantity * (prices - last)
+            theoretical = riskmath.theoretical_max_loss([riskmath.PayoffLeg(None, sign * quantity, last)])
             out.update({"cost": quantity * last, "cost_label": "shares bought" if sign > 0 else "proceeds of the short (margin not modelled)",
-                        "pnl_p10": sign * quantity * (p10 - last), "pnl_p50": sign * quantity * (p50 - last),
-                        "pnl_p90": sign * quantity * (p90 - last),
-                        "max_loss": quantity * last if sign > 0 else None, "unlimited_loss": sign < 0,
+                        "credit": False, "max_loss": quantity * last if sign > 0 else None, "unlimited_loss": sign < 0,
                         "breakevens": [last], "legs": [], "notes": [] if sign > 0 else
                         ["A short's loss has no limit: it grows with the price. Borrow fees and margin are not modelled."]})
         else:
@@ -607,10 +607,9 @@ class WhatIf:
                 raise RequestError(f"{self.strategy_choices()[kind]['label']}: {exc}") from exc
             cp, cv = np.array(sim["curve"]["prices"], dtype=float), np.array(sim["curve"]["pnl_at_date"], dtype=float)
             pnl = np.interp(prices, cp, cv)
-            at = lambda px: float(np.interp(px, cp, cv))      # noqa: E731
+            theoretical = riskmath.theoretical_max_loss(riskmath.legs_from_built(built["legs"]))
             out.update({"cost": abs(built["net_mid"]), "cost_label": "debit paid" if not built["credit"] else "credit received",
                         "net_mid": built["net_mid"], "credit": built["credit"],
-                        "pnl_p10": at(p10), "pnl_p50": at(p50), "pnl_p90": at(p90),
                         "max_loss": abs(built["max_loss"]) if built["max_loss"] is not None and not built["unlimited_loss"] else None,
                         "unlimited_loss": built["unlimited_loss"], "max_gain": built["max_gain"],
                         "unlimited_gain": built["unlimited_gain"], "breakevens": built["breakevens"], "expiration": built["expiration"],
@@ -618,22 +617,31 @@ class WhatIf:
                         "legs_text": [f"{'buy' if l['side'] == 'buy' else 'sell'} {l['strike']:g} {l['option_type']} {l['expiration']}" for l in built["legs"]],
                         "risk_check": built.get("risk_check"), "notes": built.get("notes") or [],
                         "p_profit_at_expiry": built.get("p_profit_at_expiry")})
-        out["expected_pnl"] = float((weights * pnl).sum())
-        out["p_profit"] = float(weights[pnl > 0].sum())
+        pnl = np.asarray(pnl, dtype=float)
+        stats = riskmath.outcome_stats(prices, weights, pnl, {0.10: p10, 0.50: p50, 0.90: p90})
+        capital = riskmath.capital_required(kind, cost=float(out["cost"]), credit=bool(out.get("credit")), quantity=quantity, last=last,
+                                            theoretical=theoretical["value"])
+        out.update({k: stats[k] for k in ("pnl_p10", "pnl_p50", "pnl_p90", "expected_pnl", "p_profit")})
+        out["risk_measures"] = riskmath.risk_block(theoretical=theoretical, stats=stats, capital=capital)
+        out.update({k: out["risk_measures"][k] for k in ("theoretical_max_loss", "modeled_worst_loss", "expected_shortfall",
+                                                          "capital_required")})
         out["p_loss_over_half"] = float(weights[pnl < -0.5 * (out["max_loss"] or out["cost"] or 1)].sum()) if (out.get("max_loss") or out.get("cost")) else None
         if out.get("max_loss"):
             risk, out["risk_basis"] = float(out["max_loss"]), "the most it can lose"
         else:
-            tail = -min(float(np.interp(p10, prices, pnl)), float(np.interp(p90, prices, pnl)))
+            # The 10th percentile of the P&L itself: for a short that is the loss when the price is high.
+            tail = -float(out["pnl_p10"])
             risk = max(1.0, tail)
-            out["risk_basis"] = ("the loss at the worse of the 10th and 90th percentile prices (no fixed limit)" if tail >= 1.0
-                                 else "no loss inside the 10-90 range; one dollar stands in (no fixed limit)")
+            out["risk_basis"] = ("the loss at the 10th percentile of outcomes (no fixed limit)" if tail >= 1.0
+                                 else "no loss in nine outcomes in ten; one dollar stands in (no fixed limit)")
         out["risk"] = risk
         out["score"] = out["expected_pnl"] / risk if risk > 0 else None
         out["pnl_curve"] = {"prices": [float(x) for x in prices[::8]], "pnl": [float(x) for x in pnl[::8]]}
-        out["note"] = ("P&L at the horizon under the scenario's 10-90 range of prices (a lognormal around the expected move), "
-                       "options valued by the simulator at the midpoint. Not advice; no order is placed.")
-        out["_grid"] = (prices, weights, np.asarray(pnl, dtype=float))     # for combinations; stripped from replies
+        out["note"] = ("P&L at the horizon under the scenario (a lognormal around the expected move), options valued by the "
+                       "simulator at the midpoint. The 10th, 50th and 90th are percentiles of the P&L itself. The most it can "
+                       "lose comes from the contract terms; the worst modeled outcome only from the scenario's range. Not "
+                       "advice; no order is placed.")
+        out["_grid"] = (prices, weights, pnl)                               # for combinations; stripped from replies
         return out
 
     @staticmethod
@@ -642,19 +650,27 @@ class WhatIf:
 
     @staticmethod
     def _stats(prices: np.ndarray, weights: np.ndarray, pnl: np.ndarray, p10: float, p50: float, p90: float) -> dict[str, Any]:
-        """The figures of one P&L curve under the scenario: the percentile P&Ls, the expected P&L, the chance of
-        a profit, and the average loss in the worst tenth of outcomes (CVaR 10%, a positive number)."""
-        order = np.argsort(pnl)
-        cum = np.cumsum(weights[order])
-        tail = order[cum <= 0.10 + 1e-12]
-        if len(tail) == 0:
-            tail = order[:1]
-        tail_w = weights[tail]
-        cvar = -float((pnl[tail] * tail_w).sum() / tail_w.sum())
-        return {"pnl_p10": float(np.interp(p10, prices, pnl)), "pnl_p50": float(np.interp(p50, prices, pnl)),
-                "pnl_p90": float(np.interp(p90, prices, pnl)), "expected_pnl": float((weights * pnl).sum()),
-                "p_profit": float(weights[pnl > 0].sum()), "cvar10": max(0.0, cvar),
-                "worst_in_range": float(-pnl.min()), "best_in_range": float(pnl.max())}
+        """The figures of one P&L curve under the scenario: the percentiles of the P&L, the expected P&L, the
+        chance of a profit, the average loss in the worst tenth of outcomes (expected shortfall, a positive
+        number) and the worst modeled outcome."""
+        return riskmath.outcome_stats(prices, weights, pnl, {0.10: p10, 0.50: p50, 0.90: p90})
+
+    @staticmethod
+    def _payoff_legs(row: dict[str, Any], units: float = 1.0) -> list[riskmath.PayoffLeg]:
+        """A valued position's expiration payoff, `units` times over."""
+        if row["kind"] in ("shares", "short"):
+            sign = 1 if row["kind"] == "shares" else -1
+            return [riskmath.PayoffLeg(None, sign * row["quantity"] * units, row["last"])]
+        legs = riskmath.legs_from_built(row.get("legs") or [])
+        return [riskmath.PayoffLeg(lg.option_type, lg.quantity * units, lg.entry, lg.strike, lg.multiplier, lg.expiration) for lg in legs]
+
+    def _combined_risk(self, parts: list[tuple[dict[str, Any], float]], stats: dict[str, Any]) -> dict[str, Any]:
+        legs = [lg for row, units in parts for lg in self._payoff_legs(row, units)]
+        theoretical = riskmath.theoretical_max_loss(legs)
+        caps = [row.get("capital_required") for row, _ in parts]
+        capital = ({"value": float(sum(c * units for c, (_, units) in zip(caps, parts))), "basis": "the sum of each position's own"}
+                   if all(c is not None for c in caps) else {"value": None, "basis": "a position's margin is set by the broker"})
+        return riskmath.risk_block(theoretical=theoretical, stats=stats, capital=capital)
 
     def combo(self, symbol: str, *, legs: list[dict[str, Any]], expected_pct: float, sd_pct: float, horizon_bars: int,
               group: str) -> dict[str, Any]:
@@ -681,19 +697,19 @@ class WhatIf:
             raise RequestError("None of the positions could be valued: " + "; ".join(f["error"] for f in failed))
         sc = rows[0]["scenario"]
         stats = self._stats(prices, weights, total, sc["p10"], sc["p50"], sc["p90"])
-        defined = all(not r.get("unlimited_loss") for r in rows)
+        risk = self._combined_risk([(r, 1.0) for r in rows], stats)
         cost = float(sum(r["cost"] for r in rows if not r.get("credit")))
         credit = float(sum(r["cost"] for r in rows if r.get("credit")))
         capital = float(sum(self._capital(r) for r in rows))
         return {"symbol": symbol, "rows": rows, "failed": failed, "scenario": sc, "last": rows[0]["last"],
-                "eval_date": rows[0]["eval_date"], "combined": {**stats, "cost": cost, "credit": credit, "capital": capital,
-                                                                 "defined_risk": defined,
-                                                                 "max_loss": stats["worst_in_range"] if defined else None,
-                                                                 "unlimited_loss": not defined,
-                                                                 "return_on_capital": stats["expected_pnl"] / capital if capital > 0 else None},
+                "eval_date": rows[0]["eval_date"],
+                "combined": {**stats, "cost": cost, "credit": credit, "capital": capital, **risk,
+                             "max_loss": risk["theoretical_max_loss"],
+                             "return_on_capital": stats["expected_pnl"] / capital if capital > 0 else None},
                 "note": ("The positions are valued together across the same range of prices, so hedges offset. The most it can "
-                         "lose is the worst point of the combined curve across the scenario's range when every position has a "
-                         "limit, else there is none. Not advice; no order is placed.")}
+                         "lose comes from the combined payoff at expiration (none when it has no limit, or when the options "
+                         "expire on different days); the worst modeled outcome is only the worst point of the scenario's "
+                         "range and caps nothing. Not advice; no order is placed.")}
 
     def _live_price(self, symbol: str) -> float:
         q = self.svc.market.quote(symbol)
@@ -811,9 +827,12 @@ class WhatIf:
                          "p_profit": float(weights[u["units"] * u["pnl"] > 0].sum()),
                          "legs_text": r.get("legs_text") or [], "expiration": r.get("expiration")})
         rows.sort(key=lambda x: -x["dollars"])
+        combined = None
+        if stats:
+            risk_m = self._combined_risk([(u["row"], float(u["units"])) for u in units_of if u["units"] > 0], stats)
+            combined = {**stats, **risk_m, "return_on_budget": stats["expected_pnl"] / budget, "max_loss": risk_m["theoretical_max_loss"]}
         return {"symbol": symbol, "budget": budget, "risk": lam, "max_share": max_share, "rows": rows, "skipped": skipped, "capped": capped,
-                "spent": spent, "left": budget - spent, "combined": {**stats, "return_on_budget": stats["expected_pnl"] / budget,
-                                                                    "max_loss": stats["worst_in_range"]} if stats else None,
+                "spent": spent, "left": budget - spent, "combined": combined,
                 "scenario": sc, "last": units_of[0]["row"]["last"], "eval_date": units_of[0]["row"]["eval_date"],
                 "note": (f"The split that maximises the expected P&L minus {lam:g} times the average loss in the worst tenth of "
                          f"outcomes, with no strategy over {max_share:.0%} of the budget and only strategies whose loss has a "

@@ -5,6 +5,7 @@ the API, and the page's pure helpers under Node."""
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -369,7 +370,11 @@ def test_shares_and_shorts_are_valued_at_the_scenarios_percentiles(tmp_path):
     sh = w.position("AAPL", kind="short", quantity=50, expected_pct=4.0, sd_pct=3.0, horizon_bars=5, group="1d", last=200.0)
     assert sh["pnl_p50"] == pytest.approx(-r["pnl_p50"]) and sh["unlimited_loss"] and sh["max_loss"] is None
     assert sh["p_profit"] == pytest.approx(1 - r["p_profit"], abs=0.01) and sh["score"] < 0
-    assert sh["risk"] == pytest.approx(50 * (sc["p90"] - 200)) and "worse of the 10th and 90th" in sh["risk_basis"]
+    # A short's 10th percentile outcome is the loss when the price is high.
+    assert sh["pnl_p10"] == pytest.approx(-50 * (sc["p90"] - 200)) and sh["pnl_p90"] == pytest.approx(-50 * (sc["p10"] - 200))
+    assert sh["risk"] == pytest.approx(50 * (sc["p90"] - 200)) and "10th percentile of outcomes" in sh["risk_basis"]
+    assert sh["theoretical_max_loss"] is None and sh["risk_measures"]["unlimited_loss"]
+    assert sh["capital_required"] == pytest.approx(1.5 * 50 * 200) and "Regulation T" in sh["risk_measures"]["capital_basis"]
     live = w.position("AAPL", kind="shares", quantity=1, expected_pct=0.0, sd_pct=1.0, horizon_bars=1, group="1d")
     assert live["last"] > 0 and live["scenario"]["p50"] == pytest.approx(live["last"])            # the live quote by default
     hourly = w.position("AAPL", kind="shares", quantity=1, expected_pct=1.0, sd_pct=1.0, horizon_bars=7, group="1h", last=200.0)
@@ -403,18 +408,51 @@ def test_a_combination_is_valued_together_so_hedges_offset(tmp_path):
     c = w.combo("AAPL", legs=[{"kind": "shares", "quantity": 100}, {"kind": "long_put", "quantity": 1}], expected_pct=3.0, sd_pct=3.0,
                 horizon_bars=5, group="1d")
     assert [r["kind"] for r in c["rows"]] == ["shares", "long_put"] and c["failed"] == []
-    cb = c["combined"]
-    assert cb["pnl_p50"] == pytest.approx(c["rows"][0]["pnl_p50"] + c["rows"][1]["pnl_p50"], abs=1e-6)
-    assert cb["defined_risk"] and cb["max_loss"] < shares["max_loss"]                 # the put caps the shares' loss
-    assert cb["pnl_p10"] > shares["pnl_p10"] and cb["pnl_p90"] < shares["pnl_p90"] and 0 < cb["p_profit"] < 1
-    assert cb["cvar10"] >= 0 and cb["capital"] == pytest.approx(c["rows"][0]["cost"] + c["rows"][1]["cost"])
-    assert "no order is placed" in c["note"]
+    cb, put = c["combined"], c["rows"][1]
+    # Both legs move one way with the price, so the middle outcome adds up.
+    assert cb["pnl_p50"] == pytest.approx(c["rows"][0]["pnl_p50"] + put["pnl_p50"], abs=1e-6)
+    # The put caps the shares' loss: from the contract terms, the floor is the strike less the premium paid.
+    strike = put["legs"][0]["strike"]
+    floor = 100 * (c["last"] - strike) + 100 * put["legs"][0]["mid"]
+    assert cb["defined_risk"] and cb["theoretical_max_loss"] == pytest.approx(floor, rel=1e-6)
+    assert cb["max_loss"] == cb["theoretical_max_loss"] < shares["theoretical_max_loss"]
+    # The hedge pays in the bad outcomes: the worst modeled loss is smaller than the shares' alone.
+    assert cb["modeled_worst_loss"] < shares["modeled_worst_loss"]
+    # Its premium costs in the good ones. (A protective put does not always improve the 10th percentile: when that
+    # outcome is above the strike, the premium makes it worse. 2.x asserted it did, and failed on some days.)
+    assert cb["pnl_p90"] < shares["pnl_p90"] and 0 < cb["p_profit"] < 1
+    assert cb["expected_shortfall"] >= 0 and cb["cvar10"] == cb["expected_shortfall"]
+    # Before expiry the model can sit just past the floor, by the interest a deep in-the-money European put gives up.
+    rates_slack = 100 * strike * (1 - math.exp(-0.04 * put["dte"] / 365))
+    assert cb["modeled_worst_loss"] <= cb["theoretical_max_loss"] + rates_slack
+    assert cb["capital"] == pytest.approx(c["rows"][0]["cost"] + put["cost"])
+    assert cb["capital_required"] == pytest.approx(shares["capital_required"] + put["capital_required"])
+    assert "no order is placed" in c["note"] and "caps nothing" in c["note"]
     with_short = w.combo("AAPL", legs=[{"kind": "short", "quantity": 10}], expected_pct=3.0, sd_pct=3.0, horizon_bars=5, group="1d")
     assert with_short["combined"]["unlimited_loss"] and with_short["combined"]["max_loss"] is None
     with pytest.raises(RequestError):
         w.combo("AAPL", legs=[{"kind": "lottery", "quantity": 1}], expected_pct=3.0, sd_pct=3.0, horizon_bars=5, group="1d")
     with pytest.raises(RequestError):
         w.combo("AAPL", legs=[], expected_pct=3.0, sd_pct=3.0, horizon_bars=5, group="1d")
+
+
+def test_percentiles_are_of_the_pnl_so_a_straddle_is_worst_when_the_stock_stands_still(tmp_path):
+    """3.0 P0: a straddle's P&L is highest at both ends of the price range, so the P&L at the 10th percentile price
+    is near its best, not its 10th percentile. The labeled percentiles are now those of the P&L itself."""
+    import numpy as np
+
+    from tradeassist import riskmath
+    w = whatif(service(tmp_path))
+    r = w._position("AAPL", kind="long_straddle", quantity=1, expected_pct=0.0, sd_pct=4.0, horizon_bars=5, group="1d")
+    prices, weights, pnl = r["_grid"]
+    assert riskmath.monotone(pnl) == 0
+    assert r["pnl_p10"] == pytest.approx(riskmath.weighted_quantile(pnl, weights, 0.10))
+    at_p10_price = float(np.interp(r["scenario"]["p10"], prices, pnl))
+    assert r["pnl_p10"] < at_p10_price - 1.0                     # the old reading flattered it
+    assert r["pnl_p10"] <= r["pnl_p50"] <= r["pnl_p90"]
+    # A bought straddle can lose no more than its debit; the model's worst never exceeds that.
+    assert r["theoretical_max_loss"] == pytest.approx(r["cost"], rel=1e-6)
+    assert r["modeled_worst_loss"] <= r["theoretical_max_loss"] + 1e-6
 
 
 def test_a_budget_is_split_by_expected_gain_minus_the_worst_tenth_within_the_caps(tmp_path):

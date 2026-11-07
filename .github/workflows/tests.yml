@@ -27,10 +27,13 @@ jobs:
             requirements-dev.txt
       - name: Install
         run: pip install -r requirements-dev.txt
+      - name: Browser for the screen tests
+        # The browser tests used to skip in CI for want of a browser; 3.0's workstation is tested in one.
+        run: python -m playwright install --with-deps chromium
       - name: Syntax and imports
         run: |
           python -m compileall -q tradeassist tests run.py
-          python -c "import tradeassist.api, tradeassist.api_v2, tradeassist.desk, tradeassist.analysis"
+          python -c "import tradeassist.api, tradeassist.api_v2, tradeassist.api_v3, tradeassist.desk, tradeassist.analysis"
       - name: Lint
         run: ruff check .
       - name: Migration tests

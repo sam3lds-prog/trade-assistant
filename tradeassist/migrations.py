@@ -46,7 +46,7 @@ def applied_versions(conn: sqlite3.Connection) -> list[int]:
 
 def migrate(conn: sqlite3.Connection) -> list[int]:
     """Apply every migration not yet recorded, in order. Returns the versions applied now."""
-    from . import schema_v2  # noqa: F401 - registers the migrations
+    from . import schema_v2, schema_v3  # noqa: F401 - registers the migrations
     done = set(applied_versions(conn))
     conn.commit()
     ran = []

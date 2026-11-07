@@ -436,7 +436,7 @@ function whatIfWidget(symbol, chartApi) {
       el("div", { class: "wi-pos-head" }, el("strong", { text: `${r.rows.length} position${r.rows.length === 1 ? "" : "s"} together` }),
         el("span", { class: "muted small", text: ` under ${label}: ${signedPct(r.scenario.expected_pct, 2)} expected from ${money(r.last)}, prices ${money(r.scenario.p10)} – ${money(r.scenario.p90)} (10th–90th) by ${r.eval_date}.` })),
       statTiles(c),
-      el("p", { class: "small" }, el("span", { text: `Ties up ${money(c.capital, 0)}${c.cost ? ` (${money(c.cost, 0)} paid` : ""}${c.credit ? `${c.cost ? ", " : " ("}${money(c.credit, 0)} received` : ""}${c.cost || c.credit ? ")" : ""}. Most it can lose across the scenario's range: ${c.unlimited_loss ? "no limit" : money(c.max_loss, 0)}${isNum(c.return_on_capital) ? `; expected ${signedPct(100 * c.return_on_capital, 1)} on the capital` : ""}.` })),
+      el("p", { class: "small" }, el("span", { text: `Ties up ${money(c.capital, 0)}${c.cost ? ` (${money(c.cost, 0)} paid` : ""}${c.credit ? `${c.cost ? ", " : " ("}${money(c.credit, 0)} received` : ""}${c.cost || c.credit ? ")" : ""}. Most it can lose, from the contract terms: ${c.unlimited_loss ? "no limit" : isNum(c.theoretical_max_loss) ? money(c.theoretical_max_loss, 0) : "not fixed by the terms"}; worst modeled outcome ${money(c.modeled_worst_loss, 0)} (a scenario, not a cap)${isNum(c.return_on_capital) ? `; expected ${signedPct(100 * c.return_on_capital, 1)} on the capital` : ""}.` })),
       table([
         { label: "Position", cell: x => el("span", { text: `${x.label} × ${x.quantity}` }) },
         { label: "Cost", num: true, cell: x => money(x.cost, 0) },
@@ -475,7 +475,7 @@ function whatIfWidget(symbol, chartApi) {
       el("div", { class: "wi-pos-head" }, el("strong", { text: c ? `${money(r.spent, 0)} of ${money(r.budget, 0)} put to work, ${money(r.left, 0)} kept` : `Nothing worth buying at this caution: the ${money(r.budget, 0)} stays in cash` }),
         el("span", { class: "muted small", text: ` under ${label}, ${WHATIFX.riskWord(r.risk)} (caution ${r.risk}), ${Math.round(100 * r.max_share)}% cap.` })),
       c ? statTiles(c) : "",
-      c ? el("p", { class: "small", text: `Expected ${signedPct(100 * c.return_on_budget, 1)} on the budget by ${r.eval_date}; most it can lose across the scenario's range ${money(c.max_loss, 0)}.` }) : "",
+      c ? el("p", { class: "small", text: `Expected ${signedPct(100 * c.return_on_budget, 1)} on the budget by ${r.eval_date}; most it can lose, from the contract terms, ${isNum(c.theoretical_max_loss) ? money(c.theoretical_max_loss, 0) : "not fixed by the terms"}; worst modeled outcome ${money(c.modeled_worst_loss, 0)}.` }) : "",
       r.rows.length ? table([
         { label: "Strategy", cell: x => el("span", { text: x.label }) },
         { label: "Units", num: true, cell: x => `${x.units.toLocaleString()} ${x.units === 1 ? x.unit.replace(/s$/, "") : x.unit}` },
