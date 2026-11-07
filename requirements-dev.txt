@@ -3,3 +3,7 @@
 pytest-cov>=5.0
 hypothesis>=6.100
 ruff>=0.6
+# 3.0: the tests run on a fixed clock (tests/conftest.py), so a result never depends on when CI runs.
+time-machine>=2.14
+# The browser tests (tests/test_static_assets.py, tests/test_workstation.py); CI installs Chromium for them.
+playwright>=1.47

@@ -208,6 +208,10 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
 
     from .api_v2 import build_router
     app.include_router(build_router(svc))
+    from .api_v3 import build_router_v3
+    from .v3 import install as install_v3
+    install_v3(svc)
+    app.include_router(build_router_v3(svc))
 
     @app.exception_handler(DataError)
     async def _data_error(_: Request, exc: DataError):

@@ -1,0 +1,100 @@
+{
+ "black76_call": 8.859609948426797,
+ "black76_delta": 0.6552381718880318,
+ "black76_put": 3.9093607796809637,
+ "black76_vega": 0.19139753288296685,
+ "blend": {
+  "cvar10": 99.25615015999992,
+  "expected_pnl": 10.216036508821405,
+  "pnl_p10": -99.25615015999992,
+  "pnl_p50": 14.93752444000031,
+  "pnl_p90": 113.60311971331367,
+  "spent": 7635.08
+ },
+ "implied_vol": 0.29999998879954226,
+ "similar_best_corr": 0.9087501931939469,
+ "similar_h5_median": 0.515527401794913,
+ "similar_matches": 4,
+ "whatif_bull_call_spread": {
+  "capital_required": 214.0,
+  "cost": 214.0,
+  "expected_pnl": 73.05765697919026,
+  "expected_shortfall": 182.61376510833273,
+  "modeled_worst_loss": 213.9907013894191,
+  "p_profit": 0.6615554655657818,
+  "pnl_p10": -149.704823879525,
+  "pnl_p50": 90.83153704633705,
+  "pnl_p90": 263.0369732813976,
+  "theoretical_max_loss": 214.0
+ },
+ "whatif_combo": {
+  "capital_required": 20399.0,
+  "expected_pnl": 298.367267421041,
+  "expected_shortfall": 372.8961309814409,
+  "modeled_worst_loss": 412.8836388894083,
+  "pnl_p10": -327.75489839002535,
+  "pnl_p50": 161.05702273493804,
+  "pnl_p90": 1126.5388909716473,
+  "theoretical_max_loss": 399.0
+ },
+ "whatif_iron_condor": {
+  "capital_required": 395.5,
+  "cost": 104.5,
+  "expected_pnl": -42.2547070449876,
+  "expected_shortfall": 294.31191273182264,
+  "modeled_worst_loss": 394.90330528851285,
+  "p_profit": 0.50751916855863,
+  "pnl_p10": -222.39730922182247,
+  "pnl_p50": 1.8741951755215664,
+  "pnl_p90": 58.85509660620815,
+  "theoretical_max_loss": 395.5
+ },
+ "whatif_long_call": {
+  "capital_required": 425.0,
+  "cost": 425.0,
+  "expected_pnl": 285.61077903951536,
+  "expected_shortfall": 385.35321741418176,
+  "modeled_worst_loss": 424.99038276799934,
+  "p_profit": 0.5987166237987452,
+  "pnl_p10": -340.2894738750591,
+  "pnl_p50": 148.30402886940342,
+  "pnl_p90": 1113.5559897564708,
+  "theoretical_max_loss": 425.0
+ },
+ "whatif_long_put": {
+  "capital_required": 355.0,
+  "cost": 355.0,
+  "expected_pnl": -118.85869979776439,
+  "expected_shortfall": 353.0668506405224,
+  "modeled_worst_loss": 354.9999767943001,
+  "p_profit": 0.23676413381640024,
+  "pnl_p10": -349.75699169600654,
+  "pnl_p50": -239.82297726506275,
+  "pnl_p90": 293.0401190497811,
+  "theoretical_max_loss": 355.0
+ },
+ "whatif_long_straddle": {
+  "capital_required": 780.0,
+  "cost": 780.0,
+  "expected_pnl": 166.75207924175095,
+  "expected_shortfall": 208.0185139351228,
+  "modeled_worst_loss": 210.28097879008544,
+  "p_profit": 0.49747204134704526,
+  "pnl_p10": -202.09872844198455,
+  "pnl_p50": 3.3962652082779523,
+  "pnl_p90": 782.9341661658242,
+  "theoretical_max_loss": 780.0
+ },
+ "whatif_shares": {
+  "capital_required": 20044.0,
+  "cost": 20044.0,
+  "expected_pnl": 417.22596721880535,
+  "expected_shortfall": 983.2582344527252,
+  "modeled_worst_loss": 2622.022491840485,
+  "p_profit": 0.6855893518457861,
+  "pnl_p10": -620.7950174398064,
+  "pnl_p50": 400.8800000000008,
+  "pnl_p90": 1476.2958826676538,
+  "theoretical_max_loss": 20044.0
+ }
+}

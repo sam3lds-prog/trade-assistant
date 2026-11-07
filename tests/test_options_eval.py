@@ -3,6 +3,7 @@
 from datetime import date, datetime
 
 import pytest
+import time_machine
 from fastapi.testclient import TestClient
 
 from tradeassist.api import create_app
@@ -22,12 +23,17 @@ def test_horizon_and_expiration_choice():
     assert oe.pick_expirations(["2026-10-09"], date(2026, 10, 6), date(2026, 11, 3)) == []
 
 
+# The chains and the theses are dated 6 October 2026: contracts that expire before the horizon must still be listed.
+pytestmark = pytest.mark.clock("2026-10-06T12:00")
+
+
 @pytest.fixture(scope="module")
 def chains():
     settings = Settings(data_mode="demo")
-    svc = TradeAssistant(settings, provider=DemoData(today=date(2026, 10, 6)), db=Database(":memory:"))
-    exps = svc.market.expirations("AAPL")
-    return svc, [svc._chain_for("AAPL", e) for e in exps]
+    with time_machine.travel(datetime(2026, 10, 6, 12, 0, tzinfo=NY), tick=True):
+        svc = TradeAssistant(settings, provider=DemoData(today=date(2026, 10, 6)), db=Database(":memory:"))
+        exps = svc.market.expirations("AAPL")
+        return svc, [svc._chain_for("AAPL", e) for e in exps]
 
 
 def run(chains, direction=1, **kw):

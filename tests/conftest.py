@@ -1,9 +1,12 @@
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import pytest
+import time_machine
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -11,6 +14,46 @@ import tradeassist.api as _api  # noqa: E402
 
 # The test client calls itself "testserver"; only the tests let the app answer to that name.
 _api.TEST_HOSTS = ("testserver",)
+
+NY = ZoneInfo("America/New_York")
+# Every test starts at the same moment, so a result never depends on when the suite runs. Before 3.0 the
+# suite read the real clock: the same commit failed two tests at 7 p.m. New York and six at 2 a.m., and the
+# demo market (which is generated around today's date) priced the same option differently each day.
+# A Thursday after the close, when every session in the chart's range is complete and the demo market has stocks
+# that moved more than a daily range (the movers tests need some). The clock still ticks
+# from there, so timeouts, threads and the browser tests behave normally.
+TEST_NOW = datetime(2026, 10, 22, 17, 0, tzinfo=NY)
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "clock(when): run the test with the clock at this New York time "
+                                       "('2026-10-22T10:15') instead of where the suite's clock has got to")
+    # Started before collection, so constants a test module sets at import (NOW = datetime.now(...)) are on it.
+    config._ta_clock = time_machine.travel(TEST_NOW, tick=True)
+    config._ta_clock.start()
+
+
+def pytest_unconfigure(config):
+    clock = getattr(config, "_ta_clock", None)
+    if clock is not None:
+        clock.stop()
+
+
+def ny_time(when) -> datetime:
+    when = datetime.fromisoformat(when) if isinstance(when, str) else when
+    return when if when.tzinfo else when.replace(tzinfo=NY)
+
+
+@pytest.fixture(autouse=True)
+def _test_clock(request):
+    """A test with a clock mark runs from that moment; the rest run on the suite's clock, which started at
+    TEST_NOW and ticks on (a full run ends about a quarter of an hour later, still after the same close)."""
+    mark = request.node.get_closest_marker("clock")
+    if mark is None:
+        yield
+        return
+    with time_machine.travel(ny_time(mark.args[0]), tick=True):
+        yield
 
 
 def make_bars(closes, start="2024-01-02", opens=None, highs=None, lows=None, volume=1_000_000):
