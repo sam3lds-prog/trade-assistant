@@ -4,52 +4,38 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trade Assistant</title>
+<link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/gridstack.css">
+<link rel="stylesheet" href="/ws.css">
 </head>
-<body>
-<div class="shell">
-  <nav class="rail" aria-label="Sections">
-    <h1>Trade Assistant</h1>
-    <div class="nav-group" data-group="today"><div class="nav-group-label">Today</div>
-      <button class="nav hidden" data-view="morning" data-feature="morning trend_engine_v2">Morning plan</button>
-      <button class="nav hidden" data-view="live" data-feature="live_news morning">Live news</button>
-      <button class="nav hidden" data-view="today" data-feature="today trend_engine_v2">Today</button>
-      <button class="nav hidden" data-view="market" data-feature="market_news">Market &amp; news</button>
-    </div>
-    <div class="nav-group" data-group="find"><div class="nav-group-label">Find</div>
-      <button class="nav hidden" data-view="ideas" data-feature="trade_ideas trend_engine_v2">Trade ideas</button>
-      <button class="nav hidden" data-view="scanner" data-feature="scanner">Scanner</button>
-    </div>
-    <div class="nav-group" data-group="decide"><div class="nav-group-label">Decide</div>
-      <button class="nav hidden" data-view="analyze" data-feature="trend_engine_v2">Analyze opportunity</button>
-    </div>
-    <div class="nav-group" data-group="price"><div class="nav-group-label">Price &amp; simulate</div>
-      <button class="nav" data-view="price">Price an option</button>
-      <button class="nav" data-view="simulate">Simulate a trade</button>
-      <button class="nav hidden" data-view="lab" data-feature="options_lab">Options lab</button>
-    </div>
-    <div class="nav-group" data-group="hold"><div class="nav-group-label">Hold</div>
-      <button class="nav hidden" data-view="positions" data-feature="unified_positions">Positions</button>
-      <button class="nav hidden" data-view="portfolio" data-feature="portfolio_risk">Portfolio risk</button>
-      <button class="nav hidden" data-view="paper" data-feature="paper_trading">Paper trading</button>
-    </div>
-    <div class="nav-group" data-group="learn"><div class="nav-group-label">Learn</div>
-      <button class="nav hidden" data-view="trades" data-feature="trade_history">My trades</button>
-      <button class="nav" data-view="journal">Journal</button>
-      <button class="nav" data-view="patterns">Pattern lab</button>
-      <button class="nav" data-view="backtest">Backtest</button>
-      <button class="nav" data-view="research">Research a stock</button>
-    </div>
-    <div class="nav-group" data-group="trust"><div class="nav-group-label">Trust</div>
-      <button class="nav" data-view="health">Data health</button>
-    </div>
-    <div class="status" id="status" aria-live="polite">Connecting…</div>
-  </nav>
-  <main id="main"></main>
+<body data-app="workstation">
+<header class="ws-top">
+  <div class="ws-brand">Trade Assistant<small>3.0</small></div>
+  <nav class="ws-tabs" id="ws-tabs" role="tablist" aria-label="Workspaces"></nav>
+  <div class="ws-tools">
+    <button class="ws-btn" id="ws-palette-btn" type="button" title="Find a stock or a command">Find <span class="ws-kbd">Ctrl K</span></button>
+    <button class="ws-btn" id="ws-add" type="button" aria-haspopup="menu">Add widget</button>
+    <button class="ws-btn" id="ws-layout" type="button" aria-haspopup="menu">Layout</button>
+    <button class="ws-btn" id="ws-classic" type="button" aria-haspopup="menu">Classic screens</button>
+    <button class="ws-btn" id="ws-dock-toggle" type="button" aria-pressed="true">Hide dock</button>
+  </div>
+</header>
+<div class="ws-status" id="ws-status" aria-live="polite">Connecting…</div>
+<div class="ws-body">
+  <main class="ws-tabsets" id="ws-tabsets"></main>
+  <aside class="ws-dock" id="ws-dock" aria-label="Dock"></aside>
 </div>
+<div class="ws-overlay hidden" id="ws-palette">
+  <div class="ws-palette" role="dialog" aria-label="Find a stock or a command">
+    <input type="text" aria-label="Ticker or command" placeholder="Type a ticker, a workspace or a widget" autocomplete="off" spellcheck="false">
+    <ul role="listbox" aria-label="Matches"></ul>
+  </div>
+</div>
+<div class="ws-toast hidden" id="ws-toast" role="status"></div>
 <script src="/flow.js"></script>
 <script src="/app.js"></script>
 <script src="/v2.js"></script>
@@ -66,5 +52,8 @@
 <script src="/basket.js"></script>
 <script src="/paper.js"></script>
 <script src="/help.js"></script>
+<script src="/gridstack.js"></script>
+<script src="/ws-core.js"></script>
+<script src="/ws-widgets.js"></script>
 </body>
 </html>

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trade Assistant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="rail" aria-label="Sections">
+    <h1>Trade Assistant</h1>
+    <div class="nav-group" data-group="today"><div class="nav-group-label">Today</div>
+      <button class="nav hidden" data-view="morning" data-feature="morning trend_engine_v2">Morning plan</button>
+      <button class="nav hidden" data-view="live" data-feature="live_news morning">Live news</button>
+      <button class="nav hidden" data-view="today" data-feature="today trend_engine_v2">Today</button>
+      <button class="nav hidden" data-view="market" data-feature="market_news">Market &amp; news</button>
+    </div>
+    <div class="nav-group" data-group="find"><div class="nav-group-label">Find</div>
+      <button class="nav hidden" data-view="ideas" data-feature="trade_ideas trend_engine_v2">Trade ideas</button>
+      <button class="nav hidden" data-view="scanner" data-feature="scanner">Scanner</button>
+    </div>
+    <div class="nav-group" data-group="decide"><div class="nav-group-label">Decide</div>
+      <button class="nav hidden" data-view="analyze" data-feature="trend_engine_v2">Analyze opportunity</button>
+    </div>
+    <div class="nav-group" data-group="price"><div class="nav-group-label">Price &amp; simulate</div>
+      <button class="nav" data-view="price">Price an option</button>
+      <button class="nav" data-view="simulate">Simulate a trade</button>
+      <button class="nav hidden" data-view="lab" data-feature="options_lab">Options lab</button>
+    </div>
+    <div class="nav-group" data-group="hold"><div class="nav-group-label">Hold</div>
+      <button class="nav hidden" data-view="positions" data-feature="unified_positions">Positions</button>
+      <button class="nav hidden" data-view="portfolio" data-feature="portfolio_risk">Portfolio risk</button>
+      <button class="nav hidden" data-view="paper" data-feature="paper_trading">Paper trading</button>
+    </div>
+    <div class="nav-group" data-group="learn"><div class="nav-group-label">Learn</div>
+      <button class="nav hidden" data-view="trades" data-feature="trade_history">My trades</button>
+      <button class="nav" data-view="journal">Journal</button>
+      <button class="nav" data-view="patterns">Pattern lab</button>
+      <button class="nav" data-view="backtest">Backtest</button>
+      <button class="nav" data-view="research">Research a stock</button>
+    </div>
+    <div class="nav-group" data-group="trust"><div class="nav-group-label">Trust</div>
+      <button class="nav" data-view="health">Data health</button>
+    </div>
+    <div class="status" id="status" aria-live="polite">Connecting…</div>
+  </nav>
+  <main id="main"></main>
+</div>
+<script src="/flow.js"></script>
+<script src="/app.js"></script>
+<script src="/v2.js"></script>
+<script src="/lab.js"></script>
+<script src="/decide.js"></script>
+<script src="/trades.js"></script>
+<script src="/ideas.js"></script>
+<script src="/morning.js"></script>
+<script src="/live.js"></script>
+<script src="/lwcharts.js"></script>
+<script src="/chart.js"></script>
+<script src="/whatif.js"></script>
+<script src="/blend.js"></script>
+<script src="/basket.js"></script>
+<script src="/paper.js"></script>
+<script src="/help.js"></script>
+</body>
+</html>

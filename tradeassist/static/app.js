@@ -278,6 +278,8 @@ const PAGE_VERSION = (() => {
 const main = document.getElementById("main");
 
 function show(name) {
+  // 3.0: in the workstation a screen opens as a widget instead (ws-core.js sets the route).
+  if (state.route) return state.route(name);
   for (const btn of document.querySelectorAll(".rail button.nav")) {
     if (btn.dataset.view === name) btn.setAttribute("aria-current", "page"); else btn.removeAttribute("aria-current");
   }
@@ -296,6 +298,7 @@ async function loadStatus() {
   const box = document.getElementById("status");
   try {
     const s = state.status = await api("/api/status");
+    if (!box) return;
     const clock = { open: "Market open", closed: "Market closed", pre: "Pre-market", post: "After hours", premarket: "Pre-market", postmarket: "After hours" }[s.clock.state] || "Market hours unknown";
     box.replaceChildren(el("strong", { text: s.data.label }), el("span", { text: s.data.realtime ? "Real-time quotes" : s.data.mode === "demo" ? "Made-up prices" : "Delayed 15 minutes" }),
       el("div", { text: clock }), el("div", { text: "Advisory only: this app never places orders." }),
@@ -1671,4 +1674,5 @@ async function start() {
   const named = location.hash.slice(1);
   show(BUILDERS[named] ? named : BUILDERS.morning ? "morning" : BUILDERS.today ? "today" : "price");
 }
-document.addEventListener("DOMContentLoaded", start);
+// The classic page only: the workstation (3.0) loads these scripts for their renderers and starts itself.
+document.addEventListener("DOMContentLoaded", () => { if (document.body.dataset.app !== "workstation") start(); });
