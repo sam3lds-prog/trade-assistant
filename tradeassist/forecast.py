@@ -261,7 +261,10 @@ def forecast(target: A.Series, pool: Sequence[A.Series], horizon: int, *, calibr
 
 
 def record_target(as_of: date, horizon: int) -> date:
-    return (pd.Timestamp(as_of) + pd.offsets.BDay(horizon)).date()
+    """The session a forecast made from `as_of`'s close is judged at: `horizon` trading sessions later on the exchange
+    calendar (4.0; before, pandas business days, which counted market holidays as sessions)."""
+    from .marketdays import add_trading_days
+    return add_trading_days(as_of, horizon)
 
 
 __all__ = ["RANGE_WORDS", "MODEL_VERSION", "COMPONENTS", "components_at", "fit", "walk_forward", "forecast", "calibration_contract", "record_target", "Z80"]

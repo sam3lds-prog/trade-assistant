@@ -26,12 +26,18 @@ def main() -> None:
                         help="Build the morning plan and print it instead of emailing (a dry run), then exit")
     parser.add_argument("--daemon", action="store_true",
                         help="Run the trading daemon: the Trading Desk's jobs, notifications and phone approvals (setup_daemon.sh keeps it running)")
+    parser.add_argument("--replay", nargs=argparse.REMAINDER, metavar="COMMAND",
+                        help="4.0 replays: 'dataset build', 'dataset list', 'run', 'resume RUN', 'runs', 'report RUN' "
+                             "(python run.py --replay --help for more)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     from tradeassist.events import protect_logging
     # No credential reaches the log, from any module or from uvicorn, in a message or a traceback.
     protect_logging("uvicorn", "uvicorn.error", "uvicorn.access", "tradeassist")
     settings = load_settings()
+    if args.replay is not None:
+        from tradeassist.v4.cli import main as replay_main
+        raise SystemExit(replay_main(settings, args.replay))
     if args.daemon:
         from tradeassist.daemon import run as run_daemon
         raise SystemExit(run_daemon(settings))

@@ -1,7 +1,8 @@
 # Your settings and tokens: never commit these.
 .env
-# Your database, Robinhood sign-in and capture files.
-data/
+# Your database, Robinhood sign-in and capture files (the top-level data folder only: 4.0's engine has a
+# source package named data, tradeassist/intelligence/data/).
+/data/
 *.db
 # Local Python environment and caches.
 .venv/

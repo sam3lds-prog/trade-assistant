@@ -129,7 +129,7 @@ ALLOWED_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
 TEST_HOSTS: tuple[str, ...] = ()
 # API reads that another site must not be able to set off through the browser (an <img> or a
 # script tag), because they cost requests to the data source, Finnhub or more.
-GUARDED_READS = ("/api/", "/v2/")
+GUARDED_READS = ("/api/", "/v2/", "/v4/")
 
 
 def create_app(settings: Settings | None = None, assistant: TradeAssistant | None = None) -> FastAPI:
@@ -212,6 +212,10 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
     from .v3 import install as install_v3
     install_v3(svc)
     app.include_router(build_router_v3(svc))
+    from .v4 import install as install_v4
+    from .v4.api import build_router_v4
+    install_v4(svc)
+    app.include_router(build_router_v4(svc))
 
     @app.exception_handler(DataError)
     async def _data_error(_: Request, exc: DataError):

@@ -894,7 +894,15 @@ class TradingDesk:
 
     def make_worker(self, component: str, defer_to: str | None, extra_handlers: dict[str, Any] | None = None,
                     extra_schedules: list[Schedule] | None = None) -> Worker:
-        return Worker(self.db, {**self.handlers(), **(extra_handlers or {})}, self.schedules() + (extra_schedules or []),
+        # Other areas' jobs (4.0: grading forecasts) run in the same worker, whichever process holds it.
+        ext_handlers: dict[str, Any] = {}
+        ext_schedules: list[Schedule] = []
+        for provide in getattr(self.svc, "job_extensions", []):
+            h, s = provide(self.svc)
+            ext_handlers.update(h)
+            ext_schedules.extend(s)
+        return Worker(self.db, {**self.handlers(), **ext_handlers, **(extra_handlers or {})},
+                      self.schedules() + ext_schedules + (extra_schedules or []),
                       component=component, defer_to=defer_to, info=lambda: {"mode": self.mode})
 
     def ensure_worker(self) -> None:
