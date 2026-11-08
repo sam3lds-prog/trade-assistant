@@ -20,6 +20,27 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.0.0 part C — the models on the paper desk, factors, stock specialists, events
+
+The last of three parts of 4.0 ([V4.md](V4.md)). **No live permission is added or broadened**: the models' trades
+reach paper and shadow accounts only, through the existing policy and risk engine, and wait for your approval unless
+your policy is already capped_autopilot on such an account.
+
+- **Paper trading** (Model Lab): switch a deployment's paper trading on and each setup its gate took after the close
+  becomes a proposal at the next day's ask, inside the policy's trading window, with its stop, target and
+  five-session exit managed by the models (software-monitored, as for the autopilot). The desk itself refuses a model
+  proposal for any account but paper or shadow, and the models' exits sell only the shares they bought. They share the
+  autopilot's daily order count. Each trade is linked to the frozen forecast it came from; the record compares paper
+  fills with the simulation of the same forecasts and with what passing would have earned on the same days.
+- **Factors**: betas to the market and sector, correlation, idiosyncratic move and volatility; the `ridge_f` and
+  `gbm_f` families read them.
+- **Stock specialists**: `ridge_spec` and `gbm_spec` correct a stock only where its miss on unseen rows is beyond
+  three standard errors, shrunk toward zero; a **Stock specialists** widget shows which.
+- **Events**: with `MODEL_EVENTS=1`, headlines are read into a fixed vocabulary after each close and shown beside each
+  Model forecast, stamped with when they were published. No model trades on them yet.
+- The new families are opt-in; the defaults are unchanged.
+- Trading-database migration 23 adds `model_trade_links`; replay.db migration 3 adds the paper switch and `events`.
+
 ## 4.0 part B — the held-out year, shadow forecasts, Model Lab
 
 The second of three parts of 4.0 ([V4.md](V4.md)). **No trading permission is changed**: nothing here proposes,

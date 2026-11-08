@@ -53,3 +53,31 @@ def deployments(cur: sqlite3.Cursor) -> None:
         log_path           TEXT,
         spawned_at         TEXT               -- when the screen last started a process for it (a second click waits)
     )""")
+
+
+@migration(3, "4.0 phases 6-7: a deployment's paper-trading switch; extracted news events")
+def paper_and_events(cur: sqlite3.Cursor) -> None:
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(deployments)").fetchall()}
+    if "paper_trading" not in columns:
+        # Off by default: a deployment's taken setups reach the paper desk only after you switch it on.
+        cur.execute("ALTER TABLE deployments ADD COLUMN paper_trading INTEGER NOT NULL DEFAULT 0")
+    if "paper_changed_at" not in columns:
+        cur.execute("ALTER TABLE deployments ADD COLUMN paper_changed_at TEXT")
+    # Structured events read from headlines and filings, kept with the moment each was published and the moment it
+    # was read, so a model can only ever be shown events published before its cutoff.
+    cur.execute("""CREATE TABLE IF NOT EXISTS events (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol        TEXT NOT NULL,
+        published_at  TEXT NOT NULL,
+        extracted_at  TEXT NOT NULL,
+        kind          TEXT NOT NULL CHECK (kind IN ('earnings', 'guidance', 'analyst', 'deal', 'legal', 'product', 'management',
+                                                     'capital', 'macro', 'other')),
+        direction     TEXT NOT NULL CHECK (direction IN ('positive', 'negative', 'mixed', 'unclear')),
+        magnitude     TEXT NOT NULL CHECK (magnitude IN ('minor', 'moderate', 'major')),
+        summary       TEXT NOT NULL,
+        source        TEXT NOT NULL DEFAULT '',
+        headline_sha  TEXT NOT NULL UNIQUE,
+        model         TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_events_symbol ON events (symbol, published_at)")
+    _freeze(cur, "events")

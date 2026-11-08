@@ -143,9 +143,7 @@ class Autopilot:
         out["exits"] = self._exits(pol, now)
         today = now.date().isoformat()
         start = datetime.fromisoformat(today).replace(tzinfo=NY)
-        bought = self.db.one("""SELECT COUNT(*) AS n FROM trade_proposals WHERE source = 'autopilot' AND side = 'buy' AND account_kind = ?
-                                AND mode = ? AND created_at >= ? AND status NOT IN ('blocked', 'cancelled', 'expired', 'rejected', 'failed')""",
-                             (pol.account_kind, d.mode, _iso(start)))["n"]
+        bought = policy_buys_today(self.db, pol.account_kind, d.mode, _iso(start))
         room = pol.autopilot_max_orders_per_day - int(bought)
         if room <= 0:
             out["skipped"].append({"why": f"{bought} buys today, the most the policy allows"})
@@ -324,4 +322,15 @@ class Autopilot:
                            "horizons": pol.autopilot_horizons, "shadow_days": pol.autopilot_shadow_days}}
 
 
-__all__ = ["Autopilot"]
+def policy_buys_today(db: Any, account_kind: str, mode: str, since: str) -> int:
+    """The new buys the policy itself has made since `since` in the account: the autopilot's, and the deployed models'
+    that the policy authorized (4.0). One count, so `autopilot_max_orders_per_day` holds for both together, whichever
+    goes first. A model proposal waiting for, or approved by, you is not the policy's and is not counted."""
+    return int(db.one("""SELECT COUNT(*) AS n FROM trade_proposals p WHERE p.side = 'buy' AND p.account_kind = ? AND p.mode = ?
+                         AND p.created_at >= ? AND p.status NOT IN ('blocked', 'cancelled', 'expired', 'rejected', 'failed')
+                         AND (p.source = 'autopilot' OR (p.source = 'model' AND EXISTS (
+                              SELECT 1 FROM approvals a WHERE a.proposal_id = p.id AND a.decision = 'approved' AND a.channel = 'policy')))""",
+                      (account_kind, mode, since))["n"])
+
+
+__all__ = ["Autopilot", "policy_buys_today"]

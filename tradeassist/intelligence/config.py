@@ -25,7 +25,9 @@ HOLDOUT_FROM = date(2025, 11, 1)                 # its first session is Monday 3
 DATASET_FROM = date(2015, 10, 1)                 # 13 months: a year of history (MIN_HISTORY) on the first day
 
 KINDS = ("development", "holdout", "shadow")
-DAILY_FAMILIES = ("no_change", "drift", "engines30", "ridge", "gbm")
+DAILY_FAMILIES = ("no_change", "drift", "engines30", "ridge", "gbm",
+                  # phase 7, opt-in (each extra challenger also raises the bar for all of them: alpha is divided among them)
+                  "ridge_f", "gbm_f", "ridge_spec", "gbm_spec", "ridge_f_spec", "gbm_f_spec")
 TRADE_FAMILIES = ("base_rate", "gbm_cls")
 RETRAIN = ("weekly", "monthly", "never")
 

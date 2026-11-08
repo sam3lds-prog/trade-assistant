@@ -343,7 +343,7 @@ class TradeProposal(Strict):
     created_at: str
     updated_at: str
     status: str
-    source: Literal["research", "discover", "autopilot", "manual", "blend"]
+    source: Literal["research", "discover", "autopilot", "manual", "blend", "model"]   # 4.0: the deployed models
     terms: OrderTerms
     order_hash: str
     study_id: str | None = None

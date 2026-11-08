@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import ENGINE_VERSION
-from ..data.features import FEATURE_VERSION
+from ..data.features import FACTOR_VERSION, FEATURE_VERSION
 from .registry import load_artifact
 
 FORMAT = "tradeassist-models/1"
@@ -55,7 +55,7 @@ def deploy(store: Any, run_id: str, label: str = "", activate: bool = True) -> s
     ds = store.one("SELECT spec_json FROM datasets WHERE id = ?", (run["dataset_id"],))
     if ds is None:
         raise DeployError(f"Run {run_id}'s dataset is missing")
-    manifest = {"format": FORMAT, "engine": ENGINE_VERSION, "features": FEATURE_VERSION, "source_run": run_id,
+    manifest = {"format": FORMAT, "engine": ENGINE_VERSION, "features": FEATURE_VERSION, "factors": FACTOR_VERSION, "source_run": run_id,
                 "universe": json.loads(ds["spec_json"])["universe"],
                 "run_kind": run["kind"], "dataset": run["dataset_id"], "config": json.loads(run["config_json"]),
                 "config_sha256": run["config_sha256"], "ledger_sha256": run["ledger_sha256"], "models": entries}
@@ -142,6 +142,9 @@ def import_file(store: Any, path: str | Path, activate: bool = True) -> str:
         raise DeployError("The models file's manifest does not match its hash: it has been altered")
     if manifest.get("features") != FEATURE_VERSION:
         raise DeployError(f"The models were trained on features {manifest.get('features')}; this app computes {FEATURE_VERSION}")
+    from ..models.daily import uses_factors
+    if any(uses_factors(e["family"]) for e in manifest["models"]) and manifest.get("factors") != FACTOR_VERSION:
+        raise DeployError(f"The models read factors {manifest.get('factors') or '(none recorded)'}; this app computes {FACTOR_VERSION}")
     blobs = {}
     for e in manifest["models"]:
         raw = body["artifacts"].get(f"{e['task']}:{e['horizon']}")

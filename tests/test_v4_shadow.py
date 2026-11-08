@@ -14,7 +14,7 @@ import pytest
 from tests import v4_fixtures as fx
 from tradeassist import marketdays
 from tradeassist.intelligence.data import dataset as DS
-from tradeassist.intelligence.data.features import FEATURES, build_panel
+from tradeassist.intelligence.data.features import FACTORS, FEATURES, build_panel
 from tradeassist.intelligence.learning import deploy as DEP
 from tradeassist.intelligence.learning.ledger import feature_hash
 from tradeassist.intelligence.live import live_dataset, shadow_step
@@ -134,7 +134,7 @@ def test_shadow_forecasts_use_the_replays_own_features_and_are_made_once_before_
     for r in rows:
         payload = json.loads(r["payload_json"])
         assert payload["fhash"] == feature_hash(replay_rows.loc[r["symbol"], list(FEATURES)].to_numpy(float)), r["symbol"]
-        assert set(payload["x"]) == set(FEATURES) and payload["deployment"] == world["dep"]
+        assert set(payload["x"]) == set(FEATURES) | set(FACTORS) and payload["deployment"] == world["dep"]
     # Asked again, nothing changes.
     assert shadow_step(store, _fetch(bars), t, _evening(t, 19))["predicted"] == "already"
     # Next evening: yesterday's one-day forecasts are graded; today's are made.

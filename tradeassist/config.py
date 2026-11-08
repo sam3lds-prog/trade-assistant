@@ -150,6 +150,8 @@ class Settings:
     robinhood_execution_account: str = field(default="", repr=False)   # the account orders may go to, by number
     live_max_order: float = 100.0                                       # a ceiling no policy can raise
     autopilot_live: bool = False                                        # the autopilot may trade live (phase 7), if it has earned it
+    # 4.0 phase 7: read the deployed models' stocks' headlines into structured events with the AI (uses the daily AI limit)
+    model_events: bool = False
 
     # 3.0 Trading Desk (phase 5): where its notifications go, who runs its jobs, and phone approvals.
     notify_email: bool = True               # desk notifications by email too, when SMTP is set up
@@ -262,6 +264,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         brave_daily_limit=max(_int("BRAVE_DAILY_LIMIT", 40), 0),
         live_mover_sweep_minutes=max(_float("LIVE_MOVER_SWEEP_MINUTES", 5.0), 0.0),
         robinhood_execution=_flag("ROBINHOOD_EXECUTION"),
+        model_events=_flag("MODEL_EVENTS"),
         robinhood_execution_account=_clean_token(os.getenv("ROBINHOOD_EXECUTION_ACCOUNT")),
         live_max_order=_float("LIVE_MAX_ORDER", 100.0),
         autopilot_live=_flag("AUTOPILOT_LIVE"),

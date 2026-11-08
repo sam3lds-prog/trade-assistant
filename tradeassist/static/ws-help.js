@@ -166,6 +166,21 @@
       read: "Inside band near 80% is calibrated. Miss below 'No change' means the median added something. Direction: when the median leaned, how often it was right.",
       limits: "Only studies you ran are graded, so the count grows with use. Target sessions count exchange trading days.",
       next: "Nothing: it reads." },
+    lab_paper: {
+      purpose: "Sends the take/pass gate's setups to the paper desk, and keeps their record: paper fills against the simulation of the same frozen forecasts.",
+      data: "The active deployment's shadow forecasts from the last close, the trading policy, quotes, and the paper broker's fills.",
+      use: "Send the gate's setups to the paper desk switches it on for the active deployment; the checks list says what still stops it. Each morning in market hours the taken setups become proposals at the ask.",
+      read: "Result: the closed trade's return after fees. Simulated: what the replay's barrier rules gave the same forecast. The difference is what real fills, timing and your approvals changed. The setups the gate passed on are shown too: what abstaining earned.",
+      limits: "Paper and shadow accounts only: under a live policy it writes nothing. Exits (stop, target, five sessions) are software-monitored every five minutes while the app or the daemon runs, not stop orders at a broker.",
+      next: "Writes buy and sell proposals on the Trading Desk, source 'model', through the policy and the risk engine.",
+      trading: "Paper or shadow only. Each proposal waits for your approval unless the policy is already capped_autopilot on a paper or shadow account, which then authorizes it within its daily order count. The models cannot change a limit." },
+    lab_specialists: {
+      purpose: "Which stocks get a correction of their own on top of the general model, and how the specialist families fared as challengers.",
+      data: "The selected run's final models (or the active deployment's) and its training decisions.",
+      use: "Tick the specialist families in New replay… to let them compete; click a stock to link it.",
+      read: "Average miss: how far, in volatility units, the general model missed this stock on rows it never trained on. A correction is kept only when that miss is clearly not chance (|t| of 3 or more: with a hundred stocks, two would correct about five by luck), and it is shrunk toward zero by how many cases there are.",
+      limits: "A stock with little history falls back to the general model. A specialist family is only used if it beat the champion under the same promotion rule as every other.",
+      next: "Nothing: it reads." },
     model_ideas: {
       purpose: "The deployed models' view of the last close: every qualifying setup with its chances and the gate's decision, and the stocks the next-day forecast leans on hardest.",
       data: "The shadow forecasts saved after the last close by the deployed models (Model Lab).",

@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..data.features import FEATURES
+from ..data.features import FACTORS, FEATURES
 from .metrics import daily_scores
 
 
@@ -86,7 +86,7 @@ def latest(store: Any, run_id: str, symbol: str | None = None) -> list[dict[str,
     r = store.one("SELECT MAX(session) AS s FROM predictions WHERE run_id = ?", (run_id,))
     if r is None or r["s"] is None:
         return []
-    sql = """SELECT p.id, p.task, p.horizon, p.symbol, p.session, p.target_session, p.model_version, p.family, p.last_close, p.pred_return,
+    sql = """SELECT p.id, p.task, p.horizon, p.symbol, p.session, p.cutoff_at, p.target_session, p.model_version, p.family, p.last_close, p.pred_return,
              p.low_return, p.high_return, p.p_up, p.sigma, p.setup, p.p_target, p.p_stop, p.p_timeout, p.expected_return, p.regime,
              d.take, d.reason FROM predictions p LEFT JOIN trade_decisions d ON d.prediction_id = p.id WHERE p.run_id = ? AND p.session = ?"""
     args: list[Any] = [run_id, r["s"]]
@@ -113,15 +113,17 @@ def why_changed(store: Any, run_id: str, symbol: str, horizon: int, model: Any =
         out["text"] = "These forecasts were made without their inputs kept (replay forecasts keep only a hash of them)."
         return out
     moves = []
-    for k in FEATURES:
+    for k in FEATURES + FACTORS:
         a, b = xo.get(k), xn.get(k)
         if a is None or b is None or not (math.isfinite(a) and math.isfinite(b)):
             continue
         moves.append({"feature": k, "before": a, "after": b, "change": b - a})
-    if model is not None and getattr(model, "family", None) == "ridge" and not out["model_changed"]:
+    if model is not None and getattr(model, "family", None) in ("ridge", "ridge_f") and not out["model_changed"]:
         sigma = new["sigma"] or 0.0
+        cols = list(getattr(model, "columns", FEATURES))
+        moves = [m for m in moves if m["feature"] in cols]
         for m in moves:
-            i = FEATURES.index(m["feature"])
+            i = cols.index(m["feature"])
             m["effect_pct"] = 100 * float(model.coef[i]) * m["change"] / float(model.scale[i]) * sigma
         moves.sort(key=lambda m: -abs(m.get("effect_pct", 0.0)))
         out["attribution"] = "exact (a linear model: each input's change times its weight)"

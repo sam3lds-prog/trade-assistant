@@ -24,7 +24,7 @@ import pandas as pd
 
 from ..config import TradeSpec
 from ..data.calendar import Calendar
-from ..data.features import FEATURES, Panel
+from ..data.features import FACTORS, FEATURES, Panel
 from .execution import outcome_class, simulate
 
 SETUPS = {
@@ -52,7 +52,7 @@ class LabelBook:
     def __init__(self, panel: Panel, calendar: Calendar, horizons: tuple[int, ...], trade: TradeSpec):
         self.panel, self.cal, self.horizons, self.trade = panel, calendar, tuple(horizons), trade
         self.pos = {pd.Timestamp(d): i for i, d in enumerate(calendar.sessions)}
-        table = panel.features[list(FEATURES) + ["close", "rvol", "atr_pct", "dist50", "drawdown20", "above200"]].copy()
+        table = panel.features[list(FEATURES) + list(FACTORS) + ["close", "rvol", "atr_pct", "dist50", "drawdown20", "above200"]].copy()
         table = table.loc[:, ~table.columns.duplicated()]
         table["eligible"] = panel.eligible.stack().reindex(table.index).fillna(False).astype(bool).to_numpy()
         table["regime"] = panel.regime.reindex(table.index.get_level_values("session")).to_numpy()
@@ -127,7 +127,7 @@ class LabelBook:
             t = pd.DataFrame(rows, columns=["session", "symbol", "setup", "barrier", "y", "net", "gross"])
             if len(t):
                 t = t.set_index(["session", "symbol"]).sort_index()
-                t = t.drop(columns=["setup"]).join(self.table[list(FEATURES) + ["regime", "setup"]], how="left")
+                t = t.drop(columns=["setup"]).join(self.table[list(FEATURES) + list(FACTORS) + ["regime", "setup"]], how="left")
             self._trades = t
         return self._trades
 
