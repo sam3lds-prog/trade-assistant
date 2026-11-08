@@ -64,3 +64,21 @@ def config(start: date, end: date, **over) -> ReplayConfig:
                                                 trade_min_validation_rows=20, trade_min_train_rows=120),
                         trade=TradeSpec(setups=("pullback", "drop", "gap_down")))
     return base.with_(**over)
+
+
+def exchange_sessions(first: str, last: str) -> pd.DatetimeIndex:
+    """Weekdays before 2025 (marketdays.py lists holidays from 2025), the exchange calendar from 2025 on."""
+    from tradeassist import marketdays
+    early = [d for d in pd.bdate_range(first, min(pd.Timestamp(last), pd.Timestamp("2024-12-31")))]
+    late = [pd.Timestamp(d) for d in marketdays.trading_days_between(max(pd.Timestamp(first), pd.Timestamp("2025-01-02")).date(),
+                                                                      pd.Timestamp(last).date())]
+    return pd.DatetimeIndex(early + late)
+
+
+def calendar_market(first: str = "2022-01-03", last: str = "2026-03-31", seed: int = 11, reversion: float = 0.4) -> dict[str, pd.DataFrame]:
+    """fx.market on real session dates, so a dataset passes the calendar checks and reaches the held-out year."""
+    dates = exchange_sessions(first, last)
+    out = market(n=len(dates), start=first, seed=seed, reversion=reversion)
+    for df in out.values():
+        df["date"] = dates
+    return out

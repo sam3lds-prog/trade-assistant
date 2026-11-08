@@ -7,6 +7,12 @@
     python run.py --replay resume RUN                 continue a paused or interrupted run from its checkpoint
     python run.py --replay runs                       every run, newest first
     python run.py --replay report RUN [--json]        a run's scorecard
+    python run.py --replay holdout RUN [--reopen]     evaluate the held-out year once, continuing RUN (phase 4)
+    python run.py --replay deploy RUN                 make a finished run's models the ones the shadow forecasts use
+    python run.py --replay deployments                the deployed model sets; the active one is marked
+    python run.py --replay export DEPLOYMENT FILE     write a deployment to a file (to serve it on another computer)
+    python run.py --replay import FILE                read one in, checking every hash, and make it active
+    python run.py --replay shadow [--force]           today's shadow forecast now, instead of waiting for the job
 
 A replay runs in this process, not in the web app, so it never slows the Trading Desk. Stop it with Ctrl-C at any
 point and resume it later: everything up to the last finished session is kept.
@@ -126,10 +132,86 @@ def run_replay(settings: Any, args: argparse.Namespace) -> int:
     return _drive(store, run_id)
 
 
+def holdout(settings: Any, run_id: str, dataset: str | None, reopen: bool, allow_failed: bool) -> int:
+    from ..intelligence.replay.holdout import open_holdout
+    from ..intelligence.replay.runner import ReplayError
+    store = _store(settings)
+    if not dataset:
+        row = store.one("SELECT id FROM datasets ORDER BY last_date DESC, created_at DESC LIMIT 1")
+        dataset = row["id"] if row else None
+    try:
+        hold_id = open_holdout(store, run_id, dataset, reopen=reopen, allow_failed_checks=allow_failed)
+    except ReplayError as exc:
+        print(str(exc))
+        return 1
+    n = store.one("SELECT ordinal FROM holdout_openings WHERE run_id = ?", (hold_id,))["ordinal"]
+    print(f"Opening the held-out year ({'first time' if n == 1 else f'opening {n}: no longer untouched'}) as run {hold_id}, "
+          f"continuing {run_id}'s models.")
+    return _drive(store, hold_id)
+
+
+def deploy_run(settings: Any, run_id: str, label: str) -> int:
+    from ..intelligence.learning.deploy import DeployError, deploy
+    store = _store(settings)
+    try:
+        dep = deploy(store, run_id, label)
+    except DeployError as exc:
+        print(str(exc))
+        return 1
+    print(f"Deployed {run_id}'s models as {dep} (active). The shadow forecast uses them from the next close.")
+    return 0
+
+
+def list_deployments(settings: Any) -> int:
+    from ..intelligence.learning.deploy import listing
+    rows = listing(_store(settings))
+    if not rows:
+        print("Nothing deployed yet: python run.py --replay deploy RUN")
+    for d in rows:
+        mark = "*" if d["active"] else " "
+        fams = ", ".join(f"{m['task']}:{m['horizon']} {m['family']}" for m in d["models"])
+        print(f"{mark} {d['id']}  from {d['source_run']} ({d['run_kind']})  {fams}  {d['label']}")
+    return 0
+
+
+def export_deployment(settings: Any, dep_id: str, path: str) -> int:
+    from ..intelligence.learning.deploy import DeployError, export
+    try:
+        out = export(_store(settings), dep_id, path)
+    except DeployError as exc:
+        print(str(exc))
+        return 1
+    print(f"Wrote {out}. On the other computer: python run.py --replay import {out.name}")
+    return 0
+
+
+def import_deployment(settings: Any, path: str) -> int:
+    from ..intelligence.learning.deploy import DeployError, import_file
+    try:
+        dep = import_file(_store(settings), path)
+    except (DeployError, OSError, ValueError) as exc:
+        print(str(exc))
+        return 1
+    print(f"Imported {path} as {dep} (active); every model matched its hash.")
+    return 0
+
+
+def shadow_now(settings: Any, force: bool) -> int:
+    from ..service import TradeAssistant
+    from .shadow import run_shadow
+    svc = TradeAssistant(settings)
+    svc._replay_store = _store(settings)
+    out = run_shadow(svc, force=force)
+    print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
 def _drive(store: Any, run_id: str) -> int:
     from ..intelligence.replay.runner import Replay
     print("Loading the dataset and computing features…")
     replay = Replay(store, run_id)
+    with store.tx() as cur:                               # this process now runs it: a screen's stop request reaches it
+        cur.execute("INSERT INTO run_controls (run_id) VALUES (?) ON CONFLICT(run_id) DO NOTHING", (run_id,))
     started = time.monotonic()
     replay.progress = lambda p: _bar(p["done"], p["total"], p["session"], started)
     try:
@@ -140,7 +222,7 @@ def _drive(store: Any, run_id: str) -> int:
         return 130
     print()
     if result["status"] != "complete":
-        print(f"Paused at {result.get('checkpoint')}.")
+        print(f"Paused at {result.get('checkpoint')}. Continue with: python run.py --replay resume {run_id}")
         return 0
     _print_card(result["scorecard"])
     print(f"Ledger hash {result['ledger_sha256'][:16]}… (the same dataset and settings always give the same hash)")
@@ -236,6 +318,22 @@ def main(settings: Any, argv: list[str]) -> int:
     rp = sub.add_parser("report")
     rp.add_argument("run")
     rp.add_argument("--json", action="store_true")
+    ho = sub.add_parser("holdout")
+    ho.add_argument("run")
+    ho.add_argument("--dataset")
+    ho.add_argument("--reopen", action="store_true", help="open the held-out year again (it is then no longer untouched)")
+    ho.add_argument("--allow-failed-checks", action="store_true")
+    dp = sub.add_parser("deploy")
+    dp.add_argument("run")
+    dp.add_argument("--label", default="")
+    sub.add_parser("deployments")
+    ex = sub.add_parser("export")
+    ex.add_argument("deployment")
+    ex.add_argument("file")
+    im = sub.add_parser("import")
+    im.add_argument("file")
+    sh = sub.add_parser("shadow")
+    sh.add_argument("--force", action="store_true", help="run even before today's close has settled")
     args = p.parse_args(argv)
     if args.cmd == "dataset":
         if args.action == "build":
@@ -250,6 +348,18 @@ def main(settings: Any, argv: list[str]) -> int:
         return resume(settings, args.run)
     if args.cmd == "runs":
         return list_runs(settings)
+    if args.cmd == "holdout":
+        return holdout(settings, args.run, args.dataset, args.reopen, args.allow_failed_checks)
+    if args.cmd == "deploy":
+        return deploy_run(settings, args.run, args.label)
+    if args.cmd == "deployments":
+        return list_deployments(settings)
+    if args.cmd == "export":
+        return export_deployment(settings, args.deployment, args.file)
+    if args.cmd == "import":
+        return import_deployment(settings, args.file)
+    if args.cmd == "shadow":
+        return shadow_now(settings, args.force)
     return report(settings, args.run, args.json)
 
 

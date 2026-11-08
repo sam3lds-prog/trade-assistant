@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..contracts import new_id, utc_now
 from ..service import RequestError
 
-WORKSPACES = ("discover", "research", "desk", "portfolio")
+WORKSPACES = ("discover", "research", "desk", "portfolio", "lab")   # 4.0 adds Model Lab
 WIDGET_TYPE = re.compile(r"^[a-z][a-z0-9_:-]{0,48}$")
 GROUPS = ("blue", "green", "amber", "plum", "none")
 MAX_WIDGETS = 40

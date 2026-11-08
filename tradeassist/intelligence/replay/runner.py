@@ -147,8 +147,14 @@ class Replay:
             return self.schedule.is_month_end(d)
         return False
 
+    def stop_requested(self) -> bool:
+        """A stop asked for from the screen (run_controls); checked between sessions."""
+        r = self.store.one("SELECT stop_requested_at FROM run_controls WHERE run_id = ?", (self.run_id,))
+        return r is not None and r["stop_requested_at"] is not None
+
     def run(self, *, max_sessions: int | None = None, should_stop: Callable[[], bool] | None = None) -> dict[str, Any]:
         sessions = self.sessions()
+        should_stop = should_stop or self.stop_requested
         if not sessions:
             raise ReplayError("The dataset has no sessions in the run's dates")
         self.row = dict(self.store.one("SELECT * FROM replay_runs WHERE id = ?", (self.run_id,)))    # as it stands now
@@ -171,6 +177,7 @@ class Replay:
                         "AND worker != ? AND heartbeat_at IS NOT NULL AND heartbeat_at > ?)", (_now(), me, _now(), self.run_id, me, stale))
             if cur.rowcount == 0:
                 raise ReplayError(f"Run {self.run_id} was claimed a moment ago by another process.")
+            cur.execute("UPDATE run_controls SET stop_requested_at = NULL WHERE run_id = ?", (self.run_id,))
             if fresh:
                 if self.row.get("parent_run"):
                     self._inherit(cur, self.row["parent_run"], sessions[0].isoformat())
@@ -240,81 +247,103 @@ class Replay:
             self._predict(cur, view)
             cur.execute("UPDATE replay_runs SET checkpoint = ?, heartbeat_at = ? WHERE id = ?", (sess, _now(), self.run_id))
 
-    # ---- grading ----------------------------------------------------------------------------------------------
+    # ---- grading and predicting: the same functions serve the replay and the live shadow forecasts ---------------
     def _grade(self, cur: Any, view: AsOf) -> None:
-        sess = view.session.isoformat()
-        for p in L.due(cur, self.run_id, sess):
-            if p["task"] == "daily":
-                close = view.close(p["symbol"], view.session)
-                if close is None:
-                    L.insert_outcome(cur, self.run_id, p["id"], sess, status="no_data")
-                    continue
-                y = close / p["last_close"] - 1.0
-                mu, s = p["pred_return"], p["sigma"] or 0.0
-                lean = mu is not None and abs(mu) > 0.25 * s
-                L.insert_outcome(cur, self.run_id, p["id"], sess, status="graded", realized_return=y,
-                                 abs_error=abs(y - (mu or 0.0)),
-                                 direction_hit=(int(np.sign(mu) == np.sign(y)) if lean else None),
-                                 covered=int(p["low_return"] <= y <= p["high_return"]) if p["low_return"] is not None else None)
-            else:
-                o = self.labels.trade_outcome(pd.Timestamp(p["session"]), p["symbol"])
-                if o.get("barrier") is None or pd.Timestamp(o["exit_session"]) > view.ts:
-                    L.insert_outcome(cur, self.run_id, p["id"], sess, status="no_data")
-                    continue
-                L.insert_outcome(cur, self.run_id, p["id"], sess, status="graded", barrier=o["barrier"],
-                                 exit_session=pd.Timestamp(o["exit_session"]).date().isoformat(), gross_return=o["gross"],
-                                 net_return=o["net"], realized_return=o["net"],
-                                 payload={"entry": o["entry"], "target": o["target"], "stop": o["stop"], "exit": o["exit_price"]})
-
-    # ---- predicting -------------------------------------------------------------------------------------------
-    def _target(self, d: date, h: int) -> str:
-        t = self.cal.add(d, h)
-        if t is None:
-            t = marketdays.add_trading_days(d, h)       # past the dataset's end: the exchange calendar (or weekdays)
-        return t.isoformat()
+        grade(cur, self.run_id, view, self.labels)
 
     def _predict(self, cur: Any, view: AsOf) -> None:
-        d = view.session
-        sess, cutoff, regime = d.isoformat(), self.cal.cutoff_at(d), view.regime()
-        rows = view.rows()
-        out: list[dict[str, Any]] = []
-        if len(rows):
-            x = matrix(rows)
-            fh = [L.feature_hash(r) for r in x]
-            closes = rows["close"].to_numpy(float)
-            for h in self.cfg.horizons:
-                vid, fam, model = self.state[("daily", h)]
-                p = model.predict(rows)
-                target = self._target(d, h)
-                for i, sym in enumerate(rows.index):
-                    out.append({"task": "daily", "horizon": h, "symbol": sym, "session": sess, "target_session": target,
-                                "model_version": vid, "family": fam, "last_close": float(closes[i]),
-                                "pred_return": float(p["mu"][i]), "low_return": float(p["low"][i]), "high_return": float(p["high"][i]),
-                                "p_up": float(p["p_up"][i]), "sigma": float(p["sigma"][i]), "regime": regime, "fhash": fh[i],
-                                "payload": {"features": FEATURE_VERSION, "trained_through": getattr(model, "trained_through", None)}})
-        L.insert_predictions(cur, self.run_id, cutoff, out)
-        setups = view.setups()
-        if not len(setups):
-            return
-        hold = self.cfg.trade.hold_sessions
-        vid, fam, model = self.state[("trade", hold)]
-        p = model.predict(setups)
-        target = self._target(d, hold)
-        x = matrix(setups)
-        trades = []
-        for i, sym in enumerate(setups.index):
-            exp = float(p["expected"][i]) if math.isfinite(p["expected"][i]) else None
-            trades.append({"task": "trade", "horizon": hold, "symbol": sym, "session": sess, "target_session": target,
-                           "model_version": vid, "family": fam, "last_close": float(setups["close"].iloc[i]),
-                           "sigma": float(setups["rvol"].iloc[i]), "setup": setups["setup"].iloc[i],
-                           "p_target": _f(p["p_target"][i]), "p_stop": _f(p["p_stop"][i]), "p_timeout": _f(p["p_timeout"][i]),
-                           "expected_return": exp, "regime": regime, "fhash": L.feature_hash(x[i]),
-                           "payload": {"features": FEATURE_VERSION, "trained_through": getattr(model, "trained_through", None),
-                                       "atr_pct": float(setups["atr_pct"].iloc[i]), "barrier": self.cfg.trade.version}})
-        ids = L.insert_predictions(cur, self.run_id, cutoff, trades)
-        for pid, t in zip(ids, trades):
-            take, reason, gate = decide(t["expected_return"], bool(getattr(model, "fitted", False)), self.cfg.trade.min_edge)
-            L.insert_decision(cur, self.run_id, pid, sess, t["symbol"], take, reason, gate)
+        predict(cur, self.run_id, view, self.cal, self.cfg, self.state)
+
+
+def grade(cur: Any, run_id: str, view: AsOf, labels: LabelBook) -> int:
+    """Outcomes for every prediction of the run whose window had closed by the view's session. Returns the count."""
+    sess = view.session.isoformat()
+    n = 0
+    for p in L.due(cur, run_id, sess):
+        n += 1
+        if p["task"] == "daily":
+            close = view.close(p["symbol"], date.fromisoformat(p["target_session"]))
+            if close is None:
+                L.insert_outcome(cur, run_id, p["id"], sess, status="no_data")
+                continue
+            y = close / p["last_close"] - 1.0
+            mu, s = p["pred_return"], p["sigma"] or 0.0
+            lean = mu is not None and abs(mu) > 0.25 * s
+            L.insert_outcome(cur, run_id, p["id"], sess, status="graded", realized_return=y,
+                             abs_error=abs(y - (mu or 0.0)),
+                             direction_hit=(int(np.sign(mu) == np.sign(y)) if lean else None),
+                             covered=int(p["low_return"] <= y <= p["high_return"]) if p["low_return"] is not None else None)
+        else:
+            s0 = pd.Timestamp(p["session"])
+            o = labels.trade_outcome(s0, p["symbol"]) if s0 in labels.pos else {"barrier": None}
+            if o.get("barrier") is None or pd.Timestamp(o["exit_session"]) > view.ts:
+                L.insert_outcome(cur, run_id, p["id"], sess, status="no_data")
+                continue
+            L.insert_outcome(cur, run_id, p["id"], sess, status="graded", barrier=o["barrier"],
+                             exit_session=pd.Timestamp(o["exit_session"]).date().isoformat(), gross_return=o["gross"],
+                             net_return=o["net"], realized_return=o["net"],
+                             payload={"entry": o["entry"], "target": o["target"], "stop": o["stop"], "exit": o["exit_price"]})
+    return n
+
+
+def target_of(cal: Any, d: date, h: int) -> str:
+    t = cal.add(d, h)
+    if t is None:
+        t = marketdays.add_trading_days(d, h)       # past the data's end: the exchange calendar (or weekdays past 2028)
+    return t.isoformat()
+
+
+def predict(cur: Any, run_id: str, view: AsOf, cal: Any, cfg: ReplayConfig, state: dict[tuple[str, int], tuple[str, str, Any]],
+            *, keep_features: bool = False, extra: dict[str, Any] | None = None) -> dict[str, int]:
+    """Freeze one forecast per horizon for every eligible stock, and a trade forecast and decision for every setup.
+    `keep_features` stores the feature values themselves (the live shadow forecasts do, for "why did it change")."""
+    d = view.session
+    sess, cutoff, regime = d.isoformat(), cal.cutoff_at(d), view.regime()
+    rows = view.rows()
+    out: list[dict[str, Any]] = []
+    if len(rows):
+        x = matrix(rows)
+        fh = [L.feature_hash(r) for r in x]
+        closes = rows["close"].to_numpy(float)
+        for h in cfg.horizons:
+            vid, fam, model = state[("daily", h)]
+            p = model.predict(rows)
+            target = target_of(cal, d, h)
+            for i, sym in enumerate(rows.index):
+                payload = {"features": FEATURE_VERSION, "trained_through": getattr(model, "trained_through", None), **(extra or {})}
+                if keep_features:
+                    payload["x"] = {k: (float(v) if np.isfinite(v) else None) for k, v in zip(FEATURES, x[i])}
+                out.append({"task": "daily", "horizon": h, "symbol": sym, "session": sess, "target_session": target,
+                            "model_version": vid, "family": fam, "last_close": float(closes[i]),
+                            "pred_return": float(p["mu"][i]), "low_return": float(p["low"][i]), "high_return": float(p["high"][i]),
+                            "p_up": float(p["p_up"][i]), "sigma": float(p["sigma"][i]), "regime": regime, "fhash": fh[i],
+                            "payload": payload})
+    L.insert_predictions(cur, run_id, cutoff, out)
+    setups = view.setups()
+    if not len(setups):
+        return {"daily": len(out), "trade": 0}
+    hold = cfg.trade.hold_sessions
+    vid, fam, model = state[("trade", hold)]
+    p = model.predict(setups)
+    target = target_of(cal, d, hold)
+    x = matrix(setups)
+    trades = []
+    for i, sym in enumerate(setups.index):
+        exp = float(p["expected"][i]) if math.isfinite(p["expected"][i]) else None
+        payload = {"features": FEATURE_VERSION, "trained_through": getattr(model, "trained_through", None),
+                   "atr_pct": float(setups["atr_pct"].iloc[i]), "barrier": cfg.trade.version, **(extra or {})}
+        if keep_features:
+            payload["x"] = {k: (float(v) if np.isfinite(v) else None) for k, v in zip(FEATURES, x[i])}
+        trades.append({"task": "trade", "horizon": hold, "symbol": sym, "session": sess, "target_session": target,
+                       "model_version": vid, "family": fam, "last_close": float(setups["close"].iloc[i]),
+                       "sigma": float(setups["rvol"].iloc[i]), "setup": setups["setup"].iloc[i],
+                       "p_target": _f(p["p_target"][i]), "p_stop": _f(p["p_stop"][i]), "p_timeout": _f(p["p_timeout"][i]),
+                       "expected_return": exp, "regime": regime, "fhash": L.feature_hash(x[i]), "payload": payload})
+    ids = L.insert_predictions(cur, run_id, cutoff, trades)
+    for pid, t in zip(ids, trades):
+        take, reason, gate = decide(t["expected_return"], bool(getattr(model, "fitted", False)), cfg.trade.min_edge)
+        L.insert_decision(cur, run_id, pid, sess, t["symbol"], take, reason, gate)
+    return {"daily": len(out), "trade": len(trades)}
 
 
 def _f(v: float) -> float | None:
@@ -334,4 +363,4 @@ def run_status(store: Any, run_id: str) -> dict[str, Any]:
     return out
 
 
-__all__ = ["Replay", "ReplayError", "create_run", "run_status", "worker_name", "FEATURES"]
+__all__ = ["Replay", "ReplayError", "create_run", "run_status", "worker_name", "grade", "predict", "target_of", "FEATURES"]

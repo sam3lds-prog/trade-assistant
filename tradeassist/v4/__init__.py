@@ -25,17 +25,31 @@ def replay_store(svc: Any):
         return store
 
 
+def has_replays(svc: Any) -> bool:
+    """Whether replay.db exists yet (the jobs do not create it: a user who never runs a replay never gets the file)."""
+    from ..intelligence.store import replay_path
+    return getattr(svc, "_replay_store", None) is not None or (str(svc.settings.db_path) != ":memory:" and replay_path(svc.settings).exists())
+
+
 def jobs(svc: Any) -> tuple[dict[str, Any], list[Any]]:
-    """The 4.0 jobs for the worker: grading Research's live forecasts once an hour."""
+    """The 4.0 jobs for the worker: grading Research's live forecasts once an hour, and the deployed models' shadow
+    forecast after each close (checked every half hour; it acts once per session)."""
     from ..jobs import Schedule
     from .grading import grade_research
+
     def grade(_: dict[str, Any]) -> Any:
         from ..marketdays import phase
         if phase() == "open":                 # it fetches bars; during the session the worker is left to the orders
             return {"skipped": "the market is open"}
         return grade_research(svc)
-    handlers = {"research.grade": grade}
-    schedules = [Schedule("research.grade", 3600, 1800)]
+
+    def shadow(_: dict[str, Any]) -> Any:
+        if not has_replays(svc):
+            return {"skipped": "no replays yet"}
+        from .shadow import run_shadow
+        return run_shadow(svc)
+    handlers = {"research.grade": grade, "shadow.forecast": shadow}
+    schedules = [Schedule("research.grade", 3600, 1800), Schedule("shadow.forecast", 1800, 1200)]
     return handlers, schedules
 
 
@@ -49,4 +63,4 @@ def install(svc: Any) -> None:
     svc._v4_installed = True
 
 
-__all__ = ["replay_store", "install", "jobs"]
+__all__ = ["replay_store", "install", "jobs", "has_replays"]

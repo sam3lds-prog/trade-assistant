@@ -20,6 +20,24 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.0 part B — the held-out year, shadow forecasts, Model Lab
+
+The second of three parts of 4.0 ([V4.md](V4.md)). **No trading permission is changed**: nothing here proposes,
+approves or sends an order.
+
+- **The held-out year, once.** `python run.py --replay holdout RUN` continues a finished development run through
+  November 2025 to today with the models it ended with. Every opening is recorded; a second one says the year is no
+  longer untouched.
+- **Deployments.** `--replay deploy RUN` makes a finished run's models the ones the daily shadow forecasts use;
+  `export` and `import` move them between computers with every hash checked.
+- **Shadow forecasts.** After each close the deployed models forecast every stock and setup, frozen before the next
+  open (or not at all), and are graded as their windows close: a forward record no replay can fake.
+- **Model Lab**, a fifth workspace (top bar, *Model Lab*): replay controller, learning curve, model registry, error
+  explorer, trade outcomes, forward record, Research's graded forecasts. **Model opportunities** in Discover and
+  **Model forecast** (with *Why did it change?*) in Research. The Discover rank itself is unchanged.
+- A link to a workspace that is not open (`#lab`) now opens it.
+- Database migration 22 lets saved layouts belong to Model Lab (the table is rebuilt; saved layouts are kept).
+
 ## 4.0 part A — replay, learning models, trade outcomes
 
 The first of three parts of 4.0 ([V4.md](V4.md)). **No trading permission is changed**: the new engine cannot reach

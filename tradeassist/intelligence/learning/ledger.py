@@ -58,9 +58,10 @@ def insert_predictions(cur: Any, run_id: str, cutoff_at: str, rows: list[dict[st
 
 
 def due(cur: Any, run_id: str, session: str) -> list[dict[str, Any]]:
-    """Predictions whose window ends at this session's close and that have no outcome yet."""
+    """Predictions whose window had ended by this session's close and that have no outcome yet. In a replay that is
+    exactly the ones ending on this session; a live shadow job that missed a day catches up on the next."""
     cur.execute("""SELECT p.* FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id
-                   WHERE p.run_id = ? AND p.target_session = ? AND o.prediction_id IS NULL ORDER BY p.id""", (run_id, session))
+                   WHERE p.run_id = ? AND p.target_session <= ? AND o.prediction_id IS NULL ORDER BY p.id""", (run_id, session))
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
