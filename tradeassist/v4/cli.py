@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from datetime import date, timedelta
@@ -64,9 +65,16 @@ def build_dataset(settings: Any, universe_name: str, first: date | None, last: d
     print(f"Fetching {len(universe.symbols)} symbols from {start} to {end} ({info.label})…")
     started = time.monotonic()
     store = _store(settings)
-    ds = DS.build(store, provider.history, universe, start, end, source=info.mode,
-                  adjustment=getattr(info, "history_adjustment", "unknown"),
-                  progress=lambda n, t, s: _bar(n, t, s, started))
+    for name in ("httpx", "httpx2", "httpcore"):   # one line per request would break up the progress bar
+        logging.getLogger(name).setLevel(logging.WARNING)
+    try:
+        ds = DS.build(store, provider.history, universe, start, end, source=info.mode,
+                      adjustment=getattr(info, "history_adjustment", "unknown"),
+                      progress=lambda n, t, s: _bar(n, t, s, started))
+    except DS.DatasetError as exc:
+        print()
+        print(str(exc))
+        return 1
     print()
     counts = {lvl: sum(1 for c in ds.checks if c["level"] == lvl) for lvl in ("fail", "warn", "info")}
     print(f"Dataset {ds.id}: {len(ds.bars)} symbols, {len(ds.calendar)} sessions ({ds.calendar.first} to {ds.calendar.last}); "
@@ -96,11 +104,13 @@ def show_checks(settings: Any, dataset_id: str) -> int:
     return 0
 
 
-def _config(args: argparse.Namespace) -> ReplayConfig:
+def _config(args: argparse.Namespace, default_start: date | None = None) -> ReplayConfig:
     cfg = ReplayConfig()
     changes: dict[str, Any] = {}
     if args.start:
         changes["start"] = date.fromisoformat(args.start)
+    elif default_start is not None:
+        changes["start"] = default_start
     if args.end:
         changes["end"] = date.fromisoformat(args.end)
     if args.families:
@@ -122,8 +132,12 @@ def run_replay(settings: Any, args: argparse.Namespace) -> int:
             print("No dataset yet. Build one first: python run.py --replay dataset build")
             return 1
         dataset_id = row["id"]
+    from ..intelligence.data.dataset import development_start
+    first = development_start(store, dataset_id)
+    if not args.start and first > DEVELOPMENT_FROM:
+        print(f"The dataset's history starts later than ten years back, so the run starts {first}, after a year of it.")
     try:
-        cfg = _config(args)
+        cfg = _config(args, first)
         run_id = create_run(store, dataset_id, cfg, allow_failed_checks=args.allow_failed_checks)
     except (ReplayError, ValueError) as exc:
         print(str(exc))

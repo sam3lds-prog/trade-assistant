@@ -20,6 +20,19 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.0.1 — building the replay's dataset from Robinhood
+
+- **SPY first, and a clear reason when it fails.** `--replay dataset build` fetches SPY (whose trading days are the
+  replay's calendar) before anything else and tries it three times. If it still cannot be had, the build stops at
+  once and says what the source answered, instead of fetching 112 other symbols and then reporting only "the
+  dataset needs SPY". Every other symbol is tried twice, and any that still fails is listed with its reason.
+- **Robinhood's history is about five years.** With `DATA_MODE=robinhood` and no Tradier token, a build asks Robinhood
+  for its whole history first (used if it comes as daily bars), then its five-year span. A history that starts years
+  later than asked for is reported (`SHORT_HISTORY`), and `--replay run`, and Start in Model Lab, begin the replay
+  after the dataset's first year by themselves, instead of refusing with "the run starts before the dataset does".
+  A Tradier token in `.env` gives the full ten years.
+- The build's progress bar is no longer broken up by a log line for every request.
+
 ## 4.0.0 part C — the models on the paper desk, factors, stock specialists, events
 
 The last of three parts of 4.0 ([V4.md](V4.md)). **No live permission is added or broadened**: the models' trades
