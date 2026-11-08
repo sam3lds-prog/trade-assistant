@@ -20,6 +20,31 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.0 part A — replay, learning models, trade outcomes
+
+The first of three parts of 4.0 ([V4.md](V4.md)). **No trading permission is changed**: the new engine cannot reach
+an order path (a test fails if it could), and nothing here touches the Trading Desk, the autopilot or a broker.
+
+- **Replays.** `python run.py --replay dataset build` freezes about eleven years of daily bars for the 100 large caps
+  and the market and sector funds in `data/replay.db`, a new file beside the trading database. `python run.py
+  --replay run` walks through November 2016 to October 2025 one session at a time: forecasting, freezing, grading
+  when the window closes, retraining weekly. Ctrl-C at any point and `--replay resume RUN` later; the result is
+  identical to an uninterrupted run. The year from November 2025 is held out for phase 4 and cannot be replayed in
+  development.
+- **Models that have to earn it.** "No change" is the first champion. Drift, 3.0's Research engines, a ridge model
+  and gradient-boosted trees are challengers; one replaces the champion only when it beats it by more than chance
+  (corrected for the number of challengers), with an honest band and no worse tail, on two validation windows that
+  share no dates. Over a whole run, a challenger no better than the champion gets promoted in
+  under 2% of runs (a test measures it). "No change" stays a challenger, so a promoted model can be demoted.
+- **The narrow trade.** A pullback setup's trade (enter next open, 1.5-range target, 1-range stop, five sessions,
+  costs) gets target/stop/timeout probabilities and a take/pass decision. Every setup is graded, taken or not.
+- **Research's forecasts graded.** Since 3.0 each study saved its forecast with empty outcome columns; an hourly job
+  now fills them once the horizon has passed, outside market hours, wherever the job worker runs (the daemon, or the
+  app after its first desk action); `POST /v4/research/grade` grades on request and `GET /v4/research/record`
+  summarises. Their target dates now skip market holidays (they used to land on the holiday).
+- **New dependency:** scikit-learn 1.6 or later (`pip install -r requirements.txt`). Its macOS wheels need nothing
+  from Homebrew.
+
 ## 3.1.0 — UX and reliability
 
 A refinement release on top of 3.0's seven phases, from an independent review of the 3.0 code (findings and fixes

@@ -11,6 +11,25 @@ go to Robinhood only if you switch live execution on in `.env` and choose it in 
 policy (see "Version 3" below). It is not financial advice, and passing every check does not
 make a trade safe. Buying an option always puts the whole premium at risk.
 
+## Version 4 (in progress): a model that learns from its own frozen predictions
+
+4.0 adds a learning engine that replays ten years of history one trading session at a time. On each session it
+forecasts every stock from what was knowable after that session's close, freezes the forecast, grades it once its
+window has passed, and retrains weekly on what has matured. A new model replaces the old one only when it beats it, by
+more than chance, on data neither trained on. A scorecard then says, prediction by prediction, whether anything beat
+"no change". The engine cannot place an order. The last year is held out untouched for one final test. Full design,
+decisions and tests: [docs/V4.md](docs/V4.md).
+
+```
+python run.py --replay dataset build     # freeze ~11 years of daily bars for the 100 large caps and the market funds
+python run.py --replay run               # the development replay (Nov 2016 to Oct 2025); Ctrl-C and resume any time
+python run.py --replay report RUN        # what it was worth
+```
+
+It is being delivered in three parts: the replay, the models and the trade-outcome model (part A, this release); the
+held-out evaluation, live shadow forecasts and the Model Lab workspace (part B); paper-trading integration and
+per-stock models (part C). Research's own saved forecasts are now graded too, once their horizon passes.
+
 ## Version 3: the workstation
 
 3.0 turns the screens into one workstation of four workspaces built from linked, movable
@@ -1424,6 +1443,13 @@ tradeassist/
   research.py              SEC filings, results, earnings estimate
   journal.py db.py         journal and SQLite storage
   service.py api.py        the operations behind each screen, and the HTTP API
+  intelligence/            4.0: the replay and learning engine (no order path; see docs/V4.md)
+    store.py               data/replay.db, its own file and migrations; immutable records
+    data/                  the frozen dataset, the session calendar, the universe, causal features
+    replay/                the as-of view, labels and maturity, simulated trades, the day loop, scorecards
+    learning/              the ledger, training, the promotion rule, the model registry
+    models/                baselines, return models, the target/stop/timeout model, the take/pass gate
+  v4/                      4.0 in the app: the --replay command line, the /v4 routes, grading Research's forecasts
   features.py              version 2 feature switches (FEATURE_... in .env)
   migrations.py schema_v2.py   numbered database upgrades
   positions.py desk.py     unified positions: accounting from fills, marks, snapshots

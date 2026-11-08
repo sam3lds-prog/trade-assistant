@@ -4,6 +4,9 @@ uvicorn>=0.29
 pandas>=3.0
 numpy>=2.0
 scipy>=1.13
+# 4.0: the learned models (gradient boosting, probability calibration). 1.6 added FrozenEstimator. Its macOS wheels
+# carry their own OpenMP, so nothing extra is installed with Homebrew (LightGBM's would need libomp).
+scikit-learn>=1.6
 requests>=2.31
 python-dotenv>=1.0
 pydantic>=2.5
