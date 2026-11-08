@@ -18,6 +18,10 @@ combined median does no better than assuming no move out of sample, the weights 
 is flat: the forecast says so instead of drawing a direction it cannot support. Probabilities are never shown for
 the alternative paths: they are assumptions to test against, not predictions.
 
+**Saying what the band is (3.1).** The band is only called an 80% band, containing 80% of outcomes, when the
+calibration for that horizon and model version passed its coverage check. Otherwise it is the model-implied 10th to
+90th percentile range, and the forecast says that its historical coverage has not been validated (`range_words`).
+
 Options set the width when they can (implied volatility, and the move priced for an earnings release); without
 them the stock's realised volatility does. The AI never draws a path: it can explain, find evidence and challenge
 the thesis (research study), and the numbers are computed here.
@@ -39,6 +43,8 @@ COMPONENTS = ("analog", "momentum", "meanrev", "drift")
 COMPONENT_LABELS = {"analog": "Similar past situations", "momentum": "Recent trend carried forward",
                     "meanrev": "Pull back toward the 50-day average", "drift": "The stock's own average drift"}
 Z80 = 1.2815516
+RANGE_WORDS = {"calibrated": "the calibrated 80% band",
+               "unvalidated": "the model-implied 10th to 90th percentile range (historical coverage not yet validated)"}
 NOMINAL = 0.80
 COVERAGE_TOLERANCE = 0.07
 MIN_TEST_CASES = 30
@@ -226,17 +232,26 @@ def forecast(target: A.Series, pool: Sequence[A.Series], horizon: int, *, calibr
         top = sorted(contributions.items(), key=lambda kv: -abs(kv[1]["contribution_pct"]))
         explanation.append("The base path is the weighted sum of the engines' readings: " + "; ".join(
             f"{v['label'].lower()} {v['reading_pct']:+.2f}% × {v['weight']:.2f}" for _, v in top if abs(v["weight"]) > 0) + ".")
-    explanation.append("The band's width comes from " + ", ".join(sources) + (f", widened by {k:.2f} so that it held 80% of outcomes on history." if cal else "."))
+    calibrated = bool(cal) and cal.get("status") == "calibrated"
+    if calibrated:
+        explanation.append("The band's width comes from " + ", ".join(sources) + f", widened by {k:.2f} so that it held 80% of outcomes on history.")
+    elif cal:
+        explanation.append("The band's width comes from " + ", ".join(sources) + f", scaled by {k:.2f} from a calibration that did not pass its "
+                           "coverage check: the range is the model's 10th to 90th percentile, and how often it held on history is not validated.")
+    else:
+        explanation.append("The band's width comes from " + ", ".join(sources) + ": the model-implied 10th to 90th percentile, "
+                           "not yet checked against history.")
     if ev_move:
         explanation.append(f"An earnings release in {ev_days} trading days adds its priced move to the band from that day.")
     invalidators = []
     if last_price:
         invalidators.append(f"A close below ${last_price * (1 + low[0] / 100):.2f} on the first day, or ${last_price * (1 + low[-1] / 100):.2f} by "
-                            f"the horizon: the bottom of the 80% band.")
+                            f"the horizon: the bottom of {RANGE_WORDS['calibrated' if calibrated else 'unvalidated']}.")
     if ev_move:
         invalidators.append("The earnings release: a move beyond the band on the day is outside this forecast.")
     invalidators.append(f"The market's regime changing from '{comp['regime']}'.")
     return {"model_version": MODEL_VERSION, "horizon_days": horizon,
+            "range_words": RANGE_WORDS["calibrated" if calibrated else "unvalidated"], "range_calibrated": calibrated,
             "base": {"key": "base", "label": "Base", "assumption": "today's conditions continue; the engines' weighted readings",
                      "path_pct": path, "low_pct": low, "high_pct": high},
             "alternatives": alternatives, "components": contributions, "weights": {c: float(weights.get(c, 0.0)) for c in COMPONENTS},
@@ -249,4 +264,4 @@ def record_target(as_of: date, horizon: int) -> date:
     return (pd.Timestamp(as_of) + pd.offsets.BDay(horizon)).date()
 
 
-__all__ = ["MODEL_VERSION", "COMPONENTS", "components_at", "fit", "walk_forward", "forecast", "calibration_contract", "record_target", "Z80"]
+__all__ = ["RANGE_WORDS", "MODEL_VERSION", "COMPONENTS", "components_at", "fit", "walk_forward", "forecast", "calibration_contract", "record_target", "Z80"]

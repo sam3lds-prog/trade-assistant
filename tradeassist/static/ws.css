@@ -43,8 +43,14 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 .ws-tab-btn:hover { color: var(--ink); }
 .ws-tab-btn[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
 .ws-tab-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.ws-tab-btn .ws-x { opacity: 0; font-size: 0.85rem; padding: 0 2px; }
-.ws-tab-btn:hover .ws-x, .ws-tab-btn[aria-selected="true"] .ws-x { opacity: 0.6; }
+/* A tab and its close button are siblings: the close button is for the pointer, Delete closes from the keyboard. */
+.ws-tab { display: flex; align-items: stretch; position: relative; }
+.ws-tab .ws-tab-btn { padding-right: 24px; }
+.ws-x { all: unset; cursor: pointer; position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; font-size: 0.9rem; color: var(--muted); opacity: 0; }
+.ws-tab:hover .ws-x, .ws-tab.on .ws-x { opacity: 0.7; }
+.ws-x:hover { opacity: 1; background: var(--sunk); color: var(--ink); }
+@media (hover: none) { .ws-x { opacity: 0.7; } }
 .ws-tools { display: flex; gap: 6px; align-items: center; }
 .ws-btn {
   all: unset; cursor: pointer; border: 1px solid var(--line); border-radius: 4px; padding: 5px 10px; font-size: 0.88rem;
@@ -55,6 +61,9 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 .ws-btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .ws-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 .ws-kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-size: 0.78rem; color: var(--muted); }
+.ws-btn-mini { padding: 1px 7px; font-size: 0.8rem; }
+.ws-save { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); white-space: nowrap; min-width: 6.5em; }
+.ws-save[data-state="error"] { color: var(--fail); font-weight: 600; }
 
 /* ---------- status strip: always visible ---------- */
 .ws-status {
@@ -88,7 +97,14 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 /* ---------- a widget ---------- */
 .ws-widget {
   height: 100%; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line);
-  border-radius: 6px; overflow: hidden; --link: var(--link-none);
+  border-radius: 6px; overflow: hidden; --link: var(--link-none); container-type: inline-size;
+}
+/* 3.1: a narrow widget's controls tighten so its title stays readable beside them. */
+@container (max-width: 340px) {
+  .ws-whead { gap: 4px; }
+  .ws-wtools .ws-wbtn { width: 21px; }
+  .ws-wtools .ws-wbtn.ws-info { width: 16px; height: 16px; margin: 0 3px; }
+  .ws-badge { max-width: 30%; }
 }
 .ws-widget[data-group="blue"] { --link: var(--link-blue); }
 .ws-widget[data-group="green"] { --link: var(--link-green); }
@@ -260,3 +276,43 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 .ws-btn.danger { color: var(--fail); border-color: var(--fail); font-weight: 600; }
 .ws-policy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: 6px 10px; margin: 8px 0; }
 .ws-policy-grid input { width: 100%; box-sizing: border-box; }
+
+/* ---------- 3.1: the information icon on every widget, and its panel ---------- */
+.ws-wbtn.ws-info { font: italic 600 12px/1 Georgia, "Times New Roman", serif; width: 18px; height: 18px; margin: 0 4px;
+  border-radius: 50%; box-shadow: inset 0 0 0 1.4px currentColor; }
+.ws-wbtn.ws-info[aria-expanded="true"] { background: var(--accent); color: var(--accent-ink); box-shadow: none; }
+.ws-help-pop { position: fixed; z-index: 80; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 14px 12px; overflow: auto; font-size: 13px; line-height: 1.45; box-shadow: 0 8px 28px color-mix(in srgb, var(--ink) 18%, transparent); }
+.ws-help-pop.pinned { border-color: var(--accent); }
+.ws-help-pop:focus { outline: none; }
+.ws-help-pop:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ws-help-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.ws-help-top h3 { margin: 0; font-size: 0.98rem; }
+.ws-help-dl { margin: 0; display: grid; gap: 2px; }
+.ws-help-dl dt { font-weight: 600; font-size: 12px; color: var(--muted); margin-top: 6px; text-transform: none; }
+.ws-help-dl dd { margin: 0; }
+.ws-help-note { margin: 8px 0 4px; padding: 6px 8px; background: var(--sunk); border-radius: 4px; }
+.ws-help-now { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
+.ws-help-now h4 { margin: 0 0 2px; font-size: 12px; color: var(--muted); }
+.ws-help-pop .info-lead { font-weight: 600; }
+.ws-help-pop ul { padding-left: 18px; margin: 6px 0; }
+.ws-help-pop ul.plain { padding-left: 0; }
+
+/* ---------- 3.1: the study in sections, routes, drafts ---------- */
+.ws-sections { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 4px 0 10px; flex-wrap: wrap; }
+.ws-sections button { all: unset; cursor: pointer; padding: 5px 10px; font-size: 12.5px; color: var(--muted); border-bottom: 2px solid transparent; }
+.ws-sections button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.ws-sections button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.ws-route { display: inline-block; border-radius: 3px; padding: 0 6px; font-size: 11.5px; border: 1px solid var(--line); white-space: nowrap; }
+.ws-route.automatic { border-color: var(--pass); color: var(--pass); }
+.ws-route.manual { border-color: var(--warn); color: var(--warn); }
+.ws-route.research { color: var(--muted); }
+.ws-draft { border: 1px solid var(--accent); border-radius: 6px; padding: 8px 10px; margin: 0 0 10px; background: color-mix(in srgb, var(--accent) 6%, var(--panel)); }
+.ws-draft h4 { margin: 0 0 4px; }
+.ws-draft pre { white-space: pre-wrap; font-size: 12px; background: var(--sunk); padding: 6px 8px; border-radius: 4px; margin: 6px 0; }
+.ws-kv { display: grid; grid-template-columns: max-content 1fr; gap: 1px 10px; font-size: 12.5px; margin: 4px 0; }
+.ws-kv dt { color: var(--muted); } .ws-kv dd { margin: 0; }
+.ws-protect { font-size: 11.5px; color: var(--warn); white-space: nowrap; }
+.ws-notice { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 12px; font-size: 0.86rem;
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel)); border-bottom: 1px solid var(--line); }
+.ws-notice span { flex: 1 1 30rem; }

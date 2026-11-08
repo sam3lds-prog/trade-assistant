@@ -25,6 +25,9 @@ V3_WRITES = {
     "/v3/desk/live/check",
     # phase 7: run the capped autopilot once now (it acts only under a capped_autopilot policy, within its gates).
     "/v3/autopilot/run",
+    # 3.1: run a failed or interrupted study again (a model, from its saved inputs), and build a draft trade from a
+    # study's strategy: it computes the draft and previews the risk checks, and writes no proposal and sends nothing.
+    "/v3/studies/{study_id}/retry", "/v3/drafts",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.

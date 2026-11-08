@@ -1644,3 +1644,36 @@ order's own reservation twice) had been found and fixed just before.
 | R9 | The app could take over from a daemon busy with a long job, mark its submission unknown, and the ledger over-release | Medium | The daemon's heartbeat runs in its own thread; recovery only touches submissions over three minutes old, and the app recovers only while no daemon is alive; a fill never releases more than is reserved | `test_a_fill_never_releases_more_than_was_reserved`, `test_a_submission_cut_off_by_a_crash_is_recovered_as_unknown_never_resent` |
 | R10 | Only the account's last four digits were bound into the order | Medium | The order names the account by its last four digits and a hash of the whole number; the adapter refuses an order written for another | `test_another_account_with_the_same_last_digits_is_another_account`, `test_the_adapter_refuses_an_order_written_for_another_account` |
 | R11 | A cumulative answer then an executions answer could count the same shares twice | Medium | Fills are the part beyond what is recorded, whichever form the answer takes | `test_cumulative_and_execution_answers_never_count_the_same_shares_twice` |
+
+## Review of 3.0: the 3.1 refinement cycle
+
+An independent review of main at `e08a94e` (all seven 3.0 phases, CI green) found no missing feature but a product
+that read as separately built tools, with a few numbers worded more strongly than their evidence. 3.1 is one
+refinement cycle on those findings, with no new trading capability and no permission broadened. Each finding was
+first checked against the code; all were confirmed.
+
+| # | Finding | Priority | Fix | Test |
+| --- | --- | --- | --- | --- |
+| V1 | The study called an uncalibrated range "80% of outcomes"; the forecast's explanation and invalidators said the same | P0 | The band is called an 80% band only when the calibration for that horizon passed; otherwise *model-implied 10th–90th percentile, historical coverage not yet validated* (`forecast.RANGE_WORDS`, the study, the chart's line titles, drafts) | `test_an_uncalibrated_forecast_never_claims_80_percent_coverage`, `test_a_calibration_that_failed_its_coverage_check_is_not_called_a_band_either`, `test_the_study_screen_words_the_range_by_its_calibration` |
+| V2 | Fill likelihood, a spread heuristic with a fixed figure for shares, was shown as a chance | P0 | *Estimated fillability*, `fill_basis: "heuristic"`, said so in the note | `test_fillability_is_labelled_a_heuristic` |
+| V3 | Autopilot exits depend on the running app or daemon (every five minutes) but were not labelled; a missing quote passed silently | P0 | *Software-monitored, not broker-protected* in its status, the Autopilot and Desk positions widgets; a missing or stale quote is reported *not checked*, a late time exit says by how much, a gapped stop says so; no permission changed | `test_autopilot_exits_are_labelled_software_monitored_and_an_unquoted_stop_is_reported_not_skipped`, `test_a_stop_gapped_through_and_a_late_time_exit_are_reported` |
+| V4 | No widget-level help in the 3.0 frame | P1 | `ws-help.js`: one registry, six required parts per native widget (and a trading part for trading widgets), drawn by the frame; classic screens reuse help.js with 3.0 notes; keyboard, Escape, touch, one at a time, closed with its widget | `test_every_native_widget_has_help_in_six_parts_and_trading_widgets_say_what_is_sent`, `test_every_widget_type_has_help_and_every_native_widget_opens_it_in_six_parts`, `test_help_works_from_the_keyboard_closes_with_its_widget_and_fits_a_phone` |
+| V5 | Research showed two base predictions (the study and the what-if explorer) | P1 | The Scenario explorer is an *Advanced* widget, out of the standard layout, and says it is a stress test, not the study's forecast | `test_the_31_standard_layouts` |
+| V6 | A study's strategy did not flow into a proposal; "Desk can send: yes" ignored the policy (equity only) and the live adapter (shares only) | P1 | `v3/drafts.py`: each strategy's route under the policy and broker in force (automatic, manual, research); a draft with its context, a policy-sized proposal body and the risk engine's verdict; Proposals shows it and proposes it on a click | `test_the_route_follows_the_policy_and_the_broker_not_the_strategy`, `test_a_draft_carries_the_study_its_risk_its_exit_and_a_policy_sized_proposal`, `test_a_strategy_goes_from_the_study_to_a_trading_desk_proposal_with_its_context` |
+| V7 | `WS.onEvent` had no unsubscribe; widgets' subscriptions outlived them | P1 | `onEvent` returns its remover; `w.on` subscriptions are removed when the widget closes; `w.api` drops a closed widget's answers; `w.ticket` drops superseded ones | `test_widgets_closed_and_reopened_leave_no_event_subscriptions_behind` |
+| V8 | Studies ran in daemon threads; an interrupted one stayed `running` | P1 | Migration 21: a study names its process and beats; an orphan is failed as interrupted (at start and on read); `POST /v3/studies/{id}/retry` | `test_a_study_left_running_by_a_stopped_process_is_failed_and_can_be_run_again`, `test_an_interrupted_study_says_so_and_runs_again_and_a_new_stock_never_shows_the_old_study` |
+| V9 | Overlapping saves could land out of order; a failed save was silent | P1 | Saves are serialised with the newest last; the top bar shows the state with a retry | `test_tabs_are_keyboard_tabs_with_a_separate_close_button_and_the_save_state_shows` |
+| V10 | Tall, scroll-heavy standard layouts; the classic Morning plan duplicating the feed | P2 | New standard layouts under 30 rows; offered once to 3.0 sessions | `test_the_31_standard_layouts`, `test_a_session_from_30_is_offered_the_new_layouts_once` |
+| V11 | The tab close control was a span with a button role inside a button | P2 | Sibling close button; arrow keys, Home, End and Delete on the tabs; tab panels labelled | `test_tabs_are_keyboard_tabs_with_a_separate_close_button_and_the_save_state_shows` |
+
+### Not done in 3.1, on purpose
+
+- **Broker-native protective orders.** Exits stay software-monitored; nothing in 3.1 enables unattended live
+  trading. Before it is, protective orders at the broker must be verified, or the strategies restricted to ones
+  whose risk is acceptable without a resting stop.
+- **Option and multi-leg execution.** Drafts route them to manual entry unless the policy allows options and the
+  account's broker can send them (the paper broker can; the live adapter sends shares only).
+- **Calibration jobs.** A forecast calibration still runs in a thread of the app; one cut off by a restart must be
+  run again (the Forecast record widget says so). Studies, which a trade can come from, are the ones made durable.
+- **Portfolio.** Holdings and Exposure are native; recording fills, stress tests and the trade history remain the
+  classic screens until each is replaced and tested.

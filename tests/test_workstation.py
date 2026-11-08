@@ -53,7 +53,9 @@ def test_the_workstation_opens_on_four_workspaces_with_the_status_strip(tmp_path
             page.wait_for_selector(f"section.ws-tabset[data-workspace='{kind}']:not(.hidden) .ws-widget", timeout=20000)
             page.wait_for_timeout(600)
         assert page.locator("#ws-dock .ws-widget[data-type='ticket']").count() == 1      # the ticket stays in view
-        assert page.locator("section.ws-tabset:not(.hidden) .ws-widget[data-type='classic:morning']").count() == 1
+        # 3.1: the classic Morning plan is not in Discover's standard layout (its picks reach the feed); it is in the catalog.
+        assert page.locator("section.ws-tabset:not(.hidden) .ws-widget[data-type='classic:morning']").count() == 0
+        assert "classic:morning" in page.evaluate("WS.catalog().map(d => d.type)")
     assert errors == []
 
 
@@ -151,6 +153,9 @@ def test_two_charts_show_two_stocks_side_by_side(tmp_path):
 def test_classic_screens_open_as_widgets_and_analyze_opens_research(tmp_path):
     with demo_page(tmp_path) as (page, errors):
         page.goto(page.root + "#desk")
+        page.wait_for_selector("section.ws-tabset[data-workspace='desk']:not(.hidden) .ws-widget[data-type='proposals']", timeout=30000)
+        page.click("#ws-classic")                                    # 3.1: classic paper trading is in the menu, not the layout
+        page.click(".ws-menu button:text-is('Paper trading')")
         page.wait_for_selector("section.ws-tabset[data-workspace='desk']:not(.hidden) .ws-widget[data-type='classic:paper'] h3",
                                timeout=30000)
         page.click("#ws-classic")
@@ -197,15 +202,22 @@ def test_a_study_runs_draws_its_forecast_and_sends_a_contract_to_the_ticket_and_
         open_research(page)
         study = widget(page, "study")
         study.locator("button:text-is('Run the study')").click()
-        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] button:text-is('Draw on the linked chart')", timeout=60000)
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] .ws-sections", timeout=60000)
+        # 3.1: read in sections.
         text = study.inner_text()
-        for words in ("Not calibrated", "Other paths to test against", "What would prove it wrong", "Strategies under the same scenarios",
-                      "Missing or not yet trusted", "Similar past situations"):
+        for words in ("Not calibrated", "Strategies under the same scenarios", "Model-implied 10th–90th percentile range"):
             assert words in text, words
-        study.locator("button:text-is('Draw on the linked chart')").click()
+        for section, words in (("Evidence", ("Missing or not yet trusted", "Similar past situations")),
+                               ("Forecast", ("Other paths to test against", "What would prove it wrong"))):
+            study.locator(f".ws-sections button:text-is('{section}')").click()
+            text = study.inner_text()
+            assert all(x in text for x in words), (section, words)
+        assert "80% of outcomes" not in text
+        study.locator("[data-section='forecast'] button:text-is('Draw on the linked chart')").click()
         page.wait_for_function("WS.ctx.blue.scenario && WS.ctx.blue.scenario.kind === 'forecast' && WS.ctx.blue.scenario.base.path_pct.length === 5",
                                timeout=10000)
-        study.locator("tbody tr:has-text('Long call')").first.click()
+        study.locator(".ws-sections button:text-is('Strategies')").click()
+        study.locator("[data-section='strategies'] tbody tr:has-text('Long call')").first.click()
         page.wait_for_function("document.querySelector(\"#ws-dock .ws-widget[data-type='ticket'] .ws-badge\").textContent.endsWith('CALL')", timeout=30000)
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='optionchart'] :text('Theoretical, not traded')", timeout=30000)
         assert widget(page, "optionchart").locator("canvas").count() >= 1

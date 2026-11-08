@@ -5,9 +5,14 @@ and a guidance cut when a release falls inside the horizon, a market rally and s
 like for like. For each: the expected P&L in each scenario, the percentiles of the P&L, the chance of a profit, the
 four risk measures (riskmath.py), the breakevens, what an implied-volatility change does (and, before earnings,
 the volatility collapse after the release, which can make a long option lose even when the stock moves the right
-way), an estimate of how likely a limit at the fair price is to fill, and whether the account can trade it as a
-single order (only shares and single options can be sent from the Trading Desk; spreads stay research and manual
-orders until a broker path for them is verified).
+way), an estimated fillability of a limit at the fair price, and the shape of its order (one order for shares or a
+single option; several legs for a spread, which stays a manual order until a broker path for it is verified).
+
+**Fillability is a heuristic (3.1).** It is worked out from the quoted spread alone (and a fixed starting figure for
+shares), to compare candidates with each other: it is not an empirically established chance of execution, and it
+is labelled `fill_basis: "heuristic"` until the Trading Desk's own record of fills can replace it. Whether the desk
+can actually send a candidate depends on the policy and the broker in force when you act, not on the candidate:
+see v3/drafts.py, which works out each one's route.
 """
 
 from __future__ import annotations
@@ -24,9 +29,14 @@ EXECUTABLE = {"shares", "short", "long_call", "long_put"}
 INSTRUMENT = {"shares": "shares", "short": "short"}
 
 
+FILL_BASIS = "heuristic"
+FILL_WORDS = ("Estimated fillability is a heuristic from the quoted spread (shares start from a fixed estimate), for comparing "
+              "candidates: not a measured chance of execution.")
+
+
 def fill_likelihood(kind: str, legs: list[dict[str, Any]]) -> float | None:
-    """A rough chance that a limit at the fair price fills within the session, from the quoted spread: an estimate
-    for comparing candidates, not a promise (the Trading Desk's record of fills replaces it as it grows)."""
+    """A heuristic fillability score in [0, 1] for a limit at the fair price, from the quoted spread: for comparing
+    candidates, not a measured chance of execution (the Trading Desk's record of fills replaces it as it grows)."""
     if kind in ("shares", "short"):
         return 0.97
     spreads = [float(l["spread_pct"]) for l in legs if finite(l.get("spread_pct"))]
@@ -108,6 +118,9 @@ def compare(whatif: Any, symbol: str, *, forecast: dict[str, Any], horizon_days:
             notes.append("Gains under the base path but loses if volatility collapses after the earnings release.")
         if kind not in EXECUTABLE:
             notes.append("Several legs: valued here; enter it by hand at the broker (the Trading Desk sends single orders only).")
+        if r.get("theoretical_max_loss") and r.get("expected_shortfall") is not None:
+            notes.append("Most it can lose is from the contract terms; the expected shortfall is the model's average of its worst tenth; "
+                         "neither is the capital a broker may require.")
         rows.append({
             "key": kind, "label": r["label"], "instrument": INSTRUMENT.get(kind, "option" if kind in ("long_call", "long_put") else "multi_leg"),
             "quantity": qty, "legs": r.get("legs") or [], "cost": float(r["cost"]), "credit": bool(r.get("credit")),
@@ -115,7 +128,7 @@ def compare(whatif: Any, symbol: str, *, forecast: dict[str, Any], horizon_days:
             "p_profit": r["p_profit"], "theoretical_max_loss": r.get("theoretical_max_loss"), "unlimited_loss": bool(r.get("unlimited_loss")),
             "modeled_worst_loss": r.get("modeled_worst_loss"), "expected_shortfall": r.get("expected_shortfall"),
             "capital_required": capital, "breakevens": r.get("breakevens") or [], "iv_sensitivity": iv,
-            "fill_likelihood": fill_likelihood(kind, r.get("legs") or []), "executable": kind in EXECUTABLE,
+            "fill_likelihood": fill_likelihood(kind, r.get("legs") or []), "fill_basis": FILL_BASIS, "executable": kind in EXECUTABLE,
             "expiration": r.get("expiration"), "legs_text": r.get("legs_text") or [],
             "return_on_capital": (after["base"] / capital) if capital else None,
             "risk_adjusted": after["base"] / (r.get("theoretical_max_loss") or r.get("expected_shortfall") or 1.0),
@@ -126,9 +139,10 @@ def compare(whatif: Any, symbol: str, *, forecast: dict[str, Any], horizon_days:
     if best:
         risk_word = "the most it can lose" if best["theoretical_max_loss"] else "the average of its worst tenth"
         why = (f"{best['label']}: the highest expected result under the base path per dollar of {risk_word} "
-               f"({best['risk_adjusted']:+.2f}) among the structures the Trading Desk can send.")
+               f"({best['risk_adjusted']:+.2f}) among the single-order structures (shares and single options); "
+               "whether the Trading Desk can send it under your policy is its route.")
         if best["expected_pnl"]["base"] <= 0:
-            why = ("No structure the Trading Desk can send has a positive expected result under the base path after trading "
+            why = ("No single-order structure has a positive expected result under the base path after trading "
                    "costs: holding cash is the comparison's answer.")
             best = None
     return {"symbol": symbol, "horizon_days": horizon_days, "scenarios": scen, "candidates": rows, "failed": failed,
@@ -136,7 +150,7 @@ def compare(whatif: Any, symbol: str, *, forecast: dict[str, Any], horizon_days:
             "note": ("Every candidate is valued under the same scenarios: the forecast's base path and its alternatives. "
                      "Expected P&L per scenario after round-trip trading costs; percentiles of the P&L (before costs); the most "
                      "it can lose from the contract terms. "
-                     "Fill chances are estimates from the quoted spread. Not advice; no order is placed.")}
+                     + FILL_WORDS + " Not advice; no order is placed.")}
 
 
 def crush_points(vol_profile: dict[str, Any] | None, horizon_days: int) -> float | None:
@@ -157,4 +171,4 @@ def crush_points(vol_profile: dict[str, Any] | None, horizon_days: int) -> float
     return round(pts, 2) if pts > 0 and math.isfinite(pts) else None
 
 
-__all__ = ["compare", "scenarios_from", "fill_likelihood", "crush_points", "EXECUTABLE"]
+__all__ = ["compare", "scenarios_from", "fill_likelihood", "crush_points", "EXECUTABLE", "FILL_BASIS", "FILL_WORDS"]

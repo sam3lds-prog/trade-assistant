@@ -38,7 +38,7 @@
     const list = el("div"), detail = el("div", { class: "ws-opp" });
     w.body.append(el("div", { class: "ws-row" }, field("Horizon", horizon), field("Direction", way),
       el("label", { class: "ws-check" }, eligible, "Autopilot-eligible only")), el("div", { class: "ws-row" }, refresh, scan, status), list, detail);
-    let rows = [], picked = w.config.picked || null, ticket = 0, weights = {};
+    let rows = [], picked = w.config.picked || null, ticket = 0, weights = {}, lastMode = null, loadedAt = null;
     for (const c of [horizon, way, eligible]) c.addEventListener("change", () => { w.save(); load(); });
 
     async function load() {
@@ -49,11 +49,11 @@
         if (horizon.value) q.set("horizon", horizon.value);
         if (way.value) q.set("direction", way.value);
         if (eligible.checked) q.set("eligible_only", "true");
-        const d = await api(`/v3/discover?${q}`);
+        const d = await w.api(`/v3/discover?${q}`);
         if (mine !== ticket) return;
-        rows = d.candidates; weights = d.weights || {};
+        rows = d.candidates; weights = d.weights || {}; lastMode = d.data_mode; loadedAt = new Date();
         render(d);
-      } catch (e) { if (mine === ticket) list.replaceChildren(el("p", { class: "error", text: e.message })); }
+      } catch (e) { if (mine === ticket && e !== WS.GONE) list.replaceChildren(el("p", { class: "error", text: e.message })); }
     }
 
     function render(d) {
@@ -96,7 +96,7 @@
     async function showDetail(c) {
       detail.replaceChildren(loading(`Loading ${c.symbol}…`));
       let full = c;
-      try { full = await api(`/v3/discover/${enc(c.id)}`); } catch (e) { /* the summary row is enough to show */ }
+      try { full = await w.api(`/v3/discover/${enc(c.id)}`); } catch (e) { if (e === WS.GONE) return; /* the summary row is enough to show */ }
       if (picked !== c.id) return;
       const total = Object.values(weights).filter(x => x > 0).reduce((a, b) => a + b, 0) || 1;
       const parts = full.components.map(p => {
@@ -157,8 +157,9 @@
     scan.addEventListener("click", () => rescan(true));
 
     load();
-    WS.onEvent("opportunity.", () => load());
-    return { refresh: load, config: () => ({ horizon: horizon.value, direction: way.value, eligible: eligible.checked, picked }) };
+    w.on("opportunity.", () => load());
+    return { refresh: load, config: () => ({ horizon: horizon.value, direction: way.value, eligible: eligible.checked, picked }),
+      helpFacts: () => (loadedAt ? [["Shown", `${rows.length} ${rows.length === 1 ? "opportunity" : "opportunities"}, ranked ${loadedAt.toLocaleTimeString()}${lastMode === "demo" ? " on demo prices" : ""}`]] : []) };
   } });
 
   /* ---------- the budget split across the feed ---------- */
@@ -190,9 +191,9 @@
       go.disabled = true;
       out.replaceChildren(loading("Valuing the opportunities together…"));
       try {
-        const r = await api("/v3/discover/allocate", { budget: b, top_n: Number(top.value), goal: goal.value, instruments: instruments(), horizon: horizon.value || null });
+        const r = await w.api("/v3/discover/allocate", { budget: b, top_n: Number(top.value), goal: goal.value, instruments: instruments(), horizon: horizon.value || null });
         render(r);
-      } catch (e) { out.replaceChildren(el("p", { class: "error", text: e.message })); }
+      } catch (e) { if (e !== WS.GONE) out.replaceChildren(el("p", { class: "error", text: e.message })); }
       go.disabled = false;
     });
 
@@ -203,8 +204,8 @@
         metric(money(r.left, 0), "kept as cash"),
         r.reserved ? metric(money(r.reserved, 0), "already reserved by open orders") : "",
         c ? metric(money(c.expected_pnl, 0), "expected result") : "",
-        c && isNum(c.expected_shortfall) ? metric(money(c.expected_shortfall, 0), "average of the worst tenth") : "",
-        metric(r.theoretical_max_loss === null || r.theoretical_max_loss === undefined ? "no limit" : money(r.theoretical_max_loss, 0), "most it can lose"))];
+        c && isNum(c.expected_shortfall) ? metric(money(c.expected_shortfall, 0), "expected shortfall: the average of the worst tenth (modeled)") : "",
+        metric(r.theoretical_max_loss === null || r.theoretical_max_loss === undefined ? "no limit" : money(r.theoretical_max_loss, 0), "most it can lose (contract terms)"))];
       if (r.rows.length) {
         kids.push(table([
           { label: "Stock", cell: x => el("strong", { text: x.symbol }) },
@@ -213,12 +214,13 @@
           { label: "Units", num: true, cell: x => `${x.units} ${x.unit || ""}`.trim() },
           { label: "Dollars", num: true, cell: x => money(x.dollars, 0) },
           { label: "Expected", num: true, cell: x => money(x.expected_pnl, 0) },
-          { label: "Chance of profit", num: true, cell: x => (isNum(x.p_profit) ? `${Math.round(100 * x.p_profit)}%` : "") }],
+          { label: "Modeled chance of profit", num: true, cell: x => (isNum(x.p_profit) ? `${Math.round(100 * x.p_profit)}%` : "") }],
           r.rows, { onRow: x => w.set({ symbol: x.symbol, direction: x.direction, opportunity: x.candidate_id ? { id: x.candidate_id, symbol: x.symbol, direction: x.direction } : null }) }));
       } else {
         kids.push(el("p", { text: "It keeps the cash: none of these opportunities adds enough after costs and risk." }));
       }
       for (const n of r.notes || []) kids.push(el("p", { class: "small", text: n }));
+      kids.push(el("p", { class: "small muted", text: "Modeled figures come from simulated price paths; what a broker requires to hold these (margin, option buying power) can differ." }));
       if ((r.skipped || []).length) kids.push(el("p", { class: "small muted", text: `Left out: ${r.skipped.map(s => `${s.symbol || s.id} (${s.why})`).join("; ")}.` }));
       if (r.note) kids.push(el("p", { class: "small muted", text: r.note }));
       out.replaceChildren(...kids);
@@ -226,13 +228,15 @@
     return { config: () => ({ budget: Number(budget.value), top_n: Number(top.value), horizon: horizon.value, goal: goal.value, instruments: instruments() }) };
   } });
 
-  /* ---------- Discover's standard layout, 3.0 ---------- */
+  /* ---------- Discover's standard layout, 3.1 ----------
+     The ranked feed is the page; the budget split, the chart, the watchlist and the news sit beside and under it so
+     the whole of it fits about one screen. The classic Morning plan is in the catalog (Add widget, Discover (classic
+     screens)) rather than here: its picks already reach the feed. */
   WS.DEFAULT_LAYOUTS.discover = [
-    { type: "feed", x: 0, y: 0, w: 8, h: 11, group: "blue" },
-    { type: "allocator", x: 8, y: 0, w: 4, h: 11, group: "blue" },
-    { type: "chart", x: 0, y: 11, w: 8, h: 9, group: "blue" },
-    { type: "watchlist", x: 8, y: 11, w: 4, h: 4, group: "blue" },
-    { type: "news", x: 8, y: 15, w: 4, h: 5, group: "blue" },
-    { type: "classic:morning", x: 0, y: 20, w: 12, h: 11, group: "none" },
+    { type: "feed", x: 0, y: 0, w: 7, h: 10, group: "blue" },
+    { type: "allocator", x: 7, y: 0, w: 5, h: 10, group: "blue" },
+    { type: "chart", x: 0, y: 10, w: 7, h: 8, group: "blue" },
+    { type: "watchlist", x: 7, y: 10, w: 5, h: 4, group: "blue" },
+    { type: "news", x: 7, y: 14, w: 5, h: 4, group: "blue" },
   ];
 })();

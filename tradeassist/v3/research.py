@@ -9,12 +9,21 @@ from it can later be judged on what was known then. What could not be read is li
 
 The AI is optional and has one job here: to challenge the thesis from the evidence (what supports it, what
 contradicts it, what is missing, what would prove it wrong). It writes no numbers and draws no path.
+
+**Interrupted studies (3.1).** A study runs in a thread of the process that started it, which records its name
+(host and process id) on the row and beats every few seconds while it runs. A study left `running` by a process
+that is gone (a restart, a crash) or that stopped beating long ago is marked failed as interrupted, when this
+process starts and whenever studies are read; another live process's study on this computer is left to that
+process. A failed study can be run again from its saved inputs (POST /v3/studies/{id}/retry), as a new study that
+names the one it retries.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
+import socket
 import threading
 import traceback
 from datetime import datetime
@@ -41,6 +50,22 @@ HORIZONS = (1, 3, 5, 10, 20)
 THESES = ("intraday_bounce", "swing", "earnings_reaction", "reversal", "investment")
 CAL_KEY = "forecast:calibration:{mode}:{h}"
 MAX_RUNNING = 3
+BEAT_SECONDS = 5.0             # a running study's heartbeat
+ORPHAN_SECONDS = 180.0         # a study whose heartbeat is older than this, in a process that is not checkable, is orphaned
+INTERRUPTED = ("Interrupted: the app stopped (or the computer slept) while this study was running, so it did not finish. "
+               "Run it again.")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:          # it exists, under another user
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class StudyIn(BaseModel):
@@ -85,6 +110,76 @@ class Research:
         self._lock = threading.Lock()
         self._running: dict[str, threading.Thread] = {}
         self._calibrating: dict[str, Any] | None = None
+        self.host = socket.gethostname()
+        self.worker = f"{self.host}:{os.getpid()}"
+        self._beat: threading.Thread | None = None
+        try:
+            self.sweep()                         # what a stopped process left running is failed now, not left spinning
+        except Exception:  # noqa: BLE001 - an old database without the columns is migrated before use; never block start
+            pass
+
+    # --- interrupted studies ---------------------------------------------------------
+    def _owner_alive(self, worker: str | None, heartbeat_at: str | None, created_at: str | None) -> bool:
+        """Whether the process named on a running study may still be running it."""
+        if worker == self.worker:
+            return False                                         # ours, and not among our live threads (checked by the caller)
+        host, _, pid = (worker or "").rpartition(":")
+        if host == self.host and pid.isdigit():
+            return _pid_alive(int(pid))                          # another process on this computer: alive is alive
+        stamp = heartbeat_at or created_at
+        if not stamp:
+            return False
+        try:
+            age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(stamp)).total_seconds()
+        except (ValueError, TypeError):
+            return False
+        return age < ORPHAN_SECONDS
+
+    def sweep(self) -> list[str]:
+        """Mark as failed (interrupted) every study left running by a process that is not running it any more."""
+        rows = self.svc.db.query("SELECT id, symbol, worker, heartbeat_at, created_at FROM studies WHERE status = 'running'")
+        if not rows:
+            return []
+        with self._lock:
+            mine = {k for k, t in self._running.items() if t.is_alive()}
+        dead = [r for r in rows if r["id"] not in mine and not self._owner_alive(r["worker"], r["heartbeat_at"], r["created_at"])]
+        if not dead:
+            return []
+        with self.svc.db.tx() as cur:
+            for r in dead:
+                cur.execute("UPDATE studies SET status = 'failed', error = ? WHERE id = ? AND status = 'running'", (INTERRUPTED, r["id"]))
+        for r in dead:
+            self.svc.bus.publish("study.failed", r["id"], symbol=r["symbol"], error="interrupted")
+        return [r["id"] for r in dead]
+
+    def _beating(self) -> None:
+        """One thread per process: beats for every study this process is running, and stops when there are none."""
+        while True:
+            with self._lock:
+                live = [k for k, t in self._running.items() if t.is_alive()]
+            if not live:
+                with self._lock:
+                    self._beat = None
+                return
+            try:
+                with self.svc.db.tx() as cur:
+                    cur.executemany("UPDATE studies SET heartbeat_at = ? WHERE id = ? AND status = 'running'", [(C.utc_now(), k) for k in live])
+            except Exception:  # noqa: BLE001 - a missed beat is caught up on the next
+                pass
+            threading.Event().wait(BEAT_SECONDS)
+
+    def retry(self, study_id: str) -> dict[str, Any]:
+        """Run a failed study again from its saved inputs, as a new study that names the one it retries."""
+        self.sweep()
+        r = self.svc.db.one("SELECT status, inputs_json FROM studies WHERE id = ?", (study_id,))
+        if r is None:
+            raise RequestError(f"No study {study_id}")
+        if r["status"] == "running":
+            raise RequestError("That study is still running")
+        req = StudyIn.model_validate_json(r["inputs_json"])
+        out = self.start(req, retry_of=study_id)
+        out["retry_of"] = study_id
+        return out
 
     # --- studies -------------------------------------------------------------
     def check(self, req: StudyIn) -> StudyIn:
@@ -99,7 +194,7 @@ class Research:
                 raise RequestError("direction must be LONG, SHORT or empty")
         return req
 
-    def start(self, req: StudyIn) -> dict[str, Any]:
+    def start(self, req: StudyIn, retry_of: str | None = None) -> dict[str, Any]:
         req = self.check(req)
         with self._lock:
             alive = {k: t for k, t in self._running.items() if t.is_alive()}
@@ -110,13 +205,17 @@ class Research:
             now = C.utc_now()
             with self.svc.db.tx() as cur:
                 cur.execute("""INSERT INTO studies (id, mode, symbol, created_at, as_of, horizon_days, thesis, direction, objective, status,
-                               engine_version, contract_version, opportunity_id, inputs_json, evidence_json, fingerprint)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, '{}', '')""",
+                               engine_version, contract_version, opportunity_id, inputs_json, evidence_json, fingerprint, worker, heartbeat_at,
+                               retry_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, '{}', '', ?, ?, ?)""",
                             (study_id, self.svc.market.info.mode, req.symbol, now, now, req.horizon_days, req.thesis, req.direction,
-                             req.objective, ENGINE_VERSION, C.CONTRACT_VERSION, req.opportunity_id, req.model_dump_json()))
+                             req.objective, ENGINE_VERSION, C.CONTRACT_VERSION, req.opportunity_id, req.model_dump_json(),
+                             self.worker, now, retry_of))
             t = threading.Thread(target=self._run_safely, args=(study_id, req), name=f"study-{req.symbol}", daemon=True)
             self._running[study_id] = t
             t.start()
+            if self._beat is None or not self._beat.is_alive():
+                self._beat = threading.Thread(target=self._beating, name="study-heartbeat", daemon=True)
+                self._beat.start()
         d3 = getattr(self.svc, "discover3", None)
         if req.opportunity_id and d3 is not None:
             d3.link_study(req.opportunity_id, study_id, req.symbol)
@@ -360,17 +459,28 @@ class Research:
         r = self.svc.db.one("SELECT * FROM studies WHERE id = ?", (study_id,))
         if r is None:
             raise RequestError(f"No study {study_id}")
+        if r["status"] == "running" and self.sweep():
+            r = self.svc.db.one("SELECT * FROM studies WHERE id = ?", (study_id,))
         out: dict[str, Any] = {"id": r["id"], "symbol": r["symbol"], "status": r["status"], "created_at": r["created_at"],
-                               "horizon_days": r["horizon_days"], "thesis": r["thesis"], "direction": r["direction"], "error": r["error"]}
+                               "horizon_days": r["horizon_days"], "thesis": r["thesis"], "direction": r["direction"], "error": r["error"],
+                               "retry_of": r["retry_of"] if "retry_of" in r.keys() else None,
+                               "retryable": r["status"] == "failed"}
         if r["status"] in ("complete", "partial"):
             out["study"] = {"id": r["id"], "symbol": r["symbol"], "created_at": r["created_at"], "horizon_days": r["horizon_days"],
                             "thesis": r["thesis"], "direction": r["direction"], "status": r["status"],
                             "evidence": json.loads(r["evidence_json"]), "forecast": json.loads(r["forecast_json"]) if r["forecast_json"] else None,
                             "strategies": json.loads(r["strategies_json"] or "[]"), "fingerprint": r["fingerprint"]}
             out["view"] = json.loads(r["view_json"] or "{}")
+            # Where each strategy can go under the policy and broker in force now (not when the study ran).
+            from .drafts import routes_for
+            try:
+                out["routes"] = routes_for(self.svc, (out["view"].get("strategies") or {}).get("candidates") or [])
+            except Exception:  # noqa: BLE001 - a route is advice for the screen; the study is still readable without it
+                out["routes"] = {}
         return out
 
     def recent(self, symbol: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        self.sweep()
         mode = self.svc.market.info.mode
         sql, params = "SELECT id, symbol, status, created_at, horizon_days, thesis, direction FROM studies WHERE mode = ?", [mode]
         if symbol:
@@ -498,6 +608,10 @@ def install(svc: Any) -> None:
         @router.get("/studies/{study_id}")
         def one(study_id: str) -> dict[str, Any]:
             return r.get(study_id)
+
+        @router.post("/studies/{study_id}/retry")
+        def retry(study_id: str) -> dict[str, Any]:
+            return r.retry(study_id)
 
         @router.post("/studies/{study_id}/challenge")
         def challenge(study_id: str, body: ChallengeIn) -> dict[str, Any]:

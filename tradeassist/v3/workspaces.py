@@ -58,6 +58,7 @@ class SessionIn(Strict):
     active: str | None = None
     dock: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)     # each link group's selected stock, contract, drafts
+    layouts_version: int | None = Field(default=None, ge=0, le=1000)   # 3.1: which standard layouts the session last saw
 
 
 def _check(layout: LayoutIn) -> None:
@@ -141,6 +142,8 @@ class Workspaces:
 
     def save_session(self, s: SessionIn) -> dict[str, Any]:
         value = s.model_dump()
+        if value.get("layouts_version") is None:          # a session from before 3.1 is kept exactly as it was sent
+            value.pop("layouts_version", None)
         if len(json.dumps(value, default=str)) > MAX_BYTES:
             raise RequestError("That session is too large to save")
         self.db.cache_put(SESSION_KEY, value)

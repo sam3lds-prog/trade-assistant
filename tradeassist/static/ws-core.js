@@ -9,12 +9,18 @@
 const WS = (() => {
   const GROUPS = [["blue", "Blue"], ["green", "Green"], ["amber", "Amber"], ["plum", "Plum"], ["none", "Not linked"]];
   const WORKSPACES = { discover: "Discover", research: "Research", desk: "Trading Desk", portfolio: "Portfolio" };
-  const CONTEXT_KEYS = ["symbol", "direction", "horizon", "contract", "strategy", "scenario", "proposal", "opportunity", "study"];
+  const CONTEXT_KEYS = ["symbol", "direction", "horizon", "contract", "strategy", "scenario", "proposal", "opportunity", "study", "draft"];
+  // What belongs to one stock: a new stock clears these unless the change names them too.
+  const PER_STOCK = ["contract", "strategy", "scenario", "proposal", "opportunity", "study", "draft"];
   const TYPES = {};                       // widget type -> definition
   const ctx = {};                         // link group -> shared context
   const providers = {};                   // link group -> {capability: {widget, api}}
   const tabs = new Map();                 // tab id -> {id, workspace, name, layoutId, root, grid, widgets: Map}
-  const eventHandlers = [];               // [topicPrefix, fn]
+  const eventHandlers = new Set();        // {prefix, fn}; WS.onEvent returns the function that removes one
+  const GONE = new Error("widget closed"); // a closed widget's request: its answer is dropped, not shown
+  // The standard layouts' version: a session saved under older ones is offered the new ones once (never forced).
+  const LAYOUTS_VERSION = 31;
+  let layoutsSeen = LAYOUTS_VERSION;
   let activeTab = null, focusedWidget = null, dockWidget = null, saveTimer = null, booted = false, restoring = false;
   let symbolsList = [], statusInfo = null, lastEvent = 0;
   let dockOpen = true;
@@ -29,10 +35,22 @@ const WS = (() => {
   const btn = (name, label, onclick) => { const b = el("button", { class: "ws-wbtn", type: "button", title: label, "aria-label": label, onclick }); b.append(icon(ICONS[name])); return b; };
   const empty = text => el("p", { class: "ws-empty", text });
   let toastTimer = null;
-  function toast(text) {
+  function toast(text, ms = 2600) {
     const t = document.getElementById("ws-toast");
     t.textContent = text; t.classList.remove("hidden");
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add("hidden"), 2600);
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add("hidden"), ms);
+  }
+
+  // Once, for a session saved under the 3.0 layouts: say what changed and offer them, keeping the user's otherwise.
+  function offerNewLayouts() {
+    const bar = el("div", { class: "ws-notice", role: "region", "aria-label": "New standard layouts" },
+      el("span", { text: "3.1 has new standard layouts: Discover without the classic Morning plan, a larger chart and a sectioned study in Research, a compact Trading Desk and native Portfolio widgets. Your workspaces are as you left them." }));
+    const done = () => { layoutsSeen = LAYOUTS_VERSION; bar.remove(); saveSoon(); };
+    bar.append(el("button", { class: "ws-btn primary ws-btn-mini", type: "button", onclick: () => {
+      for (const t of [...tabs.values()]) if (t.name === WORKSPACES[t.workspace] && !t.layoutId) resetTab(t.id);
+      done(); toast("The standard workspaces now use the 3.1 layouts. Saved layouts are unchanged.", 4000);
+    } }, "Use the new layouts"), el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: done }, "Keep mine"));
+    document.getElementById("ws-status").after(bar);
   }
 
   /* ---------- the shared context ---------- */
@@ -45,7 +63,7 @@ const WS = (() => {
     if (patch.symbol !== undefined && patch.symbol) patch.symbol = String(patch.symbol).trim().toUpperCase();
     // A new stock clears what belonged to the old one, unless the change names it too.
     if (patch.symbol && patch.symbol !== target.symbol) {
-      for (const k of ["contract", "strategy", "scenario", "proposal", "opportunity", "study"]) if (!(k in patch)) patch[k] = null;
+      for (const k of PER_STOCK) if (!(k in patch)) patch[k] = null;
     }
     const changed = Object.keys(patch).filter(k => JSON.stringify(target[k]) !== JSON.stringify(patch[k]));
     if (!changed.length) return;
@@ -78,6 +96,23 @@ const WS = (() => {
     return hit && hit.widget !== w ? hit.api : null;
   }
 
+  /* ---------- linked crosshairs: charts in one link group follow each other's hovered day ---------- */
+  const crossSubs = new Set(), crossSaid = new Map();
+  const nyDay = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+  const dayOf = utcSeconds => nyDay.format(new Date(utcSeconds * 1000));
+  const crosshair = {
+    // fn(day | null) when another chart in w's link group moves its crosshair; returns the function that stops it.
+    listen(w, source, fn) { const h = { w, source, fn }; crossSubs.add(h); return () => { crossSubs.delete(h); }; },
+    // A day said twice in a row by the same chart is said once, so two charts placing each other's crosshair settle.
+    say(w, source, day) {
+      const key = `${w.id}:${source}`;
+      if (crossSaid.get(key) === day) return;
+      crossSaid.set(key, day);
+      if (w.group === "none") return;
+      for (const h of [...crossSubs]) if (h.w !== w && h.w.group === w.group && !h.w.disposed) { try { h.fn(day); } catch (e) { console.error(e); } }
+    },
+  };
+
   /* ---------- the widget registry ---------- */
   function register(type, def) { TYPES[type] = { type, size: { w: 6, h: 6 }, category: "Research", ...def }; }
   function catalog() {
@@ -96,14 +131,16 @@ const WS = (() => {
     const def = TYPES[spec.type] || TYPES.unknown;
     const w = { id: spec.id || `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, type: spec.type,
       group: spec.group || def.group || "blue", config: { ...(def.config || {}), ...(spec.config || {}) }, collapsed: !!spec.collapsed,
-      def, host, impl: null, own: spec.own || null };
+      def, host, impl: null, own: spec.own || null, disposed: false, subs: [] };
     const linkBtn = el("button", { class: "ws-link", type: "button" });
     const title = el("span", { class: "ws-wtitle", text: def.title });
     const badge = el("span", { class: "ws-badge" });
     const head = el("div", { class: "ws-whead" }, linkBtn, title, badge, el("span", { class: "ws-gap" }));
     const body = el("div", { class: "ws-wbody" });
     const node = el("div", { class: "ws-widget", "data-group": w.group, "data-type": w.type, "data-wid": w.id }, head, body);
+    // Every widget's header carries its information icon, first among its controls (ws-help.js draws it).
     const tools = el("span", { class: "ws-wtools" },
+      WS.helpButton ? WS.helpButton(w) : null,
       btn("refresh", "Refresh", () => w.refresh()),
       def.dockable === false ? null : btn("dock", host === "dock" ? "Move into the workspace" : "Pin to the dock", () => (host === "dock" ? undock() : toDock(w))),
       host === "dock" ? null : btn("collapse", "Collapse", () => w.toggleCollapse()),
@@ -125,7 +162,17 @@ const WS = (() => {
     w.ctx = () => contextOf(w);
     w.set = patch => set(w.group, patch, w);
     w.save = () => saveSoon();
-    w.fail = e => body.replaceChildren(el("div", { class: "error", role: "alert", text: (e && e.message) || String(e) }));
+    w.fail = e => { if (e !== GONE && !w.disposed) body.replaceChildren(el("div", { class: "error", role: "alert", text: (e && e.message) || String(e) })); };
+    // Events for as long as the widget is open: closing it removes every subscription it made here.
+    w.on = (prefix, fn) => { const off = onEvent(prefix, ev => { if (!w.disposed) fn(ev); }); w.subs.push(off); return off; };
+    // A request whose answer is dropped (rejected with WS.GONE) if the widget closed while it was on its way.
+    w.api = (path, payload) => api(path, payload).then(r => { if (w.disposed) throw GONE; return r; });
+    // The latest of several overlapping requests wins: `const mine = w.ticket()`, then `if (!w.current(mine)) return`.
+    let tick = 0;
+    w.ticket = () => ++tick;
+    w.current = n => n === tick && !w.disposed;
+    // Facts the help panel shows for the widget as it is now (data source, as-of, model version...).
+    w.helpFacts = () => (w.impl && w.impl.helpFacts ? w.impl.helpFacts() : []);
     w.setGroup = g => {
       if (g === w.group) return;
       // What it offered its old group (a chart's API) it now offers the new one.
@@ -185,7 +232,10 @@ const WS = (() => {
   }
 
   function removeWidget(w, quiet) {
+    w.disposed = true;
+    if (WS.closeHelp) WS.closeHelp(w);
     try { if (w.impl && w.impl.dispose) w.impl.dispose(); } catch (e) { console.error(e); }
+    for (const off of w.subs.splice(0)) off();
     for (const g of Object.keys(providers)) for (const cap of Object.keys(providers[g])) if (providers[g][cap].widget === w) provide(w, cap, null);
     if (w.host === "dock") { dockWidget = null; renderDock(); }
     else {
@@ -214,7 +264,8 @@ const WS = (() => {
   function openTab(spec, makeActive = true) {
     const id = spec.id || `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
     const gridEl = el("div", { class: "grid-stack" });
-    const root = el("section", { class: "ws-tabset hidden", "data-tab": id, "data-workspace": spec.workspace, "aria-label": spec.name }, gridEl);
+    const root = el("section", { class: "ws-tabset hidden", "data-tab": id, "data-workspace": spec.workspace, id: `panel-${id}`, role: "tabpanel",
+      "aria-labelledby": `tab-${id}` }, gridEl);
     document.getElementById("ws-tabsets").append(root);
     const grid = GridStack.init(gridOptions(), gridEl);
     const tab = { id, workspace: spec.workspace, name: spec.name || WORKSPACES[spec.workspace], layoutId: spec.layoutId || null, root, grid, widgets: new Map() };
@@ -250,9 +301,13 @@ const WS = (() => {
 
   function activate(id) {
     if (!tabs.has(id)) return;
+    if (WS.closeHelp) WS.closeHelp();
     activeTab = id;
     for (const t of tabs.values()) t.root.classList.toggle("hidden", t.id !== id);
-    for (const b of document.querySelectorAll(".ws-tab-btn")) b.setAttribute("aria-selected", b.dataset.tab === id ? "true" : "false");
+    for (const b of document.querySelectorAll(".ws-tab-btn")) {
+      b.setAttribute("aria-selected", b.dataset.tab === id ? "true" : "false");
+      b.tabIndex = b.dataset.tab === id ? 0 : -1;
+    }
     const t = tabs.get(id);
     for (const w of t.widgets.values()) {
       if (w.pending) start(w);
@@ -272,13 +327,27 @@ const WS = (() => {
     renderTabs(); saveSoon();
   }
 
+  // Each workspace is a tab with its own close button beside it (never inside it: a button in a button is not one).
+  // The keyboard moves between tabs with the arrow keys, Home and End, and Delete closes the one in focus; the close
+  // buttons are for the pointer, so Tab passes over them.
   function renderTabs() {
     const bar = document.getElementById("ws-tabs");
-    bar.replaceChildren(...[...tabs.values()].map(t => {
-      const x = el("span", { class: "ws-x", role: "button", "aria-label": `Close ${t.name}`, title: "Close this workspace", text: "×",
-        onclick: e => { e.stopPropagation(); closeTab(t.id); } });
-      return el("button", { class: "ws-tab-btn", type: "button", role: "tab", "data-tab": t.id, "data-workspace": t.workspace,
-        "aria-selected": t.id === activeTab ? "true" : "false", onclick: () => activate(t.id) }, t.name, x);
+    const list = [...tabs.values()];
+    const focusTab = id => { const b = bar.querySelector(`.ws-tab-btn[data-tab="${id}"]`); if (b) b.focus(); };
+    bar.replaceChildren(...list.map((t, i) => {
+      const selected = t.id === activeTab;
+      const tab = el("button", { class: "ws-tab-btn", type: "button", role: "tab", id: `tab-${t.id}`, "aria-controls": `panel-${t.id}`,
+        "data-tab": t.id, "data-workspace": t.workspace, "aria-selected": selected ? "true" : "false", tabindex: selected ? "0" : "-1",
+        "aria-keyshortcuts": "Delete", title: `${t.name} (Delete closes it)`, onclick: () => activate(t.id),
+        onkeydown: e => {
+          const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+          if (step) { const n = list[(i + step + list.length) % list.length]; activate(n.id); focusTab(n.id); e.preventDefault(); }
+          else if (e.key === "Home" || e.key === "End") { const n = list[e.key === "Home" ? 0 : list.length - 1]; activate(n.id); focusTab(n.id); e.preventDefault(); }
+          else if (e.key === "Delete") { closeTab(t.id); if (tabs.has(activeTab)) focusTab(activeTab); e.preventDefault(); }
+        } }, t.name);
+      const x = el("button", { class: "ws-x", type: "button", tabindex: "-1", "aria-label": `Close ${t.name}`, title: "Close this workspace",
+        onclick: e => { e.stopPropagation(); closeTab(t.id); } }, "×");
+      return el("span", { class: `ws-tab${selected ? " on" : ""}`, role: "presentation", "data-tab": t.id }, tab, x);
     }));
   }
 
@@ -334,17 +403,45 @@ const WS = (() => {
   function sessionBody() {
     const dock = dockWidget ? { type: dockWidget.type, group: dockWidget.group,
       config: dockWidget.impl && dockWidget.impl.config ? { ...dockWidget.config, ...dockWidget.impl.config() } : dockWidget.config } : null;
-    return { tabs: [...tabs.values()].map(tabSpec), active: activeTab, dock: { widget: dock, open: dockOpen }, context: ctx };
+    return { tabs: [...tabs.values()].map(tabSpec), active: activeTab, dock: { widget: dock, open: dockOpen }, context: ctx, layouts_version: layoutsSeen };
+  }
+  // Saves go one at a time and the newest state is always the last one sent: a change made while a save is on its
+  // way is sent after it, so an older answer can never land after a newer one. The top bar says whether the
+  // workstation is saved, being saved, or could not be saved (with a retry), so a failure is never silent.
+  let saving = null, saveAgain = false, retryTimer = null;
+  function markSave(state, detail) {
+    const box = document.getElementById("ws-save");
+    if (!box) return;
+    box.dataset.state = state;
+    const words = { pending: "Unsaved changes", saving: "Saving…", saved: "Saved", error: "Not saved" }[state];
+    const kids = [el("span", { class: `ws-dot ${state === "saved" ? "pass" : state === "error" ? "fail" : "warn"}` }), words];
+    if (state === "error") kids.push(el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: () => saveNow() }, "Retry"));
+    box.replaceChildren(...kids);
+    box.title = state === "error" ? `The layout and the linked stocks could not be saved: ${detail || "the app did not answer"}. It retries by itself.`
+      : state === "saved" ? "The workspaces, their layouts and the linked context are saved on this computer." : words;
   }
   function saveSoon() {
     if (!booted || restoring) return;
     clearTimeout(saveTimer);
+    markSave("pending");
     saveTimer = setTimeout(saveNow, 700);
   }
-  async function saveNow() {
+  function saveNow() {
     clearTimeout(saveTimer); saveTimer = null;
-    try { await api("/v3/workspaces/session", sessionBody()); }
-    catch (e) { console.warn("The workstation could not be saved:", e.message); }
+    clearTimeout(retryTimer); retryTimer = null;
+    if (saving) { saveAgain = true; return saving; }
+    markSave("saving");
+    saving = (async () => {
+      try {
+        do { saveAgain = false; await api("/v3/workspaces/session", sessionBody()); } while (saveAgain);
+        markSave("saved");
+      } catch (e) {
+        console.warn("The workstation could not be saved:", e.message);
+        markSave("error", e.message);
+        retryTimer = setTimeout(saveNow, 15000);
+      } finally { saving = null; }
+    })();
+    return saving;
   }
 
   async function saveLayout(asNew, name) {
@@ -364,8 +461,8 @@ const WS = (() => {
     openTab({ workspace: l.workspace, name: l.name, layoutId: l.id, widgets: l.widgets.map(w => ({ ...w, id: undefined })) });
   }
 
-  function resetTab() {
-    const t = tabs.get(activeTab);
+  function resetTab(id) {
+    const t = tabs.get(id || activeTab);
     for (const w of [...t.widgets.values()]) removeWidget(w, true);
     t.grid.batchUpdate();
     for (const s of WS.DEFAULT_LAYOUTS[t.workspace] || []) addWidget(t, { ...s });
@@ -419,7 +516,7 @@ const WS = (() => {
     const form = el("div", { class: "ws-menu-form" }, name, el("button", { class: "ws-btn", type: "button", onclick: async () => {
       closeMenu(); try { await saveLayout(true, name.value.trim() || tabs.get(activeTab).name); } catch (e) { toast(e.message); } } }, "Save as"));
     const items = [["Save this layout", async () => { try { await saveLayout(false); } catch (e) { toast(e.message); } }], form, "-",
-      ["Reset to the standard layout", resetTab], "-", "Open a workspace"];
+      ["Reset to the standard layout", () => resetTab()], "-", "Open a workspace"];
     for (const [k, label] of Object.entries(WORKSPACES)) items.push([`New ${label}`, () => openTab({ workspace: k, name: label, widgets: WS.DEFAULT_LAYOUTS[k] || [] })]);
     openMenu(anchor, items);
     api("/v3/workspaces").then(d => {
@@ -503,6 +600,18 @@ const WS = (() => {
         el("span", { class: "ws-pill", title: trading.detail || "" }, el("span", { class: `ws-mode ${trading.mode}`, id: "ws-mode", text: trading.label })),
       ];
       if (v3.risk) parts.push(el("span", { class: "ws-pill", title: v3.risk.detail || "" }, el("span", { class: `ws-dot ${v3.risk.level || ""}` }), v3.risk.label));
+      // The kill switch is in reach from every workspace. Switching it on is one click (and a confirmation); off
+      // again is on the Trading Desk's Desk widget, where its reason and what it stopped are shown.
+      if (v3.risk && v3.risk.kill_switch === false && trading.mode !== "advisory") {
+        parts.push(el("button", { class: "ws-btn ws-btn-mini danger", type: "button", id: "ws-kill", title: "Cancel working orders and refuse every approval until it is switched off",
+          onclick: async e => {
+            if (!window.confirm("Switch the kill switch on? Working orders are cancelled and every approval is refused until you switch it off on the Trading Desk.")) return;
+            e.currentTarget.disabled = true;
+            try { await api("/v3/desk/kill", { on: true, reason: "from the status bar" }); toast("Kill switch on: nothing is sent."); }
+            catch (err) { toast(err.message); }
+            refreshStatus();
+          } }, "Kill switch"));
+      }
       if (v3.daemon) parts.push(el("span", { class: "ws-pill", title: v3.daemon.detail || "" }, el("span", { class: `ws-dot ${v3.daemon.level || ""}` }), v3.daemon.label));
       parts.push(el("span", { class: "ws-spacer" }),
         el("span", { class: "ws-pill", id: "ws-live" }, el("span", { class: `ws-dot ${streamOk ? "pass" : "warn"}` }), streamOk ? "Live updates" : "Connecting"),
@@ -524,7 +633,7 @@ const WS = (() => {
         delay = 1000;
         for (const ev of d.events) {
           lastEvent = Math.max(lastEvent, ev.id);
-          for (const [prefix, fn] of eventHandlers) if (ev.topic.startsWith(prefix)) { try { fn(ev); } catch (e) { console.error(e); } }
+          for (const h of [...eventHandlers]) if (eventHandlers.has(h) && ev.topic.startsWith(h.prefix)) { try { h.fn(ev); } catch (e) { console.error(e); } }
         }
         if (!d.events.length) lastEvent = Math.max(lastEvent, d.latest || 0);
       } catch (e) {
@@ -538,7 +647,12 @@ const WS = (() => {
     const p = document.getElementById("ws-live");
     if (p) p.replaceChildren(el("span", { class: `ws-dot ${streamOk ? "pass" : "warn"}` }), streamOk ? "Live updates" : "Reconnecting");
   }
-  function onEvent(prefix, fn) { eventHandlers.push([prefix, fn]); }
+  // Returns the function that stops it. A widget subscribes with w.on(), which is undone when the widget closes.
+  function onEvent(prefix, fn) {
+    const h = { prefix, fn };
+    eventHandlers.add(h);
+    return () => { eventHandlers.delete(h); };
+  }
 
   /* ---------- the classic screens inside the workstation ---------- */
   function wireClassic() {
@@ -573,7 +687,7 @@ const WS = (() => {
     for (const [g, c] of Object.entries(session.context || {})) if (ctx[g]) Object.assign(ctx[g], c);
     if (!ctx.blue.symbol) ctx.blue.symbol = (syms.watchlist || [])[0] || "AAPL";
     const saved = (session.tabs || []).filter(t => WORKSPACES[t.workspace]);
-    if (saved.length) for (const t of saved) openTab(t, false);
+    if (saved.length) { for (const t of saved) openTab(t, false); layoutsSeen = session.layouts_version || 30; }
     else for (const k of Object.keys(WORKSPACES)) {
       const def = (listing.layouts || []).find(l => l.workspace === k && l.is_default);
       openTab(def ? { workspace: k, name: def.name, layoutId: def.id, widgets: def.widgets } : { workspace: k, name: WORKSPACES[k], widgets: WS.DEFAULT_LAYOUTS[k] || [] }, false);
@@ -586,9 +700,12 @@ const WS = (() => {
     activate(byHash ? byHash.id : (tabs.has(session.active) ? session.active : tabs.keys().next().value));
     restoring = false;
     booted = true;
+    markSave("saved");
+    if (layoutsSeen < LAYOUTS_VERSION) offerNewLayouts();
+    if (WS.missingHelp) { const gaps = WS.missingHelp(); if (gaps.length) console.error(`Widgets without help: ${gaps.join(", ")}`); }
     // A change made in the last moment before the page closes is still saved.
     window.addEventListener("pagehide", () => {
-      if (!saveTimer) return;
+      if (!saveTimer && !saveAgain) return;                  // nothing waiting (a change behind a save in flight counts)
       try { fetch("/v3/workspaces/session", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify(sessionBody()) }); }
       catch (e) { /* the page is going */ }
     });
@@ -603,5 +720,5 @@ const WS = (() => {
 
   return { GROUPS, WORKSPACES, register, set, contextOf, provide, find, empty, toast, openMenu, closeMenu, addToActive, goWorkspace,
     onEvent, boot, saveNow, routeClassic, allWidgets, tabs: () => tabs, active: () => activeTab, ctx, catalog, openPalette, saveLayout,
-    status: () => statusInfo, DEFAULT_LAYOUTS: {}, DEFAULT_DOCK: null };
+    status: () => statusInfo, types: () => TYPES, handlerCount: () => eventHandlers.size, GONE, crosshair, dayOf, DEFAULT_LAYOUTS: {}, DEFAULT_DOCK: null };
 })();

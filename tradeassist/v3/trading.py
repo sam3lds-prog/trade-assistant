@@ -249,6 +249,7 @@ class TradingDesk:
                     if not mark:
                         raise DataError("no price")
                     p["mark"] = float(mark)
+                    p["mark_age_seconds"] = ((q.get("_meta") or {}).get("age_seconds"))
                     p["value"] = p["mark"] * p["quantity"] * p["multiplier"]
                     p["unrealized"] = (p["mark"] - p["avg_cost"]) * p["quantity"] * p["multiplier"]
                     ref = q.get("prevclose") if p["opened_on"] and p["opened_on"] < today and q.get("prevclose") else p["avg_cost"]
@@ -954,14 +955,16 @@ class TradingDesk:
     def strip_risk(self) -> dict[str, Any]:
         ks = self.kill_switch()
         if ks.get("on"):
-            return {"level": "fail", "label": "Kill switch on", "detail": ks.get("reason") or ""}
+            return {"level": "fail", "label": "Kill switch on", "detail": ks.get("reason") or "", "kill_switch": True}
         waiting = self.db.one("SELECT COUNT(*) AS n FROM trade_proposals WHERE mode = ? AND status = 'awaiting_approval'", (self.mode,))["n"]
         unknown = self.db.one("SELECT COUNT(*) AS n FROM trade_proposals WHERE mode = ? AND status = 'unknown'", (self.mode,))["n"]
         if unknown:
-            return {"level": "fail", "label": f"{unknown} order{'s' if unknown != 1 else ''} in an unknown state", "detail": "being reconciled with the broker"}
+            return {"level": "fail", "label": f"{unknown} order{'s' if unknown != 1 else ''} in an unknown state", "detail": "being reconciled with the broker",
+                    "kill_switch": False}
         if waiting:
-            return {"level": "warn", "label": f"{waiting} waiting for your approval", "detail": "Trading Desk: Approvals"}
-        return {"level": "pass", "label": "Risk checks on", "detail": "every order is checked when written, approved and sent; an unmeasured check blocks it"}
+            return {"level": "warn", "label": f"{waiting} waiting for your approval", "detail": "Trading Desk: Approvals", "kill_switch": False}
+        return {"level": "pass", "label": "Risk checks on", "detail": "every order is checked when written, approved and sent; an unmeasured check blocks it",
+                "kill_switch": False}
 
     def strip_daemon(self) -> dict[str, Any]:
         w = self.worker_status()
@@ -1017,7 +1020,14 @@ def install(svc: Any) -> None:
 
         @router.get("/desk/positions")
         def positions() -> dict[str, Any]:
-            return d.positions()
+            out = d.positions()
+            # 3.1: who manages each holding's exit, and what kind of protection that is (never a broker stop here).
+            exits = svc.autopilot.exit_plans(out["account_kind"]) if getattr(svc, "autopilot", None) else {}
+            for row in out["positions"]:
+                row["exit"] = exits.get(row["symbol"]) or {"managed_by": "you", "protection": "none",
+                                                           "text": "Yours to exit: no stop is placed at a broker by this app."}
+            out["exit_protection"] = svc.autopilot.protection() if getattr(svc, "autopilot", None) else None
+            return out
 
         @router.get("/desk/ledger")
         def ledger(limit: int = 100) -> dict[str, Any]:
