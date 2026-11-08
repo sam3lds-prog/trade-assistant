@@ -8,6 +8,8 @@ and nothing more once that session is forecast.
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -26,14 +28,26 @@ def fetcher(svc: Any):
     return fetch
 
 
+_LOCK = threading.Lock()
+
+
 def run_shadow(svc: Any, now: datetime | None = None, force: bool = False) -> dict[str, Any]:
+    """One shadow step at a time in this process (the job and the screen's button share the lock); a step another
+    process (the daemon) finished a moment earlier is reported, not an error."""
     from ..intelligence.live import after_close, shadow_step
     from ..market import settled_through
     now = now or datetime.now(timezone.utc)
     if not force and not after_close(now):
         return {"skipped": "the session has not closed and settled yet"}
-    settled = settled_through(now.timestamp() if now else time.time())
-    return shadow_step(replay_store(svc), fetcher(svc), settled, now)
+    if not _LOCK.acquire(blocking=False):
+        return {"skipped": "the shadow forecast is being made right now"}
+    try:
+        settled = settled_through(now.timestamp() if now else time.time())
+        return shadow_step(replay_store(svc), fetcher(svc), settled, now)
+    except sqlite3.IntegrityError:
+        return {"skipped": "another process made this forecast a moment ago"}
+    finally:
+        _LOCK.release()
 
 
 __all__ = ["run_shadow", "fetcher"]

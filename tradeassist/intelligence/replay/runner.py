@@ -73,8 +73,9 @@ def create_run(store: Any, dataset_id: str, cfg: ReplayConfig, *, parent_run: st
 
 
 def register_run(store: Any, dataset_id: str, cfg: ReplayConfig, *, parent_run: str | None = None,
-                 allow_failed_checks: bool = False) -> str:
-    """The run row itself, for any kind. Only create_run and the held-out year's register call this."""
+                 allow_failed_checks: bool = False, then: Callable[[Any, str], None] | None = None) -> str:
+    """The run row itself, for any kind. Only create_run and the held-out year's register call this. `then(cur, run_id)`
+    runs in the same transaction, so the register's entry and the run exist together or not at all."""
     cfg.check()
     ds = store.one("SELECT * FROM datasets WHERE id = ?", (dataset_id,))
     if ds is None:
@@ -93,6 +94,8 @@ def register_run(store: Any, dataset_id: str, cfg: ReplayConfig, *, parent_run: 
                        first_session, last_session) VALUES (?,?,?,?,?,?,?, 'queued', ?, ?)""",
                     (run_id, cfg.kind, dataset_id, parent_run, _now(), json.dumps(cfg.to_dict()), cfg.sha256(),
                      cfg.start.isoformat(), cfg.end.isoformat()))
+        if then is not None:
+            then(cur, run_id)
     return run_id
 
 
@@ -255,16 +258,26 @@ class Replay:
         predict(cur, self.run_id, view, self.cal, self.cfg, self.state)
 
 
-def grade(cur: Any, run_id: str, view: AsOf, labels: LabelBook) -> int:
-    """Outcomes for every prediction of the run whose window had closed by the view's session. Returns the count."""
+GIVE_UP_DAYS = 14     # live grading: a forecast whose bars are still missing this long after its target is closed as no data
+
+
+def grade(cur: Any, run_id: str, view: AsOf, labels: LabelBook, *, final: bool = True) -> int:
+    """Outcomes for every prediction of the run whose window had closed by the view's session. Returns the count.
+
+    In a replay the data are fixed (`final`): a missing bar is missing for good, graded `no_data`. Live (the shadow
+    forecasts), a stock whose bars did not come this evening is left due and tried again the next evening, so one
+    failed fetch never writes a permanent `no_data`; after GIVE_UP_DAYS it is closed as no data."""
     sess = view.session.isoformat()
     n = 0
     for p in L.due(cur, run_id, sess):
-        n += 1
+        target = date.fromisoformat(p["target_session"])
+        wait = not final and (view.session - target).days <= GIVE_UP_DAYS
         if p["task"] == "daily":
-            close = view.close(p["symbol"], date.fromisoformat(p["target_session"]))
+            close = view.close(p["symbol"], target)
             if close is None:
-                L.insert_outcome(cur, run_id, p["id"], sess, status="no_data")
+                if not wait:
+                    L.insert_outcome(cur, run_id, p["id"], sess, status="no_data")
+                    n += 1
                 continue
             y = close / p["last_close"] - 1.0
             mu, s = p["pred_return"], p["sigma"] or 0.0
@@ -273,16 +286,23 @@ def grade(cur: Any, run_id: str, view: AsOf, labels: LabelBook) -> int:
                              abs_error=abs(y - (mu or 0.0)),
                              direction_hit=(int(np.sign(mu) == np.sign(y)) if lean else None),
                              covered=int(p["low_return"] <= y <= p["high_return"]) if p["low_return"] is not None else None)
+            n += 1
         else:
             s0 = pd.Timestamp(p["session"])
-            o = labels.trade_outcome(s0, p["symbol"]) if s0 in labels.pos else {"barrier": None}
+            try:
+                o = labels.trade_outcome(s0, p["symbol"]) if s0 in labels.pos else {"barrier": None}
+            except KeyError:                       # the stock is not in this evening's data at all
+                o = {"barrier": None}
             if o.get("barrier") is None or pd.Timestamp(o["exit_session"]) > view.ts:
-                L.insert_outcome(cur, run_id, p["id"], sess, status="no_data")
+                if not wait:
+                    L.insert_outcome(cur, run_id, p["id"], sess, status="no_data")
+                    n += 1
                 continue
             L.insert_outcome(cur, run_id, p["id"], sess, status="graded", barrier=o["barrier"],
                              exit_session=pd.Timestamp(o["exit_session"]).date().isoformat(), gross_return=o["gross"],
                              net_return=o["net"], realized_return=o["net"],
                              payload={"entry": o["entry"], "target": o["target"], "stop": o["stop"], "exit": o["exit_price"]})
+            n += 1
     return n
 
 

@@ -2,22 +2,24 @@
 
 A replay never runs inside the web app: the screen starts `python run.py --replay resume RUN` (or `dataset build`)
 as a separate process on this computer, writing its output to data/replay-logs/. Stopping is a request the run reads
-between sessions; it pauses at its checkpoint and can be resumed. A run whose heartbeat is more than two minutes old
-while it says "running" was cut off (a closed laptop, a crash) and is shown as interrupted.
+between sessions; it pauses at its checkpoint and can be resumed. A run whose heartbeat is older than the runner's
+lease while it says "running" was cut off (a closed laptop, a crash) and is shown as interrupted. Starting is claimed
+in one statement, so a double click starts one process; the runner's own claim stops a second one regardless.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from ..intelligence.replay.runner import LEASE_SECONDS
 from . import replay_store
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-STALE_SECONDS = 120
+STALE_SECONDS = LEASE_SECONDS          # the runner's lease: a heartbeat older than this was cut off
 
 Spawner = Callable[[list[str], Path], Any]
 
@@ -46,9 +48,19 @@ def start(svc: Any, run_id: str) -> dict[str, Any]:
     if r["status"] == "running" and not interrupted(r["heartbeat_at"]):
         raise ValueError("That run is already going")
     log = log_dir(svc) / f"{run_id}.log"
-    with store.tx() as cur:
-        cur.execute("INSERT INTO run_controls (run_id, stop_requested_at, log_path) VALUES (?, NULL, ?) "
-                    "ON CONFLICT(run_id) DO UPDATE SET stop_requested_at = NULL, log_path = excluded.log_path", (run_id, str(log)))
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(seconds=STALE_SECONDS)).isoformat(timespec="seconds")
+    with store.tx() as cur:                # claimed in one statement: a second click starts nothing
+        cur.execute("INSERT INTO run_controls (run_id, stop_requested_at, log_path, spawned_at) VALUES (?, NULL, ?, ?) "
+                    "ON CONFLICT(run_id) DO UPDATE SET stop_requested_at = NULL, log_path = excluded.log_path, spawned_at = excluded.spawned_at "
+                    "WHERE run_controls.spawned_at IS NULL OR run_controls.spawned_at < ? "
+                    # ...or the process started then has picked the run up and stopped since (paused, failed)
+                    "OR EXISTS (SELECT 1 FROM replay_runs r WHERE r.id = run_controls.run_id AND r.status != 'running' "
+                    "AND r.heartbeat_at >= run_controls.spawned_at)",
+                    (run_id, str(log), now.isoformat(timespec="seconds"), recent))
+        claimed = cur.rowcount > 0
+    if not claimed:
+        raise ValueError("That run was started a moment ago")
     SPAWN(["resume", run_id], log)
     return {"run": run_id, "started": True, "log": str(log)}
 

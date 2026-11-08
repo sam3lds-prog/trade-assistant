@@ -42,7 +42,7 @@ def deployments(cur: sqlite3.Cursor) -> None:
         run_id       TEXT NOT NULL REFERENCES replay_runs (id),
         parent_run   TEXT NOT NULL REFERENCES replay_runs (id),
         opened_at    TEXT NOT NULL,
-        ordinal      INTEGER NOT NULL,
+        ordinal      INTEGER NOT NULL UNIQUE,     -- two openings at once cannot both be the first
         note         TEXT NOT NULL DEFAULT ''
     )""")
     _freeze(cur, "holdout_openings")
@@ -50,5 +50,6 @@ def deployments(cur: sqlite3.Cursor) -> None:
     cur.execute("""CREATE TABLE IF NOT EXISTS run_controls (
         run_id             TEXT PRIMARY KEY REFERENCES replay_runs (id),
         stop_requested_at  TEXT,
-        log_path           TEXT
+        log_path           TEXT,
+        spawned_at         TEXT               -- when the screen last started a process for it (a second click waits)
     )""")

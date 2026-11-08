@@ -104,8 +104,13 @@ def test_the_held_out_year_is_opened_once_continuing_the_development_models(worl
     card = out["scorecard"]
     assert card["holdout_opening"] == 1 and card["notes"][0].startswith("The first evaluation of the held-out year")
     assert card["daily"]["1"]["graded"] > 0
+    runs_before = store.one("SELECT COUNT(*) FROM replay_runs WHERE kind = 'holdout'")[0]
     with pytest.raises(ReplayError, match="already opened"):
         open_holdout(store, world["run"])
+    assert store.one("SELECT COUNT(*) FROM replay_runs WHERE kind = 'holdout'")[0] == runs_before     # a refused opening leaves no run
+    with pytest.raises(Exception, match="UNIQUE"):                           # nor can two openings share an ordinal
+        with store.tx() as cur:
+            cur.execute("INSERT INTO holdout_openings (run_id, parent_run, opened_at, ordinal) VALUES (?, ?, 'x', 1)", (hold, world["run"]))
     again = open_holdout(store, world["run"], reopen=True)
     card2 = Replay(store, again).run()["scorecard"]
     assert card2["holdout_opening"] == 2 and "no longer untouched" in card2["notes"][0]
@@ -161,3 +166,42 @@ def test_the_live_view_stops_at_the_settled_session_whatever_the_source_holds(wo
 def test_without_a_deployment_the_shadow_job_does_nothing():
     store = ReplayStore(":memory:")
     assert "no deployment" in shadow_step(store, lambda *a: pd.DataFrame(), date(2026, 3, 2))["skipped"]
+
+
+def test_a_stock_missing_from_one_evenings_bars_is_left_due_not_graded_no_data():
+    from tradeassist.intelligence.learning import ledger as L
+    from tradeassist.intelligence.replay.clock import AsOf
+    from tradeassist.intelligence.replay.labels import LabelBook
+    from tradeassist.intelligence.replay.runner import grade
+    store = ReplayStore(":memory:")
+    bars = fx.market(n=400)
+    bars.pop("AAPL")                                                             # tonight's fetch of AAPL failed
+    ds = DS.freeze(store, bars, fx.universe(), source="test", adjustment="none")
+    s = ds.calendar.sessions
+    cfg = fx.config(s[300], s[380])
+    run_id = create_run(store, ds.id, cfg)
+    panel = build_panel(ds)
+    labels = LabelBook(panel, ds.calendar, cfg.horizons, cfg.trade)
+    view = AsOf(panel, labels, ds.calendar, s[350])
+    base = {"symbol": "AAPL", "model_version": "m", "family": "no_change", "last_close": 100.0, "sigma": 0.02, "regime": "x", "fhash": "f"}
+    with store.tx() as cur:
+        L.insert_predictions(cur, run_id, "c", [
+            {**base, "task": "daily", "horizon": 1, "session": s[349].isoformat(), "target_session": s[350].isoformat(),
+             "pred_return": 0.0, "low_return": -0.01, "high_return": 0.01, "p_up": 0.5},
+            {**base, "task": "trade", "horizon": 5, "session": s[345].isoformat(), "target_session": s[350].isoformat(), "setup": "pullback"}])
+        assert grade(cur, run_id, view, labels, final=False) == 0              # live: left due, no error, nothing written
+    assert store.one("SELECT COUNT(*) FROM outcomes WHERE run_id = ?", (run_id,))[0] == 0
+    late = AsOf(panel, labels, ds.calendar, s[362])                              # still missing more than two weeks on
+    with store.tx() as cur:
+        assert grade(cur, run_id, late, labels, final=False) == 2
+    assert {r[0] for r in store.query("SELECT status FROM outcomes WHERE run_id = ?", (run_id,))} == {"no_data"}
+
+
+def test_the_shadow_step_is_made_once_at_a_time_in_this_process(monkeypatch):
+    from tradeassist.v4 import shadow as SH
+    assert SH._LOCK.acquire(blocking=False)
+    try:
+        got = SH.run_shadow(object(), now=datetime(2026, 3, 2, 18, 0, tzinfo=NY))
+    finally:
+        SH._LOCK.release()
+    assert "right now" in got["skipped"]

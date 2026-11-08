@@ -690,7 +690,7 @@ const WS = (() => {
     restoring = true;
     for (const [g, c] of Object.entries(session.context || {})) if (ctx[g]) Object.assign(ctx[g], c);
     if (!ctx.blue.symbol) ctx.blue.symbol = (syms.watchlist || [])[0] || "AAPL";
-    const saved = (session.tabs || []).filter(t => WORKSPACES[t.workspace]);
+    const saved = (session.tabs || []).filter(t => Object.hasOwn(WORKSPACES, t.workspace));
     if (saved.length) { for (const t of saved) openTab(t, false); layoutsSeen = session.layouts_version || 30; }
     else for (const k of OPEN_AT_START) {
       const def = (listing.layouts || []).find(l => l.workspace === k && l.is_default);
@@ -702,7 +702,7 @@ const WS = (() => {
     const want = location.hash.slice(1);
     let byHash = [...tabs.values()].find(t => t.workspace === want);
     // A link to a workspace that is not open opens it (4.0: #lab opens Model Lab).
-    if (!byHash && WORKSPACES[want]) byHash = openTab({ workspace: want, name: WORKSPACES[want], widgets: WS.DEFAULT_LAYOUTS[want] || [] }, false);
+    if (!byHash && Object.hasOwn(WORKSPACES, want)) byHash = openTab({ workspace: want, name: WORKSPACES[want], widgets: WS.DEFAULT_LAYOUTS[want] || [] }, false);
     activate(byHash ? byHash.id : (tabs.has(session.active) ? session.active : tabs.keys().next().value));
     restoring = false;
     booted = true;

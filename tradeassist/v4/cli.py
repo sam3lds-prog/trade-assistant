@@ -11,7 +11,8 @@
     python run.py --replay deploy RUN                 make a finished run's models the ones the shadow forecasts use
     python run.py --replay deployments                the deployed model sets; the active one is marked
     python run.py --replay export DEPLOYMENT FILE     write a deployment to a file (to serve it on another computer)
-    python run.py --replay import FILE                read one in, checking every hash, and make it active
+    python run.py --replay import FILE                read one in and make it active (only a file you exported yourself:
+                                                      it holds pickled models, which run code when loaded)
     python run.py --replay shadow [--force]           today's shadow forecast now, instead of waiting for the job
 
 A replay runs in this process, not in the web app, so it never slows the Trading Desk. Stop it with Ctrl-C at any
@@ -192,7 +193,7 @@ def import_deployment(settings: Any, path: str) -> int:
     except (DeployError, OSError, ValueError) as exc:
         print(str(exc))
         return 1
-    print(f"Imported {path} as {dep} (active); every model matched its hash.")
+    print(f"Imported {path} as {dep} (active); the file is intact (every model matched the manifest's hash).")
     return 0
 
 

@@ -42,6 +42,8 @@ def test_the_screen_starts_a_replay_as_its_own_process_and_stopping_pauses_it(ap
     assert r.status_code == 200, r.text
     run_id = r.json()["run"]
     assert calls == [["resume", run_id]]                                       # handed to `python run.py --replay resume RUN`
+    assert client.post(f"/v4/replay/runs/{run_id}/start").status_code == 400   # a second click before it starts: nothing more
+    assert calls == [["resume", run_id]]
     store = replay_store(svc)
     assert store.one("SELECT status FROM replay_runs WHERE id = ?", (run_id,))["status"] == "queued"
     assert client.post("/v4/replay/runs", json={"end": "2025-12-31"}).status_code == 400   # into the held-out year: refused
@@ -137,5 +139,5 @@ def test_the_holdout_deploy_export_and_import_commands(tmp_path, capsys):
     other = Settings(data_mode="demo", db_path=tmp_path / "b" / "t.db")
     (tmp_path / "b").mkdir()
     assert cli.main(other, ["import", str(tmp_path / "m.json")]) == 0
-    assert "every model matched its hash" in capsys.readouterr().out
+    assert "the file is intact" in capsys.readouterr().out
     assert json.loads((tmp_path / "m.json").read_text())["format"] == "tradeassist-models/1"

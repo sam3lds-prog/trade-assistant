@@ -111,7 +111,7 @@ def shadow_step(store: Any, fetch: Fetch, settled: date, now: datetime | None = 
     view = AsOf(panel, labels, ds.calendar, t)
     state = DEP.models(store, dep["id"])
     with store.tx() as cur:
-        out["graded"] = grade(cur, run_id, view, labels)
+        out["graded"] = grade(cur, run_id, view, labels, final=False)
         cur.execute("SELECT COUNT(*) FROM predictions WHERE run_id = ? AND session = ?", (run_id, t.isoformat()))
         already = cur.fetchone()[0] > 0
         if already:

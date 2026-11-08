@@ -15,6 +15,7 @@ the design changed because of it, the year is just more development data.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -50,11 +51,20 @@ def open_holdout(store: Any, parent_run: str, dataset_id: str | None = None, *, 
                           f"that covers the held-out year from {HOLDOUT_FROM}.")
     cfg = ReplayConfig.from_dict(json.loads(parent["config_json"])).with_(
         kind="holdout", start=date.fromisoformat(sessions[0]), end=date.fromisoformat(sessions[-1]))
-    run_id = register_run(store, dataset_id, cfg, parent_run=parent_run, allow_failed_checks=allow_failed_checks)
-    with store.tx() as cur:
+
+    def register(cur: Any, run_id: str) -> None:
+        # counted again inside the transaction that creates the run (and `ordinal` is unique), so two openings at
+        # once cannot both be the first, and a run never exists without its entry in the register
+        cur.execute("SELECT COUNT(*) FROM holdout_openings")
+        n = int(cur.fetchone()[0])
+        if n and not reopen:
+            raise ReplayError("The held-out year was opened a moment ago by another process.")
         cur.execute("INSERT INTO holdout_openings (run_id, parent_run, opened_at, ordinal, note) VALUES (?, ?, ?, ?, ?)",
-                    (run_id, parent_run, datetime.now(timezone.utc).isoformat(timespec="seconds"), len(previous) + 1, note))
-    return run_id
+                    (run_id, parent_run, datetime.now(timezone.utc).isoformat(timespec="seconds"), n + 1, note))
+    try:
+        return register_run(store, dataset_id, cfg, parent_run=parent_run, allow_failed_checks=allow_failed_checks, then=register)
+    except sqlite3.IntegrityError:
+        raise ReplayError("The held-out year was opened a moment ago by another process.") from None
 
 
 def holdout_note(store: Any, run_id: str) -> str | None:
