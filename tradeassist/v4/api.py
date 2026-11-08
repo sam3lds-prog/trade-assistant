@@ -95,7 +95,8 @@ def build_router_v4(svc: Any) -> APIRouter:
         uni = store().one("SELECT universe FROM datasets WHERE id = ?", (ds,))
         if uni is None:
             raise HTTPException(404, f"No dataset {ds}")
-        changes: dict[str, Any] = {"universe": uni["universe"]}
+        from ..intelligence.data.dataset import development_start
+        changes: dict[str, Any] = {"universe": uni["universe"], "start": development_start(store(), ds)}
         for k in ("start", "end", "retrain"):
             if getattr(body, k) is not None:
                 changes[k] = getattr(body, k)

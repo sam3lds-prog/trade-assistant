@@ -660,7 +660,12 @@ class RobinhoodData:
         spans = [None]
         if "span" in props:
             years = (date.fromisoformat(end) - date.fromisoformat(start)).days / 365.25
-            order = ("5year", "5y", "all", "max", "year", "1y") if years > 1.05 else ("year", "1y", "5year", "5y")
+            if years > 5.5:                    # a replay's ten years: the whole history, if it comes as daily bars
+                order = ("all", "max", "5year", "5y", "year", "1y")
+            elif years > 1.05:
+                order = ("5year", "5y", "all", "max", "year", "1y")
+            else:
+                order = ("year", "1y", "5year", "5y")
             allowed = {a.lower(): a for a in enum_of(props["span"])}
             spans = [allowed[s] for s in order if s in allowed] if allowed else ["5year", "year"]
             spans = spans or [enum_of(props["span"])[0]]

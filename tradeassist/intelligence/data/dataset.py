@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Callable
@@ -109,25 +110,74 @@ def assess(sym: str, df: pd.DataFrame, cal: Calendar) -> list[dict[str, Any]]:
     return out
 
 
-def build(store: Any, fetch: Fetch, universe: Universe, first: date, last: date, *, source: str, adjustment: str,
-          progress: Callable[[int, int, str], None] | None = None) -> Dataset:
-    """Fetch every symbol of `universe` from `first` to `last` (the last finished session) and freeze it."""
-    bars: dict[str, pd.DataFrame] = {}
-    failures: list[dict[str, Any]] = []
-    symbols = universe.symbols
-    for n, sym in enumerate(symbols, 1):
-        if progress:
-            progress(n, len(symbols), sym)
+RETRY_PAUSES = (2.0, 6.0)        # seconds before the second and third try of a symbol whose fetch failed
+SHORT_BY_DAYS = 45                # a history starting this much later than asked for is reported
+
+
+def _fetch(fetch: Fetch, sym: str, first: date, last: date, tries: int, pause: Callable[[float], None]) -> tuple[pd.DataFrame, str]:
+    """One symbol's bars, tried up to `tries` times (a sign-in refresh or a busy server is usually gone a few
+    seconds later). Returns (bars, the last error, empty when it worked)."""
+    why = ""
+    for attempt in range(tries):
+        if attempt:
+            pause(RETRY_PAUSES[min(attempt - 1, len(RETRY_PAUSES) - 1)])
         try:
             raw = fetch(sym, first.isoformat(), last.isoformat())
-        except Exception as exc:  # noqa: BLE001 - one symbol failing is recorded, not fatal
-            failures.append({"symbol": sym, "level": "warn", "code": "FETCH_FAILED", "text": f"{sym}: {str(exc)[:200]}"})
+        except Exception as exc:  # noqa: BLE001 - recorded, and tried again
+            why = str(exc)[:300] or exc.__class__.__name__
             continue
         df = _clean(raw)
         df = df[(df["date"] >= pd.Timestamp(first)) & (df["date"] <= pd.Timestamp(last))].reset_index(drop=True)
         if len(df):
+            return df, ""
+        why = f"no bars between {first} and {last}"
+    return _clean(None), why
+
+
+def build(store: Any, fetch: Fetch, universe: Universe, first: date, last: date, *, source: str, adjustment: str,
+          progress: Callable[[int, int, str], None] | None = None, pause: Callable[[float], None] = time.sleep) -> Dataset:
+    """Fetch every symbol of `universe` from `first` to `last` (the last finished session) and freeze it.
+
+    The market fund comes first: its trading days are the calendar, so if it cannot be had (after three tries) the
+    build stops at once, saying why, rather than after fetching everything else. Any other symbol is tried twice and
+    recorded as FETCH_FAILED, with the reason, if it still fails."""
+    bars: dict[str, pd.DataFrame] = {}
+    failures: list[dict[str, Any]] = []
+    symbols = (MARKET,) + tuple(s for s in universe.symbols if s != MARKET) if MARKET in universe.symbols else universe.symbols
+    for n, sym in enumerate(symbols, 1):
+        if progress:
+            progress(n, len(symbols), sym)
+        df, why = _fetch(fetch, sym, first, last, 3 if sym == MARKET else 2, pause)
+        if sym == MARKET and not len(df):
+            raise DatasetError(f"Could not get {MARKET}'s price history from {source}: {why}. Its trading days are the "
+                               "replay's calendar, so nothing else was fetched. Try again in a minute; if it keeps failing, "
+                               "the reason above says what the source objected to.")
+        if len(df):
             bars[sym] = df
+        else:
+            failures.append({"symbol": sym, "level": "warn", "code": "FETCH_FAILED", "text": f"{sym}: {why}"})
+    if MARKET in bars and (bars[MARKET]["date"].iloc[0].date() - first).days > SHORT_BY_DAYS:
+        have = bars[MARKET]["date"].iloc[0].date()
+        years = (last - have).days / 365.25
+        failures.append({"symbol": MARKET, "level": "warn", "code": "SHORT_HISTORY",
+                         "text": f"History starts {have}, not {first}: {source} supplied about {years:.0f} years. A development "
+                                 f"replay then starts after its first year (`--replay run` picks the date itself). For the "
+                                 f"full ten years, add a Tradier token to .env (history then comes from Tradier) and build again."})
     return freeze(store, bars, universe, source=source, adjustment=adjustment, extra_checks=failures)
+
+
+def development_start(store: Any, dataset_id: str) -> date:
+    """The first day a development replay can start on this dataset: DEVELOPMENT_FROM, or, when the dataset begins
+    later, the first of the month after its first MIN_HISTORY sessions (each stock needs a year of bars first)."""
+    from ..config import DEVELOPMENT_FROM
+    from .universe import MIN_HISTORY
+    r = store.one("SELECT date FROM dataset_bars WHERE dataset_id = ? AND symbol = ? ORDER BY date LIMIT 1 OFFSET ?",
+                  (dataset_id, MARKET, MIN_HISTORY))
+    if r is None:
+        return DEVELOPMENT_FROM
+    d = date.fromisoformat(r["date"][:10])
+    after = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+    return max(DEVELOPMENT_FROM, after)
 
 
 def freeze(store: Any, bars: dict[str, pd.DataFrame], universe: Universe, *, source: str, adjustment: str,
@@ -209,4 +259,4 @@ def as_arrays(df: pd.DataFrame) -> dict[str, np.ndarray]:
     return {c: df[c].to_numpy(float) for c in ("open", "high", "low", "close", "volume")}
 
 
-__all__ = ["Dataset", "DatasetError", "build", "freeze", "load", "summaries", "content_hash", "BAR_COLUMNS"]
+__all__ = ["Dataset", "DatasetError", "build", "freeze", "load", "summaries", "content_hash", "development_start", "BAR_COLUMNS"]
