@@ -27,9 +27,11 @@ reach paper and shadow accounts only, through the existing policy and risk engin
 your policy is already capped_autopilot on such an account.
 
 - **Paper trading** (Model Lab): switch a deployment's paper trading on and each setup its gate took after the close
-  becomes a proposal at the next day's ask, with its stop, target and five-session exit managed by the models
-  (software-monitored, as for the autopilot). Each trade is linked to the frozen forecast it came from; the record
-  compares paper fills with the simulation of the same forecasts and with what passing would have earned.
+  becomes a proposal at the next day's ask, inside the policy's trading window, with its stop, target and
+  five-session exit managed by the models (software-monitored, as for the autopilot). The desk itself refuses a model
+  proposal for any account but paper or shadow, and the models' exits sell only the shares they bought. They share the
+  autopilot's daily order count. Each trade is linked to the frozen forecast it came from; the record compares paper
+  fills with the simulation of the same forecasts and with what passing would have earned on the same days.
 - **Factors**: betas to the market and sector, correlation, idiosyncratic move and volatility; the `ridge_f` and
   `gbm_f` families read them.
 - **Stock specialists**: `ridge_spec` and `gbm_spec` correct a stock only where its miss on unseen rows is beyond

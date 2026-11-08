@@ -162,6 +162,11 @@ FAMILIES: dict[str, type[ReturnModel]] = {"no_change": NoChange, "drift": Drift,
                                           "ridge_f": RidgeFactors, "gbm_f": GBMFactors}
 
 
+def uses_factors(family: str) -> bool:
+    """Whether a family reads the factor columns (phase 7): ridge_f, gbm_f and their specialists."""
+    return family.removesuffix("_spec") in ("ridge_f", "gbm_f")
+
+
 def make(family: str, horizon: int, interval: float = 0.80, seed: int = 7) -> ReturnModel:
     if family.endswith("_spec"):
         from .specialist import Specialist
@@ -172,4 +177,4 @@ def make(family: str, horizon: int, interval: float = 0.80, seed: int = 7) -> Re
         raise ValueError(f"Unknown model family {family!r}") from None
 
 
-__all__ = ["FAMILIES", "make", "Engines30", "Ridge", "GBM", "RidgeFactors", "GBMFactors", "usable_columns", "with_usable"]
+__all__ = ["uses_factors", "FAMILIES", "make", "Engines30", "Ridge", "GBM", "RidgeFactors", "GBMFactors", "usable_columns", "with_usable"]

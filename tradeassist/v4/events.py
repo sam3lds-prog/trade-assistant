@@ -7,6 +7,7 @@ against the fixed vocabulary). It stops at the AI's daily limit, which it shares
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -50,9 +51,10 @@ def run_events(svc: Any, limit_stocks: int = 120) -> dict[str, Any]:
         if not items:
             continue
         items = items[:MAX_ITEMS]
+        batch = hashlib.sha256("|".join(E.headline_sha(sym, it["headline"], it["published"]) for it in items).encode()).hexdigest()[:24]
         try:
             ans = ai.ask(purpose="model-events", prompt=E.prompt(sym, items), system=E.SYSTEM, max_tokens=900,
-                         cache_key=f"events:{sym}:{items[0]['published']}:{len(items)}")
+                         cache_key=f"events:{sym}:{batch}")          # the answer belongs to exactly these headlines
         except Exception as exc:  # noqa: BLE001 - the daily limit, or the API failing: stop asking for today
             out["errors"].append(f"{sym}: {str(exc)[:160]}")
             break
@@ -62,13 +64,14 @@ def run_events(svc: Any, limit_stocks: int = 120) -> dict[str, Any]:
     return out
 
 
-def for_symbol(svc: Any, symbol: str, days: int = 7) -> dict[str, Any]:
+def for_symbol(svc: Any, symbol: str, days: int = 7, as_of: str | None = None) -> dict[str, Any]:
+    """The stock's events published before `as_of` (a forecast's cutoff; now when not given)."""
     from ..intelligence import events as E
     if not has_replays(svc):
-        return {"symbol": symbol, "events": [], "on": bool(svc.settings.model_events)}
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    evs = E.point_in_time(replay_store(svc), symbol, now, days)
-    return {"symbol": symbol, "on": bool(svc.settings.model_events), "events": evs, "summary": E.summary(evs)}
+        return {"symbol": symbol, "events": [], "on": bool(svc.settings.model_events), "as_of": as_of}
+    cut = as_of or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    evs = E.point_in_time(replay_store(svc), symbol, cut, days)
+    return {"symbol": symbol, "on": bool(svc.settings.model_events), "as_of": cut, "events": evs, "summary": E.summary(evs)}
 
 
 __all__ = ["run_events", "for_symbol"]

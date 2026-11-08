@@ -373,13 +373,13 @@
           `Target first ${share(trade.p_target)}, stop first ${share(trade.p_stop)}, neither ${share(trade.p_timeout)}; expected ${pct(trade.expected_return)} net. `,
           statusTag(trade.take ? "pass" : "info", trade.take ? "The gate would take it" : "The gate passes"), ` ${trade.reason || ""}`));
         try {
-          const ev = await w.api(`/v4/events?symbol=${enc(sym)}`);
+          const ev = await w.api(`/v4/events?symbol=${enc(sym)}${preds[0].cutoff_at ? `&as_of=${enc(preds[0].cutoff_at)}` : ""}`);
           if (!w.current(mine)) return;
-          if (ev.events && ev.events.length) kids.push(el("h4", { text: "News the price model does not see" }),
+          if (ev.events && ev.events.length) kids.push(el("h4", { text: "News before this forecast, which the price model does not read" }),
             el("ul", { class: "ws-checks-list" }, ev.events.slice(0, 5).map(e => el("li", { class: "small" },
               statusTag(e.direction === "positive" ? "pass" : e.direction === "negative" ? "fail" : "info", `${e.magnitude} ${e.kind}`),
               ` ${e.summary} (${when(e.published_at)})`))));
-          else if (ev.on) kids.push(el("p", { class: "small muted", text: "No news events read for this stock in the last week." }));
+          else if (ev.on) kids.push(el("p", { class: "small muted", text: "No news events read for this stock in the week before this forecast." }));
         } catch (e) { if (e === WS.GONE) return; }
         const rec = (d.record && d.record.daily && d.record.daily["1"]) || (d.replay_record && d.replay_record.daily && d.replay_record.daily["1"]);
         if (rec && rec.graded) kids.push(el("p", { class: "small muted", text: `On ${sym} so far: ${rec.graded} one-day forecasts graded, ${bp(rec.gain_bp)} against 'no change', band held ${share(rec.coverage)}${d.record && d.record.daily && d.record.daily["1"] ? " (live)" : " (replay)"}.` }));
@@ -412,11 +412,11 @@
           kids.push(el("p", { class: "small" }, `${r.closed} closed, ${r.open} open. Average ${pct(r.mean_return)} per closed trade` +
             (isNum(r.fill_vs_simulation) ? `; paper fills ran ${pct(r.fill_vs_simulation)} against the simulation of the same forecasts.` : ".")),
             table([{ label: "Stock", cell: t => t.symbol }, { label: "Expected", num: true, cell: t => pct(t.expected_return) },
-              { label: "Result", num: true, cell: t => (isNum(t.return) ? pct(t.return) : (t.entry ? "open" : "not filled")) },
+              { label: "Result", num: true, cell: t => (isNum(t.return) ? pct(t.return) : (t.state || (t.entry ? "open" : "not filled"))) },
               { label: "Simulated", num: true, cell: t => (t.simulated && isNum(t.simulated.net_return) ? pct(t.simulated.net_return) : "–") },
               { label: "Exit", cell: t => t.exit_reason || "" }], r.trades.slice(0, 12), { onRow: t => w.set({ symbol: t.symbol }) }));
         } else kids.push(WS.empty("No model trade yet."));
-        if (r.abstained && r.abstained.passed_setups) kids.push(el("p", { class: "small muted", text: `The setups the gate passed on: ${r.abstained.passed_setups}, averaging ${pct(r.abstained.their_mean_net)} net.` }));
+        if (r.abstained && r.abstained.passed_setups) kids.push(el("p", { class: "small muted", text: `On the ${r.abstained.sessions} day(s) the models traded, the setups the gate passed on: ${r.abstained.passed_setups}, averaging ${pct(r.abstained.their_mean_net)} net.` }));
         out.replaceChildren(...kids);
       } catch (e) { if (e !== WS.GONE) out.replaceChildren(el("p", { class: "error", text: e.message })); }
     }

@@ -8,7 +8,7 @@ is deliberately not offered here; it is one command, run on purpose (`python run
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -349,10 +349,15 @@ def build_router_v4(svc: Any) -> APIRouter:
         return out
 
     @router.get("/events")
-    def events(symbol: str, days: int = Query(7, ge=1, le=60)) -> dict[str, Any]:
-        """The stock's structured news events, published before now (phase 7)."""
+    def events(symbol: str, days: int = Query(7, ge=1, le=60), as_of: str | None = Query(None, max_length=40)) -> dict[str, Any]:
+        """The stock's structured news events published before `as_of` (a forecast's cutoff), or before now (phase 7)."""
         from .events import for_symbol
-        return for_symbol(svc, symbol.upper(), days)
+        if as_of is not None:
+            try:
+                datetime.fromisoformat(as_of)
+            except ValueError:
+                raise HTTPException(422, "as_of is an ISO date and time") from None
+        return for_symbol(svc, symbol.upper(), days, as_of)
 
     # ---- Research's own record ----------------------------------------------------------------------------------
     @router.get("/research/record")

@@ -57,6 +57,7 @@ from ..service import RequestError
 log = logging.getLogger(__name__)
 
 PRE_SUBMIT = ("draft", "awaiting_approval", "blocked", "authorized")
+MODEL_ACCOUNTS = ("paper", "shadow")   # the only accounts a proposal from the deployed models (source "model") may use
 NOT_FOUND_MISSES = 3          # an unknown order is called never-received only after this many empty look-ups...
 NOT_FOUND_SECONDS = 900       # ...spread over at least this long, unless the broker's answer is conclusive (the paper broker)
 WORKING = ("submitted", "partially_filled", "cancel_requested", "unknown", "submitting")
@@ -399,6 +400,9 @@ class TradingDesk:
         if req.source not in ("research", "discover", "autopilot", "manual", "blend", "model"):
             raise RequestError("source must be research, discover, autopilot, manual, blend or model")
         terms = self._terms(req, pol)
+        if req.source == "model" and terms.account_kind not in MODEL_ACCOUNTS:
+            raise RequestError("The deployed models trade only in a paper or shadow account; the policy's account is "
+                               f"{terms.account_kind}.")
         pid = C.new_id("prop")
         risk = self.assess(terms, proposal_id=pid)
         status = "awaiting_approval" if risk.ok else "blocked"
@@ -523,6 +527,12 @@ class TradingDesk:
                 raise RequestError("The kill switch is on: nothing can be approved until it is switched off.")
             if actor == "autopilot" and (channel != "policy" or self.policy().mode != "capped_autopilot"):
                 raise RequestError("The autopilot approves only under a capped_autopilot policy.")
+            if actor == "model":
+                pol = self.policy()
+                if (channel != "policy" or pol.mode != "capped_autopilot" or pol.account_kind not in MODEL_ACCOUNTS
+                        or p["account_kind"] not in MODEL_ACCOUNTS or p["source"] != "model"):
+                    raise RequestError("The deployed models approve only their own paper or shadow trades, under a capped_autopilot "
+                                       "policy on such an account.")
             now = _iso(_now())
             with self.db.tx() as cur:
                 cur.execute("UPDATE approvals SET decision = ?, decided_at = ?, decided_by = ?, channel = ?, used_at = ? WHERE id = ? AND decision = 'pending'",

@@ -36,7 +36,7 @@ import pandas as pd
 from ... import marketdays
 from ..config import ReplayConfig
 from ..data import dataset as DS
-from ..data.features import FEATURE_VERSION, FEATURES, build_panel, matrix
+from ..data.features import FACTORS, FEATURE_VERSION, FEATURES, build_panel, matrix
 from ..learning import ledger as L
 from ..learning import registry as R
 from ..learning.trainer import train_daily, train_trade
@@ -332,7 +332,7 @@ def predict(cur: Any, run_id: str, view: AsOf, cal: Any, cfg: ReplayConfig, stat
             for i, sym in enumerate(rows.index):
                 payload = {"features": FEATURE_VERSION, "trained_through": getattr(model, "trained_through", None), **(extra or {})}
                 if keep_features:
-                    payload["x"] = {k: (float(v) if np.isfinite(v) else None) for k, v in zip(FEATURES, x[i])}
+                    payload["x"] = _kept(rows, i, x[i])
                 out.append({"task": "daily", "horizon": h, "symbol": sym, "session": sess, "target_session": target,
                             "model_version": vid, "family": fam, "last_close": float(closes[i]),
                             "pred_return": float(p["mu"][i]), "low_return": float(p["low"][i]), "high_return": float(p["high"][i]),
@@ -353,7 +353,7 @@ def predict(cur: Any, run_id: str, view: AsOf, cal: Any, cfg: ReplayConfig, stat
         payload = {"features": FEATURE_VERSION, "trained_through": getattr(model, "trained_through", None),
                    "atr_pct": float(setups["atr_pct"].iloc[i]), "barrier": cfg.trade.version, **(extra or {})}
         if keep_features:
-            payload["x"] = {k: (float(v) if np.isfinite(v) else None) for k, v in zip(FEATURES, x[i])}
+            payload["x"] = _kept(setups, i, x[i])
         trades.append({"task": "trade", "horizon": hold, "symbol": sym, "session": sess, "target_session": target,
                        "model_version": vid, "family": fam, "last_close": float(setups["close"].iloc[i]),
                        "sigma": float(setups["rvol"].iloc[i]), "setup": setups["setup"].iloc[i],
@@ -364,6 +364,16 @@ def predict(cur: Any, run_id: str, view: AsOf, cal: Any, cfg: ReplayConfig, stat
         take, reason, gate = decide(t["expected_return"], bool(getattr(model, "fitted", False)), cfg.trade.min_edge)
         L.insert_decision(cur, run_id, pid, sess, t["symbol"], take, reason, gate)
     return {"daily": len(out), "trade": len(trades)}
+
+
+def _kept(rows: pd.DataFrame, i: int, x: np.ndarray) -> dict[str, float | None]:
+    """The inputs of row i as they were: the features, and the factors when the panel has them (phase 7)."""
+    out = {k: (float(v) if np.isfinite(v) else None) for k, v in zip(FEATURES, x)}
+    for k in FACTORS:
+        if k in rows.columns:
+            v = float(rows[k].iloc[i])
+            out[k] = v if math.isfinite(v) else None
+    return out
 
 
 def _f(v: float) -> float | None:

@@ -56,6 +56,10 @@ def model_trade_links(cur: sqlite3.Cursor) -> None:
         stop             REAL,
         target           REAL,
         time_exit        TEXT,
-        reason           TEXT NOT NULL DEFAULT ''
+        reason           TEXT NOT NULL DEFAULT '',
+        closed_at        TEXT,              -- an entry: when the models stopped managing it (sold out, or sold by you)
+        closed_reason    TEXT
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_model_links_prediction ON model_trade_links (shadow_run, prediction_id, role)")
+    # one entry per frozen forecast, whatever happens after the proposal is written
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_links_one_entry ON model_trade_links (shadow_run, prediction_id) WHERE role = 'entry'")

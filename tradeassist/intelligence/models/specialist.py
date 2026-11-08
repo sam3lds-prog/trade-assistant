@@ -5,6 +5,9 @@ never trained on, each stock's average miss (in volatility units) is measured. A
 shrunk toward zero by how much evidence there is, n / (n + SHRINK). It is kept only when the miss is clearly not
 chance (|t| at least T_MIN = 3: across a hundred stocks a two-sigma rule would correct about five of them by luck
 alone; at three, fewer than one in three hundred); otherwise the stock is forecast by the general model alone.
+For an h-session horizon, n and t count only every h-th day: neighbouring five-day outcomes overlap, and counting
+them all inflated t by about the square root of h (with no stock biased at all, 17 of 100 stocks were "corrected" at
+five days, 51 at twenty). With few independent days the bar is a Student t at the same rate, so higher than 3.
 
 So a stock with too little evidence falls back to the general model, and a hundred tickers do not become a hundred
 overconfident models. The specialist family then competes with the champion under the same promotion rule as any
@@ -25,9 +28,25 @@ SHRINK = 250.0
 T_MIN = 3.0
 
 
+def t_needed(n: int) -> float:
+    """|t| for the same false-correction rate as three standard errors with plenty of data (two-sided 0.27%), on
+    n independent days: a Student t, so a stock with few days needs more than 3."""
+    from scipy.stats import norm, t as student
+    if n < 3:
+        return math.inf
+    return float(student.ppf(1 - norm.sf(T_MIN), n - 1))
+
+
 def _symbols(rows: pd.DataFrame) -> np.ndarray:
     idx = rows.index
     return np.asarray(idx.get_level_values("symbol") if isinstance(idx, pd.MultiIndex) else idx)
+
+
+def _sessions(rows: pd.DataFrame) -> np.ndarray:
+    idx = rows.index
+    if isinstance(idx, pd.MultiIndex) and "session" in idx.names:
+        return np.asarray(idx.get_level_values("session"))
+    return np.arange(len(rows))
 
 
 class Specialist(ReturnModel):
@@ -51,15 +70,21 @@ class Specialist(ReturnModel):
         if len(rows):
             s = self.sigma(rows)
             z = (rows[f"y{self.horizon}"].to_numpy(float) - self.base.point(rows)) / np.where(s > 0, s, np.nan)
-            frame = pd.DataFrame({"sym": _symbols(rows), "z": z}).dropna()
+            frame = pd.DataFrame({"sym": _symbols(rows), "session": _sessions(rows), "z": z}).dropna()
+            h = max(1, int(self.horizon))
             for sym, g in frame.groupby("sym"):
-                n = len(g)
-                mean = float(g["z"].mean())
-                sd = float(g["z"].std(ddof=1)) if n > 2 else float("nan")
-                t = mean / (sd / math.sqrt(n)) if n > 2 and sd > 0 else 0.0
-                used = abs(t) >= T_MIN
+                zs = g.sort_values("session")["z"].to_numpy()
+                # h-session outcomes on neighbouring days share h-1 days of returns: only every h-th one, counting
+                # back from the latest, is independent evidence (as in the promotion rule's test)
+                ind = zs[::-1][::h][::-1]
+                n = len(ind)
+                mean = float(zs.mean())
+                sd = float(ind.std(ddof=1)) if n > 2 else float("nan")
+                t = float(ind.mean()) / (sd / math.sqrt(n)) if n > 2 and sd > 0 else 0.0
+                need = t_needed(n)
+                used = abs(t) >= need
                 adj = mean * n / (n + SHRINK) if used else 0.0
-                self.by_stock[str(sym)] = {"n": n, "mean_z": mean, "t": t, "used": used, "adjust_z": adj}
+                self.by_stock[str(sym)] = {"n": n, "rows": len(zs), "mean_z": mean, "t": t, "t_needed": need, "used": used, "adjust_z": adj}
                 if used:
                     self.adjust[str(sym)] = adj
         return super().fit_band(rows)
@@ -77,4 +102,4 @@ class Specialist(ReturnModel):
                 "by_stock": self.by_stock}
 
 
-__all__ = ["Specialist", "SHRINK", "T_MIN"]
+__all__ = ["Specialist", "SHRINK", "T_MIN", "t_needed"]

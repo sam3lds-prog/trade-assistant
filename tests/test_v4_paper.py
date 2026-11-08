@@ -104,7 +104,8 @@ def test_model_setups_reach_the_paper_desk_only_when_switched_on_and_wait_for_ap
     p = svc.db.one("SELECT * FROM trade_proposals WHERE source = 'model'")
     assert p["symbol"] == "AAPL" and p["side"] == "buy" and p["account_kind"] == "paper"
     plan = json.loads(p["exit_plan_json"])
-    assert plan["stop"] < plan["target"] and f"prediction:{pid}" in plan["rules"] and plan["time_exit"].startswith("2026-10-28")
+    assert plan["stop"] < plan["target"] and f"prediction:{run_id}:{pid}" in plan["rules"]
+    assert plan["time_exit"].startswith("2026-10-28T19:35")                             # 15:35 New York: inside the window
     link = svc.db.one("SELECT * FROM model_trade_links WHERE proposal_id = ?", (p["id"],))
     assert link["prediction_id"] == pid and link["shadow_run"] == run_id and link["role"] == "entry"
     assert mp.run()["entries"] == []                                                    # once per forecast
@@ -154,6 +155,159 @@ def test_a_live_policy_or_the_kill_switch_stops_every_model_trade(desk):
     svc.trading.set_kill_switch(True, "test")
     assert not paper_for(svc).eligibility()["ok"] and paper_for(svc).run()["entries"] == []
     assert svc.db.one("SELECT COUNT(*) FROM trade_proposals WHERE source = 'model'")[0] == 0
+
+
+def _approve(svc, pid):
+    p = svc.db.one("SELECT order_hash FROM trade_proposals WHERE id = ?", (pid,))
+    a = svc.db.one("SELECT id FROM approvals WHERE proposal_id = ? AND decision = 'pending'", (pid,))
+    svc.trading.decide(a["id"], True, p["order_hash"])
+    run_jobs(svc)
+
+
+@pytest.mark.clock("2026-10-22T10:30")
+def test_a_model_trade_can_never_reach_a_live_account_even_if_the_policy_changes_mid_run(desk, monkeypatch):
+    from tradeassist.service import RequestError
+    from tradeassist.v3.trading import ProposalIn, TradingDesk
+    svc, _ = desk
+    _policy(svc, mode="capped_autopilot")
+    dep, _, _ = _deploy_with_signal(svc)
+    paper_for(svc).set_switch(dep, True)
+    monkeypatch.setattr(TradingDesk, "mode", property(lambda self: "live"))             # as if live trading were ready here
+    svc.trading.live_ready, svc.trading.live_account_ref = True, "ACCT1"
+    real, flipped = svc.market.quote, []
+
+    def quote(sym, *a, **k):                       # you save a live policy while the job waits for its quote
+        if not flipped:
+            flipped.append(_policy(svc, mode="approval_required", account_kind="live"))
+        return real(sym, *a, **k)
+    monkeypatch.setattr(svc.market, "quote", quote)
+    out = paper_for(svc).run()
+    assert out["entries"] == [] and "paper or shadow account" in out["skipped"][-1]["why"]
+    assert svc.db.one("SELECT COUNT(*) FROM trade_proposals WHERE source = 'model'")[0] == 0
+    with pytest.raises(RequestError, match="paper or shadow"):
+        svc.trading.create(ProposalIn(symbol="AAPL", side="buy", quantity=1, limit_price=100.0, source="model"), actor="model")
+
+
+@pytest.mark.clock("2026-10-22T10:30")
+def test_the_models_approve_only_their_own_paper_trades_under_capped_autopilot(desk):
+    from tradeassist.service import RequestError
+    from tradeassist.v3.trading import ProposalIn
+    svc, _ = desk
+    _policy(svc)                                                  # paper, approval by you
+    mine = svc.trading.create(ProposalIn(symbol="AAPL", side="buy", quantity=1, limit_price=100.0, thesis="mine"))
+    a = svc.db.one("SELECT id FROM approvals WHERE proposal_id = ? AND decision = 'pending'", (mine["id"],))
+    with pytest.raises(RequestError, match="their own paper or shadow trades"):
+        svc.trading.decide(a["id"], True, mine["order_hash"], actor="model", channel="policy")
+    _policy(svc, mode="capped_autopilot")
+    with pytest.raises(RequestError, match="their own"):         # not its proposal, whatever the policy
+        svc.trading.decide(a["id"], True, mine["order_hash"], actor="model", channel="policy")
+
+
+@pytest.mark.clock("2026-10-22T10:30")
+def test_a_model_exit_sells_only_the_models_shares(desk):
+    from tradeassist.v3.trading import ProposalIn
+    svc, _ = desk
+    _policy(svc)
+    dep, _, _ = _deploy_with_signal(svc)
+    mp = paper_for(svc)
+    mp.set_switch(dep, True)
+    e = mp.run()["entries"][0]
+    _approve(svc, e["proposal"])
+    mine = svc.trading.create(ProposalIn(symbol="AAPL", side="buy", quantity=1, thesis="my own share"))
+    _approve(svc, mine["id"])
+    assert svc.trading.positions("paper", marks=False)["positions"][0]["quantity"] == e["quantity"] + 1
+    with svc.db.tx() as cur:
+        cur.execute("UPDATE model_trade_links SET target = 1.0 WHERE proposal_id = ?", (e["proposal"],))
+    mp.set_switch(dep, False)                                     # switched off: its open trade is still managed
+    out = mp.run()
+    assert out["entries"] == [] and len(out["exits"]) == 1
+    sell = svc.db.one("SELECT id, quantity FROM trade_proposals WHERE source = 'model' AND side = 'sell'")
+    assert sell["quantity"] == e["quantity"]
+    assert mp.run()["exits"] == []                                # one exit at a time
+    _approve(svc, sell["id"])
+    assert svc.trading.positions("paper", marks=False)["positions"][0]["quantity"] == 1     # yours is left
+    assert mp.open_trades("paper") == [] and mp.record()["closed"] == 1
+
+
+@pytest.mark.clock("2026-10-22T10:30")
+def test_shares_you_sell_end_the_models_trade_and_shares_bought_later_are_not_theirs(desk):
+    from tradeassist.v3.trading import ProposalIn
+    svc, _ = desk
+    _policy(svc)
+    dep, _, _ = _deploy_with_signal(svc)
+    mp = paper_for(svc)
+    mp.set_switch(dep, True)
+    e = mp.run()["entries"][0]
+    _approve(svc, e["proposal"])
+    out = svc.trading.create(ProposalIn(symbol="AAPL", side="sell", quantity=e["quantity"], thesis="I sold them"))
+    _approve(svc, out["id"])
+    again = svc.trading.create(ProposalIn(symbol="AAPL", side="buy", quantity=1, thesis="bought back, mine"))
+    assert again["status"] == "awaiting_approval", again["risk"]["text"]
+    _approve(svc, again["id"])
+    assert mp.open_trades("paper") == []
+    assert mp.record()["trades"][0]["state"] == "ended outside the models"
+
+
+def test_entries_wait_for_the_trading_window_and_are_not_used_up_before_it(desk):
+    import time_machine
+    from tradeassist.optionmath import NY
+    from datetime import datetime
+    svc, _ = desk
+    _policy(svc)
+    with time_machine.travel(datetime(2026, 10, 22, 9, 25, tzinfo=NY), tick=False):
+        dep, _, _ = _deploy_with_signal(svc)
+        paper_for(svc).set_switch(dep, True)
+        early = paper_for(svc).run()
+        assert early["entries"] == [] and "no entries yet" in early["skipped"][-1]["why"]
+    with time_machine.travel(datetime(2026, 10, 22, 9, 40, tzinfo=NY), tick=False):
+        got = paper_for(svc).run()["entries"]
+        assert len(got) == 1 and got[0]["status"] == "awaiting_approval"
+    with time_machine.travel(datetime(2026, 11, 26, 11, 0, tzinfo=NY), tick=False):     # Thanksgiving: closed
+        assert "market is closed" in paper_for(svc).run()["skipped"][-1]["why"]
+
+
+def test_a_blocked_exit_is_checked_again_never_written_twice(desk):
+    import time_machine
+    from tradeassist.optionmath import NY
+    from datetime import datetime
+    svc, _ = desk
+    _policy(svc)
+    with time_machine.travel(datetime(2026, 10, 22, 10, 30, tzinfo=NY), tick=False):
+        dep, _, _ = _deploy_with_signal(svc)
+        mp = paper_for(svc)
+        mp.set_switch(dep, True)
+        e = mp.run()["entries"][0]
+        _approve(svc, e["proposal"])
+        with svc.db.tx() as cur:
+            cur.execute("UPDATE model_trade_links SET target = 1.0 WHERE proposal_id = ?", (e["proposal"],))
+        mp.run()
+        sell = svc.db.one("SELECT id FROM trade_proposals WHERE source = 'model' AND side = 'sell'")["id"]
+        with svc.db.tx() as cur:                                  # say the spread was too wide when it was checked
+            cur.execute("UPDATE trade_proposals SET status = 'blocked' WHERE id = ?", (sell,))
+            cur.execute("UPDATE approvals SET decision = 'superseded' WHERE proposal_id = ?", (sell,))
+    with time_machine.travel(datetime(2026, 10, 22, 10, 35, tzinfo=NY), tick=False):
+        out = mp.run()["exits"]
+        assert out[0]["proposal"] == sell and out[0]["status"] == "awaiting_approval"
+        assert svc.db.one("SELECT COUNT(*) FROM trade_proposals WHERE source = 'model' AND side = 'sell'")[0] == 1
+
+
+@pytest.mark.clock("2026-10-22T10:30")
+def test_the_autopilot_and_the_models_share_one_daily_order_count(desk):
+    from tradeassist.autopilot import policy_buys_today
+    svc, _ = desk
+    _policy(svc, mode="capped_autopilot", autopilot_max_orders_per_day=1)
+    dep, _, _ = _deploy_with_signal(svc)
+    paper_for(svc).set_switch(dep, True)
+    assert paper_for(svc).run()["entries"][0]["status"] == "authorized"
+    assert policy_buys_today(svc.db, "paper", svc.trading.mode, "2026-10-22T04:00:00+00:00") == 1     # the autopilot sees it too
+
+
+def test_the_time_exit_is_inside_the_window_and_before_an_early_close():
+    from tradeassist.v4.paper import buy_limit, time_exit_on
+    pol = P.TradingPolicy()
+    assert time_exit_on(date(2026, 10, 28), pol).strftime("%H:%M") == "15:35"
+    assert time_exit_on(date(2026, 11, 27), pol).strftime("%H:%M") == "12:45"             # the day after Thanksgiving closes at 1
+    assert buy_limit(187.2301) == 187.24 and buy_limit(0.51234) == 0.5124 and buy_limit(50.0) == 50.0
 
 
 # ---- phase 7: factors, specialists, events -----------------------------------------------------------------------
