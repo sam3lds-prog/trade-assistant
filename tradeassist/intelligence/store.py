@@ -247,6 +247,9 @@ class ReplayStore:
         self._conn.row_factory = sqlite3.Row
         try:
             self._conn.execute("PRAGMA foreign_keys = ON")
+            # INSERT OR REPLACE deletes the old row without firing DELETE triggers unless this is on: with it, the
+            # immutability triggers refuse a REPLACE as well (found in review).
+            self._conn.execute("PRAGMA recursive_triggers = ON")
             self._conn.execute(f"PRAGMA busy_timeout = {int(BUSY_SECONDS * 1000)}")
             if self.path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode = WAL")

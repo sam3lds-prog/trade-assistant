@@ -32,14 +32,16 @@ an order path (a test fails if it could), and nothing here touches the Trading D
   identical to an uninterrupted run. The year from November 2025 is held out for phase 4 and cannot be replayed in
   development.
 - **Models that have to earn it.** "No change" is the first champion. Drift, 3.0's Research engines, a ridge model
-  and gradient-boosted trees are challengers; one replaces the champion only when it beats it on a validation window
-  by more than chance (corrected for the number of challengers), with an honest band, no worse tail, on two training
-  days running.
+  and gradient-boosted trees are challengers; one replaces the champion only when it beats it by more than chance
+  (corrected for the number of challengers), with an honest band and no worse tail, on two validation windows that
+  share no dates. Over a whole run, a challenger no better than the champion gets promoted in
+  under 2% of runs (a test measures it). "No change" stays a challenger, so a promoted model can be demoted.
 - **The narrow trade.** A pullback setup's trade (enter next open, 1.5-range target, 1-range stop, five sessions,
   costs) gets target/stop/timeout probabilities and a take/pass decision. Every setup is graded, taken or not.
 - **Research's forecasts graded.** Since 3.0 each study saved its forecast with empty outcome columns; an hourly job
-  now fills them once the horizon has passed (`GET /v4/research/record`). Their target dates now skip market
-  holidays (they used to land on the holiday).
+  now fills them once the horizon has passed, outside market hours, wherever the job worker runs (the daemon, or the
+  app after its first desk action); `POST /v4/research/grade` grades on request and `GET /v4/research/record`
+  summarises. Their target dates now skip market holidays (they used to land on the holiday).
 - **New dependency:** scikit-learn 1.6 or later (`pip install -r requirements.txt`). Its macOS wheels need nothing
   from Homebrew.
 

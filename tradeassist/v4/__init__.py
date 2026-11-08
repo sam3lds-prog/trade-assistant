@@ -29,7 +29,12 @@ def jobs(svc: Any) -> tuple[dict[str, Any], list[Any]]:
     """The 4.0 jobs for the worker: grading Research's live forecasts once an hour."""
     from ..jobs import Schedule
     from .grading import grade_research
-    handlers = {"research.grade": lambda _: grade_research(svc)}
+    def grade(_: dict[str, Any]) -> Any:
+        from ..marketdays import phase
+        if phase() == "open":                 # it fetches bars; during the session the worker is left to the orders
+            return {"skipped": "the market is open"}
+        return grade_research(svc)
+    handlers = {"research.grade": grade}
     schedules = [Schedule("research.grade", 3600, 1800)]
     return handlers, schedules
 

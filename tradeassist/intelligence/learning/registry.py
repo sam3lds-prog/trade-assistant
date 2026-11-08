@@ -62,22 +62,10 @@ def load_state(store: Any, run_id: str) -> dict[tuple[str, int], tuple[str, str,
 
 
 def record_training(cur: Any, run_id: str, session: str, result: TrainingResult, before: str, after: str) -> None:
-    body = {**result.candidates, "_streaks": result.streaks}
     cur.execute("""INSERT INTO training_runs (run_id, session, task, horizon, champion_before, champion_after, decision, reason,
                    candidates_json) VALUES (?,?,?,?,?,?,?,?,?)""",
                 (run_id, session, result.task, result.horizon, before, after, result.decision, result.reason,
-                 json.dumps(body, default=_json_default)))
-
-
-def load_streaks(store: Any, run_id: str) -> dict[tuple[str, int], dict[str, int]]:
-    """Each task's challenger pass streaks as of the run's last training day (for a resumed run)."""
-    out: dict[tuple[str, int], dict[str, int]] = {}
-    for r in store.query("""SELECT t.task, t.horizon, t.candidates_json FROM training_runs t
-                            WHERE t.run_id = ? AND t.id = (SELECT MAX(id) FROM training_runs u
-                                                           WHERE u.run_id = t.run_id AND u.task = t.task AND u.horizon = t.horizon)""",
-                         (run_id,)):
-        out[(r["task"], int(r["horizon"]))] = {k: int(v) for k, v in (json.loads(r["candidates_json"]).get("_streaks") or {}).items()}
-    return out
+                 json.dumps(result.candidates, default=_json_default)))
 
 
 def _json_default(v: Any) -> Any:
@@ -94,4 +82,4 @@ def lineage(store: Any, run_id: str) -> list[dict[str, Any]]:
         "WHERE run_id = ? ORDER BY session, task, horizon", (run_id,))]
 
 
-__all__ = ["version_id", "artifact", "load_artifact", "record_version", "set_state", "load_state", "load_streaks", "record_training", "lineage"]
+__all__ = ["version_id", "artifact", "load_artifact", "record_version", "set_state", "load_state", "record_training", "lineage"]

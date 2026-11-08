@@ -20,6 +20,7 @@ FORBIDDEN = {
     "tradeassist.riskengine", "tradeassist.reconcile", "tradeassist.remote", "tradeassist.allocator", "tradeassist.service",
     "tradeassist.market", "tradeassist.api", "tradeassist.api_v2", "tradeassist.api_v3", "tradeassist.daemon",
     "tradeassist.providers.robinhood", "tradeassist.providers.mcp_bridge", "tradeassist.v4",
+    "tradeassist.providers", "tradeassist.providers.tradier", "tradeassist.providers.demo", "tradeassist.providers.base",
 }
 
 

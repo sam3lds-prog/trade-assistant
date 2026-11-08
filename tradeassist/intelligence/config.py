@@ -22,7 +22,7 @@ from typing import Any
 # 200- and 250-day features are warm on the first prediction day.
 DEVELOPMENT_FROM = date(2016, 11, 1)
 HOLDOUT_FROM = date(2025, 11, 1)                 # its first session is Monday 3 November 2025
-DATASET_FROM = date(2015, 11, 1)
+DATASET_FROM = date(2015, 10, 1)                 # 13 months: a year of history (MIN_HISTORY) on the first day
 
 KINDS = ("development", "holdout", "shadow")
 DAILY_FAMILIES = ("no_change", "drift", "engines30", "ridge", "gbm")
@@ -46,14 +46,19 @@ class PromotionRule:
 
     "More than chance" is a one-sided Student t test at `alpha` on the per-date mean gain, using only dates whose
     windows do not overlap (every h-th date for an h-session horizon), with alpha divided among the challengers
-    tested that day (Bonferroni): four challengers every week at a plain 5% would promote a lucky one most months.
-    The validation window is long enough to hold `min_validation_dates` such dates (60 sessions for the one-day
-    forecast, 150 for five days). And a challenger must pass on `confirmations` training days in a row before it is
-    promoted, so one good window is not enough."""
+    tested that day (Bonferroni). A validation window holds `min_validation_dates` such dates (60 sessions for the
+    one-day forecast, 150 for five days), and a challenger must pass on `confirmations` such windows that do not
+    overlap one another: the latest, and the one before it. "No change" is always among the challengers, so a promoted
+    model can lose its place again.
+
+    Why these numbers: over a nine-year run of weekly training days, four challengers no better than the champion get
+    one of them promoted at least once in about 100% of runs with one window at 5%; 12% (one-day) and 6% (five-day)
+    with two disjoint windows at 5%; and 1.7% and 0.8% with two disjoint windows at 2%, the rule here
+    (test_a_challenger_no_better_than_the_champion_is_rarely_promoted_over_a_whole_run measures it)."""
     validation_sessions: int = 60
     min_validation_dates: int = 30
     min_validation_rows: int = 1000
-    alpha: float = 0.05
+    alpha: float = 0.02
     confirmations: int = 2
     coverage_tolerance: float = 0.07
     tail_quantile: float = 0.95
@@ -114,8 +119,8 @@ class ReplayConfig:
         if self.kind == "development" and self.end >= HOLDOUT_FROM:
             raise ConfigError(f"A development replay must end before {HOLDOUT_FROM}: the year from then on is held out "
                               "untouched for the final evaluation (phase 4).")
-        if self.kind == "holdout" and self.start < HOLDOUT_FROM:
-            raise ConfigError(f"A holdout replay starts on or after {HOLDOUT_FROM}.")
+        if self.kind in ("holdout", "shadow") and self.start < HOLDOUT_FROM:
+            raise ConfigError(f"A {self.kind} run starts on or after {HOLDOUT_FROM}.")
         if not self.horizons or any(h < 1 or h > 20 for h in self.horizons):
             raise ConfigError("horizons must be between 1 and 20 sessions")
         bad = [f for f in self.families if f not in DAILY_FAMILIES]

@@ -68,17 +68,17 @@ class Calendar:
         lo, hi = bisect.bisect_left(self.sessions, start), bisect.bisect_right(self.sessions, end)
         return list(self.sessions[lo:hi])
 
+    def _next(self, d: date) -> date:
+        """The next session: from this calendar, or past its end from the exchange calendar (weekdays past 2028)."""
+        nxt = self.add(d, 1)
+        return nxt if nxt is not None else marketdays.next_trading_day(d)
+
     def is_week_end(self, d: date) -> bool:
         """The last session of its week (Friday, or Thursday before a Good Friday)."""
-        nxt = self.add(d, 1)
-        if nxt is None:
-            return d.weekday() == 4
-        return nxt.isocalendar()[:2] != d.isocalendar()[:2]
+        return self._next(d).isocalendar()[:2] != d.isocalendar()[:2]
 
     def is_month_end(self, d: date) -> bool:
-        nxt = self.add(d, 1)
-        if nxt is None:
-            return False
+        nxt = self._next(d)
         return (nxt.year, nxt.month) != (d.year, d.month)
 
     def close_time(self, d: date) -> time:

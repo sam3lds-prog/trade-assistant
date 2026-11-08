@@ -58,7 +58,9 @@ def test_routes_serve_a_finished_run(app):
     preds = client.get(f"/v4/replay/runs/{run_id}/predictions", params={"symbol": "aapl", "task": "daily", "horizon": 1, "limit": 5}).json()
     assert len(preds["predictions"]) == 5 and {p["symbol"] for p in preds["predictions"]} == {"AAPL"}
     lineage = client.get(f"/v4/replay/runs/{run_id}/lineage").json()["training"]
-    assert lineage and all("_streaks" not in t["candidates"] for t in lineage)
+    assert lineage and all(isinstance(t["candidates"], dict) for t in lineage)
+    assert client.get("/v4/replay/runs/nope/lineage").status_code == 404
+    assert client.get("/v4/replay/runs/nope/predictions").status_code == 404
     checks = client.get(f"/v4/replay/datasets/{ds.id}/checks").json()
     assert checks["dataset"] == ds.id
     assert client.get("/v4/replay/runs/nope").status_code == 404
@@ -99,6 +101,39 @@ def test_research_forecasts_are_graded_once_on_the_exchange_calendar(app):
     assert svc.db.one("SELECT evaluated_at FROM forecast_records WHERE study_id = 's5'")["evaluated_at"] == first
     rec = research_record(svc)
     assert rec["5"][0]["n"] == 1 and client.get("/v4/research/record").json()["by_horizon"]["1"][0]["n"] == 1
+
+
+def _record(svc, study, as_of, h, med=0.5, lo=-2.0, hi=2.0):
+    with svc.db.tx() as cur:
+        cur.execute("""INSERT INTO forecast_records (mode, study_id, symbol, model_version, kind, made_at, as_of_date, horizon_days,
+                       target_date, regime, median_pct, low_pct, high_pct) VALUES (?, ?, 'AAPL', 'forecast-3.0', 'live', ?, ?, ?, ?, '', ?, ?, ?)""",
+                    (svc.market.info.mode, study, as_of.isoformat(), as_of.isoformat(), h, as_of.isoformat(), med, lo, hi))
+
+
+def test_grading_works_through_a_backlog_and_closes_out_what_can_never_be_graded(app):
+    svc, client = app
+    dates = [d.date() for d in pd.to_datetime(svc.market.bars("AAPL", years=1.0, complete=True)["date"])]
+    for i, k in enumerate((-40, -35, -30)):
+        _record(svc, f"old{i}", dates[k], 1)
+    saturday = next(d for d in (dates[-60] + timedelta(days=j) for j in range(7)) if d.weekday() == 5)
+    _record(svc, "weekend", saturday, 1)                          # no bar on its as-of date, ever
+    first = grade_research(svc, limit=2)                          # the oldest first, the rest left for the next run
+    assert first["graded"] == 1 and first["closed_without_data"] == 1 and first["left_for_next_run"] == 2
+    gone = svc.db.one("SELECT evaluated_at, realized_pct FROM forecast_records WHERE study_id = 'weekend'")
+    assert gone["evaluated_at"] and gone["realized_pct"] is None
+    assert client.post("/v4/research/grade").json()["graded"] == 2      # or now, on request
+    assert research_record(svc)["1"][0]["n"] == 3                 # the closed-out record is not counted as a forecast
+
+
+def test_the_grading_job_leaves_market_hours_to_the_orders(app, monkeypatch):
+    svc, _ = app
+    from tradeassist import marketdays
+    from tradeassist.v4 import jobs
+    handlers, _ = jobs(svc)
+    monkeypatch.setattr(marketdays, "phase", lambda now=None: "open")
+    assert handlers["research.grade"]({}) == {"skipped": "the market is open"}
+    monkeypatch.setattr(marketdays, "phase", lambda now=None: "post")
+    assert "graded" in handlers["research.grade"]({})
 
 
 def test_target_sessions_skip_market_holidays():

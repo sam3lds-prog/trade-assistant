@@ -19,6 +19,10 @@ from ..data.features import Panel
 from .labels import LabelBook
 
 
+def _is_label(column: str) -> bool:
+    return column.startswith("y") and column[1:].isdigit()
+
+
 class LookaheadError(RuntimeError):
     """Something asked for data from after the cutoff."""
 
@@ -48,7 +52,9 @@ class AsOf:
         return None if v is None or pd.isna(v) else float(v)
 
     def setups(self) -> pd.DataFrame:
-        return self.labels.setups_on(self.ts)
+        """Today's qualifying setups, without a single label column (every one of them reads later prices)."""
+        out = self.labels.setups_on(self.ts)
+        return out.drop(columns=[c for c in out.columns if _is_label(c)])
 
     def daily_examples(self, h: int, window_sessions: int) -> pd.DataFrame:
         """Rows whose h-session outcome had closed by this session's close, from the last `window_sessions`
@@ -60,7 +66,8 @@ class AsOf:
         first = self.panel.sessions[max(0, i - window_sessions + 1)]
         out = self.labels.daily(h, first, last)
         assert out.index.get_level_values("session").max() <= last if len(out) else True
-        return out
+        # Only this horizon's label: a longer horizon's label on the latest rows has not matured yet.
+        return out.drop(columns=[c for c in out.columns if _is_label(c) and c != f"y{h}"])
 
     def trade_examples(self, window_sessions: int) -> pd.DataFrame:
         last = self.labels.matured_through(self.labels.trade.hold_sessions, self.ts)

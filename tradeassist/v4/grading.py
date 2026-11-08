@@ -11,6 +11,10 @@ never known. This job fills them, once each, when the target session's daily bar
 The target session is counted on the exchange calendar (marketdays.py). Records made before 4.0 stored a target from
 pandas business days, which lands on a market holiday when the horizon crosses one; grading uses the corrected
 session, and the stored target is left as it was written.
+
+It runs outside market hours (it fetches daily bars, and shares the job worker with order submission), grades the
+oldest due records first, a bounded number per run, and closes out a record whose bars still cannot be had two weeks
+after its target (evaluated, with no realized move), so one stock without data never holds the rest back.
 """
 
 from __future__ import annotations
@@ -32,14 +36,18 @@ def target_session(as_of: date, horizon: int) -> date:
     return marketdays.add_trading_days(as_of, horizon)
 
 
-def grade_research(svc: Any, now: float | None = None, limit: int = 500) -> dict[str, Any]:
+GIVE_UP_DAYS = 14
+
+
+def grade_research(svc: Any, now: float | None = None, limit: int = 200) -> dict[str, Any]:
     now = time.time() if now is None else now
     settled = settled_through(now)
     mode = svc.market.info.mode
     rows = svc.db.query("""SELECT id, symbol, as_of_date, horizon_days, median_pct, low_pct, high_pct FROM forecast_records
-                           WHERE evaluated_at IS NULL AND kind = 'live' AND mode = ? ORDER BY as_of_date LIMIT ?""", (mode, limit))
-    due = [r for r in rows if target_session(date.fromisoformat(r["as_of_date"]), int(r["horizon_days"])) <= settled]
-    graded, missing = 0, []
+                           WHERE evaluated_at IS NULL AND kind = 'live' AND mode = ? ORDER BY as_of_date""", (mode,))
+    due_all = [r for r in rows if target_session(date.fromisoformat(r["as_of_date"]), int(r["horizon_days"])) <= settled]
+    due = due_all[:limit]
+    graded, missing, closed = 0, [], 0
     by_symbol: dict[str, list[Any]] = {}
     for r in due:
         by_symbol.setdefault(r["symbol"], []).append(r)
@@ -55,6 +63,11 @@ def grade_research(svc: Any, now: float | None = None, limit: int = 500) -> dict
             target = target_session(as_of, int(r["horizon_days"]))
             if as_of not in closes.index or target not in closes.index:
                 missing.append(f"{sym} {as_of}->{target}: no bar")
+                if (settled - target).days > GIVE_UP_DAYS:
+                    with svc.db.tx() as cur:          # evaluated, with no realized move: it cannot be graded
+                        cur.execute("UPDATE forecast_records SET evaluated_at = ? WHERE id = ? AND evaluated_at IS NULL",
+                                    (datetime.now(timezone.utc).isoformat(timespec="seconds"), r["id"]))
+                        closed += cur.rowcount
                 continue
             realized = 100.0 * (float(closes[target]) / float(closes[as_of]) - 1.0)
             median = float(r["median_pct"])
@@ -65,7 +78,8 @@ def grade_research(svc: Any, now: float | None = None, limit: int = 500) -> dict
                                WHERE id = ? AND evaluated_at IS NULL""",
                             (realized, covered, hit, datetime.now(timezone.utc).isoformat(timespec="seconds"), r["id"]))
                 graded += cur.rowcount
-    return {"graded": graded, "waiting": len(rows) - len(due), "missing": missing[:20]}
+    return {"graded": graded, "waiting": len(rows) - len(due_all), "left_for_next_run": len(due_all) - len(due),
+            "closed_without_data": closed, "missing": missing[:20]}
 
 
 def research_record(svc: Any) -> dict[str, Any]:
@@ -74,7 +88,7 @@ def research_record(svc: Any) -> dict[str, Any]:
     for r in svc.db.query("""SELECT horizon_days AS h, model_version, COUNT(*) AS n, AVG(covered) AS coverage, AVG(direction_hit) AS hits,
                              SUM(CASE WHEN direction_hit IS NOT NULL THEN 1 ELSE 0 END) AS leaned,
                              AVG(ABS(realized_pct - median_pct)) AS mae, AVG(ABS(realized_pct)) AS nochange_mae
-                             FROM forecast_records WHERE evaluated_at IS NOT NULL AND kind = 'live' AND mode = ?
+                             FROM forecast_records WHERE evaluated_at IS NOT NULL AND realized_pct IS NOT NULL AND kind = 'live' AND mode = ?
                              GROUP BY horizon_days, model_version ORDER BY horizon_days""", (svc.market.info.mode,)):
         out.setdefault(str(r["h"]), []).append({k: r[k] for k in r.keys() if k != "h"})
     return out

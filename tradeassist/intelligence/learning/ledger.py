@@ -81,15 +81,27 @@ def insert_decision(cur: Any, run_id: str, prediction_id: int, session: str, sym
 
 
 def ledger_hash(store: Any, run_id: str) -> str:
-    """One hash of every prediction and outcome of a run, independent of row ids and wall-clock times."""
+    """One hash of every prediction and outcome of a run, independent of row ids and wall-clock times. Each
+    prediction's hash is recomputed from its columns, so a row changed underneath its stored hash changes the result;
+    a stored hash that no longer matches its row is an error."""
     h = hashlib.sha256()
-    for r in store.query("""SELECT p.row_sha256, o.status, o.realized_return, o.barrier, o.net_return, d.take
-                            FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id
-                            LEFT JOIN trade_decisions d ON d.prediction_id = p.id
-                            WHERE p.run_id = ? ORDER BY p.session, p.task, p.horizon, p.symbol""", (run_id,)):
-        h.update(("|".join(_fmt(x) for x in tuple(r)) + "\n").encode())
+    cols = ", ".join(f"p.{k}" for k in PREDICTION_FIELDS)
+    for r in store.query(f"""SELECT {cols}, p.payload_json, p.row_sha256, o.status, o.realized_return, o.barrier, o.net_return, d.take
+                             FROM predictions p LEFT JOIN outcomes o ON o.prediction_id = p.id
+                             LEFT JOIN trade_decisions d ON d.prediction_id = p.id
+                             WHERE p.run_id = ? ORDER BY p.session, p.task, p.horizon, p.symbol""", (run_id,)):
+        row = {k: r[k] for k in PREDICTION_FIELDS}
+        row["fhash"] = json.loads(r["payload_json"]).get("fhash")
+        digest = row_hash(row)
+        if digest != r["row_sha256"]:
+            raise LedgerError(f"A prediction of run {run_id} ({row['symbol']} {row['session']}) no longer matches its hash")
+        h.update(("|".join(_fmt(x) for x in (digest, r["status"], r["realized_return"], r["barrier"], r["net_return"], r["take"])) + "\n").encode())
     return h.hexdigest()
 
 
-__all__ = ["insert_predictions", "insert_outcome", "insert_decision", "due", "ledger_hash", "row_hash", "feature_hash",
+class LedgerError(RuntimeError):
+    pass
+
+
+__all__ = ["LedgerError", "insert_predictions", "insert_outcome", "insert_decision", "due", "ledger_hash", "row_hash", "feature_hash",
            "PREDICTION_FIELDS"]

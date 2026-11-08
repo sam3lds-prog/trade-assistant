@@ -5,7 +5,8 @@
 3. The same dataset and configuration give the same ledger, including a run stopped and resumed (reproducibility).
 4. The database refuses to change or delete a prediction, an outcome, a decision or a dataset's bars (immutability).
 5. Horizons count exchange sessions, across holidays and early closes (calendar).
-And: the held-out year cannot be replayed in development; the barriers, the promotion rule and the scorecard.
+And: the held-out year cannot be replayed in development; one run, one worker, resumable after any failure; the
+barriers, the promotion rule (and how often it promotes a model that is no better) and the scorecard.
 """
 
 import sqlite3
@@ -16,12 +17,14 @@ import pandas as pd
 import pytest
 
 from tests import v4_fixtures as fx
-from tradeassist.intelligence.config import HOLDOUT_FROM, ConfigError, PromotionRule, ReplayConfig
+from tradeassist.intelligence.config import DATASET_FROM, HOLDOUT_FROM, ConfigError, PromotionRule, ReplayConfig, validation_window
 from tradeassist.intelligence.data import dataset as DS
 from tradeassist.intelligence.data.calendar import Calendar, from_market_dates
 from tradeassist.intelligence.data.features import FEATURES, build_panel
+from tradeassist.intelligence.learning import trainer as TR
 from tradeassist.intelligence.learning import validation as V
 from tradeassist.intelligence.learning.ledger import ledger_hash
+from tradeassist.intelligence.learning.registry import lineage as lineage_of
 from tradeassist.intelligence.replay.clock import AsOf, LookaheadError
 from tradeassist.intelligence.replay.execution import simulate
 from tradeassist.intelligence.replay.labels import LabelBook
@@ -111,6 +114,21 @@ def test_a_five_day_outcome_is_invisible_to_training_until_its_window_closes(sto
             assert trades.index.get_level_values("session").max() <= pd.Timestamp(ds.calendar.add(view.session, -5))
 
 
+def test_the_view_hands_out_no_label_but_the_matured_one_asked_for(store, bars):
+    ds = _ds(store, bars)
+    panel = build_panel(ds)
+    labels = LabelBook(panel, ds.calendar, (1, 5), fx.config(date(2019, 1, 2), date(2019, 6, 3)).trade)
+    found = 0
+    for i in range(400, 460):
+        view = AsOf(panel, labels, ds.calendar, ds.calendar.sessions[i])
+        today = view.setups()
+        found += len(today)
+        assert not {"y1", "y5"} & set(today.columns)              # today's setups carry no outcome, not even a later one
+        assert "y1" in view.daily_examples(1, 300).columns and "y5" not in view.daily_examples(1, 300).columns
+        assert "y5" in view.daily_examples(5, 300).columns and "y1" not in view.daily_examples(5, 300).columns
+    assert found > 0
+
+
 def test_the_view_refuses_to_read_after_its_cutoff(store, bars):
     ds = _ds(store, bars)
     panel = build_panel(ds)
@@ -141,6 +159,60 @@ def test_the_same_data_and_settings_give_the_same_ledger_even_after_a_stop_and_r
     assert ledger_hash(store, run_c) == ledger_hash(store, run_a)
 
 
+def test_a_run_that_failed_in_its_first_session_resumes_where_it_was(store, bars, monkeypatch):
+    ds = _ds(store, bars)
+    s = ds.calendar.sessions
+    cfg = _quick(s[280], s[330])
+    clean, out = _run(store, ds.id, cfg)
+    run_id = create_run(store, ds.id, cfg)
+    real = Replay.step
+    def broken(self, d):
+        raise RuntimeError("the network went away")
+    monkeypatch.setattr(Replay, "step", broken)
+    with pytest.raises(RuntimeError):
+        Replay(store, run_id).run()
+    assert store.one("SELECT status FROM replay_runs WHERE id = ?", (run_id,))[0] == "failed"
+    monkeypatch.setattr(Replay, "step", real)
+    done = Replay(store, run_id).run()                            # installs nothing twice, and ends where the clean run did
+    assert done["ledger_sha256"] == out["ledger_sha256"]
+    with pytest.raises(ReplayError, match="complete"):
+        Replay(store, run_id).run()
+
+
+def test_a_run_is_worked_by_one_process_at_a_time(store, bars):
+    from datetime import datetime, timedelta, timezone
+    ds = _ds(store, bars)
+    s = ds.calendar.sessions
+    run_id = create_run(store, ds.id, _quick(s[280], s[300]))
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with store.tx() as cur:
+        cur.execute("UPDATE replay_runs SET status = 'running', worker = 'another-mac:4242', heartbeat_at = ? WHERE id = ?", (fresh, run_id))
+    with pytest.raises(ReplayError, match="another process"):
+        Replay(store, run_id).run()
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds")
+    with store.tx() as cur:                                        # that process died: its lease ran out
+        cur.execute("UPDATE replay_runs SET heartbeat_at = ? WHERE id = ?", (stale, run_id))
+    assert Replay(store, run_id).run()["status"] == "complete"
+
+
+def test_two_processes_resuming_one_run_at_once_cannot_both_have_it(store, bars, monkeypatch):
+    from datetime import datetime, timezone
+    from tradeassist.intelligence.replay import runner as RN
+    ds = _ds(store, bars)
+    s = ds.calendar.sessions
+    run_id = create_run(store, ds.id, _quick(s[280], s[300]))
+
+    def racing():                                  # the other process claims it between this one's look and its claim
+        with store.tx() as cur:
+            cur.execute("UPDATE replay_runs SET status = 'running', worker = 'other-mac:1', heartbeat_at = ? WHERE id = ?",
+                        (datetime.now(timezone.utc).isoformat(timespec="seconds"), run_id))
+        return "this-mac:2"
+    monkeypatch.setattr(RN, "worker_name", racing)
+    with pytest.raises(ReplayError, match="claimed a moment ago"):
+        Replay(store, run_id).run()
+    assert store.one("SELECT worker, status FROM replay_runs WHERE id = ?", (run_id,))[:] == ("other-mac:1", "running")
+
+
 # ---- 4. immutability ------------------------------------------------------------------------------------------------
 
 def test_predictions_outcomes_decisions_and_bars_cannot_be_changed_or_deleted(store, bars):
@@ -160,6 +232,18 @@ def test_predictions_outcomes_decisions_and_bars_cannot_be_changed_or_deleted(st
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
         with store.tx() as cur:
             cur.execute("UPDATE dataset_bars SET close = close * 2 WHERE dataset_id = ?", (ds.id,))
+    # INSERT OR REPLACE deletes the old row first: that delete is refused too
+    for table in ("predictions", "outcomes", "trade_decisions"):
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            with store.tx() as cur:
+                cur.execute(f"INSERT OR REPLACE INTO {table} SELECT * FROM {table} WHERE run_id = ? LIMIT 1", (run_id,))
+    # a row changed underneath its stored hash (here by switching the guard off) is caught by the ledger hash
+    from tradeassist.intelligence.learning.ledger import LedgerError
+    with store.tx() as cur:
+        cur.execute("DROP TRIGGER predictions_no_update")
+        cur.execute("UPDATE predictions SET pred_return = 0.5 WHERE id = (SELECT MIN(id) FROM predictions WHERE run_id = ?)", (run_id,))
+    with pytest.raises(LedgerError, match="no longer matches"):
+        ledger_hash(store, run_id)
 
 
 def test_a_dataset_is_named_by_its_content_and_an_altered_file_is_refused(store, bars):
@@ -210,6 +294,17 @@ def test_calendar_steps_and_bounds():
     assert cal.on_or_before(date(2024, 1, 4)) == date(2024, 1, 3)
 
 
+def test_a_run_that_ends_midweek_does_not_treat_its_last_session_as_a_week_end(store, bars):
+    ds = _ds(store, bars)
+    s = ds.calendar.sessions
+    wednesday = next(d for d in s[400:] if d.weekday() == 2)
+    friday = next(d for d in s[300:] if d.weekday() == 4)
+    replay = Replay(store, create_run(store, ds.id, _quick(s[280], wednesday)))
+    assert replay.dataset.calendar.last == wednesday
+    assert not replay.dataset.calendar.is_week_end(wednesday)   # past its end, the cut calendar asks the exchange's
+    assert not replay.is_training_day(wednesday) and replay.is_training_day(friday)
+
+
 # ---- the held-out year ----------------------------------------------------------------------------------------------
 
 def test_a_development_replay_cannot_reach_the_held_out_year(store, bars):
@@ -221,7 +316,7 @@ def test_a_development_replay_cannot_reach_the_held_out_year(store, bars):
     s = ds.calendar.sessions
     run_id = create_run(store, ds.id, _quick(s[280], s[400]))
     replay = Replay(store, run_id)
-    assert replay.dataset.calendar.last == s[400]                # later bars are not even loaded
+    assert replay.dataset.calendar.last == s[400]                # later bars are cut before any feature is built
     assert max(df["date"].max() for df in replay.dataset.bars.values()) <= pd.Timestamp(s[400])
 
 
@@ -235,10 +330,12 @@ def test_a_dataset_with_failed_checks_is_refused_unless_asked(store):
     ds = DS.freeze(store, {"SPY": frame(len(days), 500), "AAPL": frame(len(days), 200)},
                    fx.universe(), source="sandbox", adjustment="unknown")
     assert ds.has_failures()
-    cfg = _quick(date(2026, 1, 5), date(2026, 3, 2)).with_(kind="holdout", start=date(2026, 1, 5))
+    cfg = _quick(date(2025, 6, 2), date(2025, 9, 30))
     with pytest.raises(ReplayError, match="failed its checks"):
         create_run(store, ds.id, cfg)
     assert create_run(store, ds.id, cfg, allow_failed_checks=True)
+    with pytest.raises(ReplayError, match="Only development"):  # the held-out year has its own register (phase 4)
+        create_run(store, ds.id, cfg.with_(kind="holdout", start=HOLDOUT_FROM, end=date(2026, 3, 2)), allow_failed_checks=True)
 
 
 # ---- trades ---------------------------------------------------------------------------------------------------------
@@ -302,10 +399,14 @@ def test_the_replay_finds_a_real_edge_and_scores_it_against_no_change(store):
     assert card["daily"]["5"]["graded"] > 0 and card["headline"].startswith("1-day forecasts")
     lineage = store.query("SELECT decision, reason FROM training_runs WHERE run_id = ? AND task = 'daily' AND horizon = 1 "
                           "AND decision = 'promoted'", (run_id,))
-    assert lineage and "training days running" in lineage[0]["reason"]
+    assert lineage and "separate validation windows" in lineage[0]["reason"]
+    # once promoted, the model keeps facing 'no change' on every training day, so it could lose its place again
+    later = [r["candidates"] for r in lineage_of(store, run_id) if r["task"] == "daily" and r["horizon"] == 1
+             and r["candidates"].get("ridge", {}).get("role") == "champion"]
+    assert later and all(c["no_change"]["role"] == "challenger" for c in later)
 
 
-def test_promotion_needs_more_than_chance_divided_among_the_challengers_and_two_wins_running():
+def test_promotion_needs_more_than_chance_divided_among_the_challengers_on_two_separate_windows():
     rule = PromotionRule()
     assert V.threshold(rule, 4, 30) > V.threshold(rule, 1, 30) > 1.645
     gain = pd.Series(np.arange(20, dtype=float), index=pd.bdate_range("2024-01-01", periods=20))
@@ -318,6 +419,43 @@ def test_promotion_needs_more_than_chance_divided_among_the_challengers_and_two_
     assert not V.compare_daily(same, dict(same), rule, 1, 0.8, 4)["passes"]      # a copy of the champion never wins
     better = dict(same, err=err * 0.8, tail=float(np.quantile(err * 0.8, 0.95)))
     assert V.compare_daily(same, better, rule, 1, 0.8, 4)["passes"]
+    assert TR._families("ridge", "no_change", ("drift", "ridge", "gbm")) == ["ridge", "no_change", "drift", "gbm"]
+    assert TR._families("gbm", "base_rate", ("gbm",)) == ["gbm", "base_rate"]
+    # the champion wins nothing if a challenger passes on the latest window but not on the one before it
+    ev = [{"a": same, "b": better}, {"a": same, "b": dict(same)}]
+    chosen, cands = TR._choose("a", ["a", "b"], ev, lambda x, y, k: V.compare_daily(x, y, rule, 1, 0.8, k))
+    assert chosen is None and [w["passes"] for w in cands["b"]["windows"]] == [True, False]
+
+
+def test_a_challenger_no_better_than_the_champion_is_rarely_promoted_over_a_whole_run():
+    """The run-wide false promotion rate of the configured rule. Every challenger's error equals the champion's plus
+    noise, so any promotion is a false one; a run trains weekly from its first possible training day to the held-out
+    year, as a default ten-year development run does. The rule must promote in under 5% of such runs, per horizon."""
+    from tradeassist import marketdays
+    cfg = ReplayConfig()
+    rule = cfg.promotion
+    challengers = len(TR._families("no_change", "no_change", cfg.families)) - 1
+    sessions = len(marketdays.trading_days_between(DATASET_FROM, HOLDOUT_FROM))
+    runs = 150
+    rng = np.random.default_rng(2026)
+    for h in cfg.horizons:
+        n_val = validation_window(rule, h)
+        pick = V.independent_gain(pd.Series(np.arange(n_val)), h).astype(int)       # positions the test keeps, oldest first
+        need = V.threshold(rule, challengers, len(pick))
+        noise = rng.standard_normal((runs, challengers, sessions + h))
+        gain = sum(noise[:, :, j:j + sessions] for j in range(h))                   # overlapping h-session outcomes
+        first = cfg.min_train_sessions + n_val * rule.confirmations
+        promoted = np.zeros(runs, dtype=bool)
+        for day in range(first, sessions, 5):
+            ok = np.ones((runs, challengers), dtype=bool)
+            for w in range(rule.confirmations):
+                hi = day - w * n_val
+                seg = gain[:, :, hi - n_val + 1: hi + 1][:, :, pick]
+                t = seg.mean(-1) / (seg.std(-1, ddof=1) / np.sqrt(seg.shape[-1]))
+                ok &= t > need
+            promoted |= ok.any(-1)
+        assert seg[0, 0].size == len(pick) and V.plain_t(seg[0, 0]) == pytest.approx(t[0, 0])
+        assert promoted.mean() < 0.05, (h, promoted.mean())
 
 
 def test_a_mis_specified_run_is_refused():

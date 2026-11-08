@@ -63,15 +63,21 @@ def build_router_v4(svc: Any) -> APIRouter:
             return json.loads(r["summary_json"])
         return card(store(), run_id)
 
+    def known(run_id: str) -> None:
+        if store().one("SELECT 1 FROM replay_runs WHERE id = ?", (run_id,)) is None:
+            raise HTTPException(404, f"No run {run_id}")
+
     @router.get("/replay/runs/{run_id}/lineage")
     def lineage(run_id: str) -> dict[str, Any]:
         from ..intelligence.learning.registry import lineage as L
+        known(run_id)
         return {"run": run_id, "training": L(store(), run_id)}
 
     @router.get("/replay/runs/{run_id}/predictions")
     def predictions(run_id: str, symbol: str | None = None, task: str | None = Query(None, pattern="^(daily|trade)$"),
                     horizon: int | None = Query(None, ge=1, le=20), session: str | None = None,
                     limit: int = Query(200, ge=1, le=2000)) -> dict[str, Any]:
+        known(run_id)
         sql = ["""SELECT p.id, p.task, p.horizon, p.symbol, p.session, p.target_session, p.model_version, p.family, p.last_close,
                   p.pred_return, p.low_return, p.high_return, p.p_up, p.sigma, p.setup, p.p_target, p.p_stop, p.p_timeout,
                   p.expected_return, p.regime, o.status AS outcome, o.realized_return, o.abs_error, o.direction_hit, o.covered,
@@ -92,6 +98,12 @@ def build_router_v4(svc: Any) -> APIRouter:
         """How Research's own saved forecasts have fared once graded (grading.py)."""
         from .grading import research_record as rec
         return {"by_horizon": rec(svc)}
+
+    @router.post("/research/grade")
+    def research_grade() -> dict[str, Any]:
+        """Grade what is due now, rather than waiting for the hourly job."""
+        from .grading import grade_research
+        return grade_research(svc)
 
     return router
 

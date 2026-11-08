@@ -27,7 +27,7 @@ import os
 import socket
 import time
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 import numpy as np
@@ -47,6 +47,7 @@ from .clock import AsOf
 from .labels import LabelBook
 
 Progress = Callable[[dict[str, Any]], None]
+LEASE_SECONDS = 120            # a run whose heartbeat is younger than this belongs to the process that wrote it
 
 
 class ReplayError(RuntimeError):
@@ -63,7 +64,17 @@ def worker_name() -> str:
 
 def create_run(store: Any, dataset_id: str, cfg: ReplayConfig, *, parent_run: str | None = None,
                allow_failed_checks: bool = False) -> str:
-    """Register a run (status queued). Refuses a dataset with failed checks unless told otherwise."""
+    """Register a development run (status queued). Refuses a dataset with failed checks unless told otherwise."""
+    cfg.check()
+    if cfg.kind != "development":
+        raise ReplayError("Only development replays are created here: the held-out year is opened once through its own register "
+                          "(phase 4), and shadow runs belong to a deployment.")
+    return register_run(store, dataset_id, cfg, parent_run=parent_run, allow_failed_checks=allow_failed_checks)
+
+
+def register_run(store: Any, dataset_id: str, cfg: ReplayConfig, *, parent_run: str | None = None,
+                 allow_failed_checks: bool = False) -> str:
+    """The run row itself, for any kind. Only create_run and the held-out year's register call this."""
     cfg.check()
     ds = store.one("SELECT * FROM datasets WHERE id = ?", (dataset_id,))
     if ds is None:
@@ -96,10 +107,12 @@ class Replay:
         full = DS.load(store, row["dataset_id"])
         self.dataset = full.through(self.cfg.end) if self.cfg.kind == "development" else full
         self.cal = self.dataset.calendar
+        # Training days are read from the whole calendar: which days the market traded is not price data, and the
+        # last session of a cut calendar would otherwise never look like the end of its week or month.
+        self.schedule = full.calendar
         self.panel = build_panel(self.dataset)
         self.labels = LabelBook(self.panel, self.cal, self.cfg.horizons, self.cfg.trade)
         self.state: dict[tuple[str, int], tuple[str, str, Any]] = {}
-        self.streaks: dict[tuple[str, int], dict[str, int]] = {}
 
     # ---- set-up and resumption ----------------------------------------------------------------------------------
     def _initial_state(self, cur: Any, first: str) -> None:
@@ -129,28 +142,42 @@ class Replay:
 
     def is_training_day(self, d: date) -> bool:
         if self.cfg.retrain == "weekly":
-            return self.cal.is_week_end(d)
+            return self.schedule.is_week_end(d)
         if self.cfg.retrain == "monthly":
-            return self.cal.is_month_end(d)
+            return self.schedule.is_month_end(d)
         return False
 
     def run(self, *, max_sessions: int | None = None, should_stop: Callable[[], bool] | None = None) -> dict[str, Any]:
         sessions = self.sessions()
         if not sessions:
             raise ReplayError("The dataset has no sessions in the run's dates")
+        self.row = dict(self.store.one("SELECT * FROM replay_runs WHERE id = ?", (self.run_id,)))    # as it stands now
+        if self.row["status"] == "complete":
+            raise ReplayError("That run is complete")
+        me = worker_name()
+        if (self.row["status"] == "running" and self.row.get("worker") not in (None, me) and self.row.get("heartbeat_at")
+                and (datetime.now(timezone.utc) - datetime.fromisoformat(self.row["heartbeat_at"])).total_seconds() < LEASE_SECONDS):
+            raise ReplayError(f"Run {self.run_id} is already going in another process ({self.row['worker']}).")
         checkpoint = self.row.get("checkpoint")
         todo = [d for d in sessions if checkpoint is None or d.isoformat() > checkpoint]
+        # A fresh start installs the first models; a resumption (models already installed, even if the run failed
+        # during its first session) takes the ones it had.
+        fresh = self.store.one("SELECT COUNT(*) FROM run_state WHERE run_id = ?", (self.run_id,))[0] == 0
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=LEASE_SECONDS)).isoformat(timespec="seconds")
         with self.store.tx() as cur:
+            # The claim is one statement: of two processes resuming the same run at once, only one gets it.
             cur.execute("UPDATE replay_runs SET status = 'running', started_at = COALESCE(started_at, ?), worker = ?, heartbeat_at = ?, "
-                        "error = NULL WHERE id = ?", (_now(), worker_name(), _now(), self.run_id))
-            if checkpoint is None:
+                        "error = NULL WHERE id = ? AND status != 'complete' AND NOT (status = 'running' AND worker IS NOT NULL "
+                        "AND worker != ? AND heartbeat_at IS NOT NULL AND heartbeat_at > ?)", (_now(), me, _now(), self.run_id, me, stale))
+            if cur.rowcount == 0:
+                raise ReplayError(f"Run {self.run_id} was claimed a moment ago by another process.")
+            if fresh:
                 if self.row.get("parent_run"):
                     self._inherit(cur, self.row["parent_run"], sessions[0].isoformat())
                 else:
                     self._initial_state(cur, sessions[0].isoformat())
-        if checkpoint is not None:
+        if not fresh:
             self.state = R.load_state(self.store, self.run_id)
-            self.streaks = R.load_streaks(self.store, self.run_id)
         started, done = time.monotonic(), 0
         try:
             for d in todo:
@@ -169,6 +196,10 @@ class Replay:
                             (f"{exc.__class__.__name__}: {str(exc)[:500]}", _now(), self.run_id))
             raise
         return self.finish()
+
+    def _beat(self) -> None:
+        with self.store.tx() as cur:
+            cur.execute("UPDATE replay_runs SET heartbeat_at = ? WHERE id = ?", (_now(), self.run_id))
 
     def _pause(self) -> dict[str, Any]:
         with self.store.tx() as cur:
@@ -191,9 +222,11 @@ class Replay:
         results: list[Any] = []
         if training:                                   # fitted outside the transaction: it is the slow part
             for h in self.cfg.horizons:
-                results.append(train_daily(view, h, self.state[("daily", h)][1], self.cfg, self.streaks.get(("daily", h))))
+                results.append(train_daily(view, h, self.state[("daily", h)][1], self.cfg))
+                self._beat()                           # a long training day must not look like a dead process
             hold = self.cfg.trade.hold_sessions
-            results.append(train_trade(view, self.state[("trade", hold)][1], self.cfg, self.streaks.get(("trade", hold))))
+            results.append(train_trade(view, self.state[("trade", hold)][1], self.cfg))
+            self._beat()
         with self.store.tx() as cur:
             self._grade(cur, view)
             for res in results:
@@ -204,7 +237,6 @@ class Replay:
                     after = R.version_id(res.family, res.task, res.horizon, d)
                     self._install(cur, res.task, res.horizon, after, res.model, sess)
                 R.record_training(cur, self.run_id, sess, res, before, after)
-                self.streaks[key] = res.streaks
             self._predict(cur, view)
             cur.execute("UPDATE replay_runs SET checkpoint = ?, heartbeat_at = ? WHERE id = ?", (sess, _now(), self.run_id))
 
