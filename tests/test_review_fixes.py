@@ -654,3 +654,18 @@ def test_followup_yesterdays_close_is_never_a_half_finished_bar(app, monkeypatch
     monkeypatch.setattr(svc.market, "bars", spy)
     svc.analyst.daily_loss()
     assert seen and all(seen)
+
+
+def test_the_job_worker_stops_quietly_when_its_database_is_closed(tmp_path, caplog):
+    """A worker still looping when the app closes its database ends, rather than logging a failure every second
+    until the interpreter exits (in CI that log spam aborted the process at shutdown)."""
+    import logging
+
+    from tradeassist.db import Database
+    from tradeassist.jobs import Worker
+    db = Database(tmp_path / "w.db")
+    w = Worker(db, {}, [], component="test-worker")
+    db.close()
+    with caplog.at_level(logging.ERROR):
+        w.loop(poll_seconds=0.01)                  # returns instead of spinning
+    assert w.last_error == "the database was closed" and "Worker pass failed" not in caplog.text

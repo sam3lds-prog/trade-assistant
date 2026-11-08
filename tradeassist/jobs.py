@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -236,6 +237,12 @@ class Worker:
         while not self.stop.is_set():
             try:
                 self.step()
+            except sqlite3.ProgrammingError as exc:
+                if "closed database" in str(exc):     # the app is shutting down: there is nothing left to work on
+                    self.last_error = "the database was closed"
+                    return
+                self.last_error = f"{exc.__class__.__name__}: {str(exc)[:200]}"
+                log.exception("Worker pass failed")
             except Exception as exc:  # noqa: BLE001 - the loop must survive anything
                 self.last_error = f"{exc.__class__.__name__}: {str(exc)[:200]}"
                 log.exception("Worker pass failed")
@@ -265,6 +272,12 @@ class Worker:
 
     def running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Stop the loop and wait for its current pass to finish (before the database it uses is closed)."""
+        self.stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
 
 
 __all__ = ["Jobs", "Schedule", "Worker", "schedule_tick", "heartbeat", "last_heartbeat", "alive"]

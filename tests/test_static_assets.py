@@ -145,6 +145,9 @@ def demo_page(tmp_path, features=None, prepare=None):
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+        worker = getattr(getattr(svc, "trading", None), "worker", None)
+        if worker is not None:                     # a desk action started the app's worker: stop it before its database
+            worker.shutdown()
         svc.db.close()
 
 
