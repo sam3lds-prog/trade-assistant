@@ -26,9 +26,10 @@ python run.py --replay run               # the development replay (Nov 2016 to O
 python run.py --replay report RUN        # what it was worth
 ```
 
-It is being delivered in three parts: the replay, the models and the trade-outcome model (part A, this release); the
-held-out evaluation, live shadow forecasts and the Model Lab workspace (part B); paper-trading integration and
-per-stock models (part C). Research's own saved forecasts are now graded too, once their horizon passes.
+It is being delivered in three parts: the replay, the models and the trade-outcome model (part A); the held-out
+evaluation, live shadow forecasts and the **Model Lab** workspace (part B: the *Model Lab* button in the top bar);
+paper-trading integration and per-stock models (part C). Research's own saved forecasts are now graded too, once
+their horizon passes.
 
 ## Version 3: the workstation
 
@@ -1449,7 +1450,10 @@ tradeassist/
     replay/                the as-of view, labels and maturity, simulated trades, the day loop, scorecards
     learning/              the ledger, training, the promotion rule, the model registry
     models/                baselines, return models, the target/stop/timeout model, the take/pass gate
-  v4/                      4.0 in the app: the --replay command line, the /v4 routes, grading Research's forecasts
+    live.py                the daily shadow forecasts of the deployed models (same code as the replay)
+  v4/                      4.0 in the app: the --replay command line, the /v4 routes, grading Research's forecasts,
+                           starting replays as their own process, the shadow-forecast job
+  static/ws-lab.js         Model Lab, Model opportunities (Discover) and Model forecast (Research)
   features.py              version 2 feature switches (FEATURE_... in .env)
   migrations.py schema_v2.py   numbered database upgrades
   positions.py desk.py     unified positions: accounting from fills, marks, snapshots

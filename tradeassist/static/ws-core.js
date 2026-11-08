@@ -8,8 +8,10 @@
    inside widgets. */
 const WS = (() => {
   const GROUPS = [["blue", "Blue"], ["green", "Green"], ["amber", "Amber"], ["plum", "Plum"], ["none", "Not linked"]];
-  const WORKSPACES = { discover: "Discover", research: "Research", desk: "Trading Desk", portfolio: "Portfolio" };
-  const CONTEXT_KEYS = ["symbol", "direction", "horizon", "contract", "strategy", "scenario", "proposal", "opportunity", "study", "draft"];
+  const WORKSPACES = { discover: "Discover", research: "Research", desk: "Trading Desk", portfolio: "Portfolio", lab: "Model Lab" };
+  // 4.0: Model Lab is opened from the top bar or the Layout menu, not at every start, so a session keeps its four tabs.
+  const OPEN_AT_START = ["discover", "research", "desk", "portfolio"];
+  const CONTEXT_KEYS = ["symbol", "direction", "horizon", "contract", "strategy", "scenario", "proposal", "opportunity", "study", "draft", "run"];
   // What belongs to one stock: a new stock clears these unless the change names them too.
   const PER_STOCK = ["contract", "strategy", "scenario", "proposal", "opportunity", "study", "draft"];
   const TYPES = {};                       // widget type -> definition
@@ -673,6 +675,8 @@ const WS = (() => {
     document.getElementById("ws-layout").addEventListener("click", e => layoutMenu(e.currentTarget));
     document.getElementById("ws-classic").addEventListener("click", e => classicMenu(e.currentTarget));
     document.getElementById("ws-dock-toggle").addEventListener("click", () => setDockOpen(!dockOpen));
+    const lab = document.getElementById("ws-lab-open");
+    if (lab) lab.addEventListener("click", () => goWorkspace("lab"));
     document.getElementById("ws-palette").addEventListener("pointerdown", e => { if (e.target.id === "ws-palette") closePalette(); });
     document.addEventListener("keydown", e => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
@@ -686,9 +690,9 @@ const WS = (() => {
     restoring = true;
     for (const [g, c] of Object.entries(session.context || {})) if (ctx[g]) Object.assign(ctx[g], c);
     if (!ctx.blue.symbol) ctx.blue.symbol = (syms.watchlist || [])[0] || "AAPL";
-    const saved = (session.tabs || []).filter(t => WORKSPACES[t.workspace]);
+    const saved = (session.tabs || []).filter(t => Object.hasOwn(WORKSPACES, t.workspace));
     if (saved.length) { for (const t of saved) openTab(t, false); layoutsSeen = session.layouts_version || 30; }
-    else for (const k of Object.keys(WORKSPACES)) {
+    else for (const k of OPEN_AT_START) {
       const def = (listing.layouts || []).find(l => l.workspace === k && l.is_default);
       openTab(def ? { workspace: k, name: def.name, layoutId: def.id, widgets: def.widgets } : { workspace: k, name: WORKSPACES[k], widgets: WS.DEFAULT_LAYOUTS[k] || [] }, false);
     }
@@ -696,7 +700,9 @@ const WS = (() => {
     mountDock(dock.widget);
     setDockOpen(dock.open !== false);
     const want = location.hash.slice(1);
-    const byHash = [...tabs.values()].find(t => t.workspace === want);
+    let byHash = [...tabs.values()].find(t => t.workspace === want);
+    // A link to a workspace that is not open opens it (4.0: #lab opens Model Lab).
+    if (!byHash && Object.hasOwn(WORKSPACES, want)) byHash = openTab({ workspace: want, name: WORKSPACES[want], widgets: WS.DEFAULT_LAYOUTS[want] || [] }, false);
     activate(byHash ? byHash.id : (tabs.has(session.active) ? session.active : tabs.keys().next().value));
     restoring = false;
     booted = true;

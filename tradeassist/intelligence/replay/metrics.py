@@ -40,12 +40,20 @@ def daily_scores(df: pd.DataFrame, horizon: int) -> dict[str, Any]:
 def scorecard(store: Any, run_id: str) -> dict[str, Any]:
     run = store.one("SELECT * FROM replay_runs WHERE id = ?", (run_id,))
     cfg = json.loads(run["config_json"])
-    ds = store.one("SELECT * FROM datasets WHERE id = ?", (run["dataset_id"],))
+    ds = store.one("SELECT * FROM datasets WHERE id = ?", (run["dataset_id"],)) if run["dataset_id"] else None
     spec = json.loads(ds["spec_json"])["universe"] if ds else {}
     out: dict[str, Any] = {"run": run_id, "kind": run["kind"], "dataset": run["dataset_id"],
                            "period": [run["first_session"], run["last_session"]], "daily": {}, "trade": {}, "notes": []}
     if spec.get("survivorship_biased"):
         out["notes"].append(spec.get("note") or "Survivorship-biased universe.")
+    if run["kind"] == "holdout":
+        opening = store.one("SELECT ordinal FROM holdout_openings WHERE run_id = ?", (run_id,))
+        if opening is not None and opening["ordinal"] == 1:
+            out["notes"].insert(0, "The first evaluation of the held-out year: no model or rule was chosen with these sessions in view.")
+        elif opening is not None:
+            out["notes"].insert(0, f"The held-out year has been opened {opening['ordinal']} times: it is no longer untouched, so this "
+                                   "result is development evidence, not a final test.")
+        out["holdout_opening"] = opening["ordinal"] if opening is not None else None
     if ds is not None and ds["adjustment"] in ("unknown", "split"):
         out["notes"].append("Prices may not be adjusted for dividends: ex-dividend days add small unforecastable drops.")
     d = _frame(store, """SELECT p.horizon, p.session, p.family, p.regime, p.pred_return, o.realized_return, o.direction_hit, o.covered
