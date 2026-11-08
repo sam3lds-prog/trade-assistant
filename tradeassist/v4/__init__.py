@@ -32,8 +32,9 @@ def has_replays(svc: Any) -> bool:
 
 
 def jobs(svc: Any) -> tuple[dict[str, Any], list[Any]]:
-    """The 4.0 jobs for the worker: grading Research's live forecasts once an hour, and the deployed models' shadow
-    forecast after each close (checked every half hour; it acts once per session)."""
+    """The 4.0 jobs for the worker: grading Research's live forecasts once an hour; the deployed models' shadow
+    forecast after each close (checked every half hour; it acts once per session); and, when a deployment's paper
+    switch is on, its taken setups and their exits on the paper desk (every five minutes in market hours)."""
     from ..jobs import Schedule
     from .grading import grade_research
 
@@ -48,8 +49,23 @@ def jobs(svc: Any) -> tuple[dict[str, Any], list[Any]]:
             return {"skipped": "no replays yet"}
         from .shadow import run_shadow
         return run_shadow(svc)
-    handlers = {"research.grade": grade, "shadow.forecast": shadow}
-    schedules = [Schedule("research.grade", 3600, 1800), Schedule("shadow.forecast", 1800, 1200)]
+    def paper(_: dict[str, Any]) -> Any:
+        if not has_replays(svc):
+            return {"skipped": "no replays yet"}
+        from .paper import paper_for
+        return paper_for(svc).run()
+    def events(_: dict[str, Any]) -> Any:
+        if not svc.settings.model_events:
+            return {"skipped": "off"}
+        from ..intelligence.live import after_close
+        from datetime import datetime, timezone
+        if not after_close(datetime.now(timezone.utc)):
+            return {"skipped": "waiting for the close"}
+        from .events import run_events
+        return run_events(svc)
+    handlers = {"research.grade": grade, "shadow.forecast": shadow, "model.paper": paper, "events.extract": events}
+    schedules = [Schedule("research.grade", 3600, 1800), Schedule("shadow.forecast", 1800, 1200),
+                 Schedule("model.paper", 300, 240, when="market"), Schedule("events.extract", 3600, 1800)]
     return handlers, schedules
 
 
@@ -60,6 +76,8 @@ def install(svc: Any) -> None:
     if exts is None:
         exts = svc.job_extensions = []
     exts.append(jobs)
+    from .paper import paper_for
+    paper_for(svc)                        # so the positions view can say which holdings the models manage
     svc._v4_installed = True
 
 

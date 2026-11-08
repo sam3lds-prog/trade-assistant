@@ -396,8 +396,8 @@ class TradingDesk:
 
     def create(self, req: ProposalIn, actor: str = "you") -> dict[str, Any]:
         pol = self.policy()
-        if req.source not in ("research", "discover", "autopilot", "manual", "blend"):
-            raise RequestError("source must be research, discover, autopilot, manual or blend")
+        if req.source not in ("research", "discover", "autopilot", "manual", "blend", "model"):
+            raise RequestError("source must be research, discover, autopilot, manual, blend or model")
         terms = self._terms(req, pol)
         pid = C.new_id("prop")
         risk = self.assess(terms, proposal_id=pid)
@@ -1031,6 +1031,12 @@ def install(svc: Any) -> None:
             out = d.positions()
             # 3.1: who manages each holding's exit, and what kind of protection that is (never a broker stop here).
             exits = svc.autopilot.exit_plans(out["account_kind"]) if getattr(svc, "autopilot", None) else {}
+            mp = getattr(svc, "model_paper", None)               # 4.0: the deployed models' paper trades
+            if mp is not None:
+                try:
+                    exits = {**mp.exit_plans(out["account_kind"]), **exits}
+                except Exception:  # noqa: BLE001 - a missing replay store must not hide the positions
+                    pass
             for row in out["positions"]:
                 row["exit"] = exits.get(row["symbol"]) or {"managed_by": "you", "protection": "none",
                                                            "text": "Yours to exit: no stop is placed at a broker by this app."}

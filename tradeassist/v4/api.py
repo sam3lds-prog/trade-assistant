@@ -34,6 +34,10 @@ class DeployIn(Strict):
     label: str = Field(default="", max_length=80)
 
 
+class SwitchIn(Strict):
+    on: bool
+
+
 def build_router_v4(svc: Any) -> APIRouter:
     router = APIRouter(prefix="/v4")
 
@@ -218,6 +222,18 @@ def build_router_v4(svc: Any) -> APIRouter:
             raise HTTPException(404, str(exc)) from None
         return {"active": dep_id}
 
+    # ---- the models on the paper desk (phase 6) ---------------------------------------------------------------
+    @router.get("/paper")
+    def paper() -> dict[str, Any]:
+        from .paper import paper_for
+        mp = paper_for(svc)
+        return {**mp.eligibility(), "record": mp.record(), "last_run": mp.last}
+
+    @router.post("/models/deployments/{dep_id}/paper")
+    def paper_switch(dep_id: str, body: SwitchIn) -> dict[str, Any]:
+        from .paper import paper_for
+        return paper_for(svc).set_switch(dep_id, body.on)
+
     # ---- the shadow forecasts ---------------------------------------------------------------------------------
     def shadow_run() -> tuple[dict[str, Any] | None, str | None]:
         from ..intelligence.learning.deploy import active
@@ -299,6 +315,44 @@ def build_router_v4(svc: Any) -> APIRouter:
     def shadow_now(force: bool = False) -> dict[str, Any]:
         from .shadow import run_shadow
         return run_shadow(svc, force=force)
+
+    @router.get("/shadow/specialists")
+    def specialists(run: str | None = None) -> dict[str, Any]:
+        """Which stocks the per-stock corrections are used for: in a run's final models, or the active deployment's."""
+        from ..intelligence.learning.deploy import models
+        from ..intelligence.learning.registry import lineage, load_state
+        out: dict[str, Any] = {"tasks": {}, "challengers": {}}
+        if run:
+            state = load_state(store(), run)
+            training = lineage(store(), run)
+        else:
+            dep, _run = shadow_run()
+            if dep is None:
+                return {**out, "text": "Nothing deployed yet."}
+            state = models(store(), dep["id"])
+            run = dep["source_run"]
+            training = lineage(store(), run) if store().one("SELECT 1 FROM replay_runs WHERE id = ?", (run,)) else []
+        for (task, h), (vid, fam, model) in state.items():
+            if task != "daily":
+                continue
+            entry: dict[str, Any] = {"version": vid, "family": fam, "specialist": fam.endswith("_spec")}
+            if entry["specialist"]:
+                entry["by_stock"] = getattr(model, "by_stock", {})
+            out["tasks"][str(h)] = entry
+        for t in training:
+            for fam, c in t["candidates"].items():
+                if fam.endswith("_spec") and c.get("role") == "challenger":
+                    b = out["challengers"].setdefault(f"{fam}:{t['horizon']}", {"tested": 0, "passed": 0})
+                    b["tested"] += 1
+                    b["passed"] += int(bool(c.get("passes")))
+        out["run"] = run
+        return out
+
+    @router.get("/events")
+    def events(symbol: str, days: int = Query(7, ge=1, le=60)) -> dict[str, Any]:
+        """The stock's structured news events, published before now (phase 7)."""
+        from .events import for_symbol
+        return for_symbol(svc, symbol.upper(), days)
 
     # ---- Research's own record ----------------------------------------------------------------------------------
     @router.get("/research/record")

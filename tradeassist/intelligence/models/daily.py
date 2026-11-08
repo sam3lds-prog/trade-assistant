@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from ... import forecast as F
-from ..data.features import FEATURES, matrix
+from ..data.features import FACTORS, FEATURES, matrix
 from .baseline import Drift, NoChange, ReturnModel
 
 Z_CLIP = 6.0
@@ -61,21 +61,23 @@ class Engines30(ReturnModel):
 class Ridge(ReturnModel):
     family = "ridge"
     STRENGTH = 1.0
+    COLUMNS: tuple[str, ...] = FEATURES
 
     def __init__(self, *a: Any, **k: Any):
         super().__init__(*a, **k)
-        self.mean = np.zeros(len(FEATURES))
-        self.scale = np.ones(len(FEATURES))
-        self.coef = np.zeros(len(FEATURES))
+        self.columns = tuple(self.COLUMNS)
+        self.mean = np.zeros(len(self.columns))
+        self.scale = np.ones(len(self.columns))
+        self.coef = np.zeros(len(self.columns))
         self.intercept = 0.0
 
     def _x(self, rows: pd.DataFrame) -> np.ndarray:
-        x = (matrix(rows) - self.mean) / self.scale
+        x = (matrix(rows, self.columns) - self.mean) / self.scale
         return np.where(np.isfinite(x), np.clip(x, -8, 8), 0.0)
 
     def fit_point(self, rows: pd.DataFrame) -> "Ridge":
         super().fit_point(rows)
-        raw = matrix(rows)
+        raw = matrix(rows, self.columns)
         with warnings.catch_warnings():                 # a column with no values yet (a sector fund before it listed)
             warnings.simplefilter("ignore", RuntimeWarning)
             self.mean = np.nan_to_num(np.nanmean(raw, axis=0))
@@ -94,7 +96,7 @@ class Ridge(ReturnModel):
 
     def params(self) -> dict[str, Any]:
         top = np.argsort(-np.abs(self.coef))[:6]
-        return {**super().params(), "intercept": self.intercept, "top_features": {FEATURES[i]: float(self.coef[i]) for i in top}}
+        return {**super().params(), "intercept": self.intercept, "top_features": {self.columns[i]: float(self.coef[i]) for i in top}}
 
 
 def usable_columns(x: np.ndarray) -> np.ndarray:
@@ -114,9 +116,11 @@ def with_usable(x: np.ndarray, usable: np.ndarray | None) -> np.ndarray:
 class GBM(ReturnModel):
     family = "gbm"
     SETTINGS = {"learning_rate": 0.05, "max_iter": 150, "max_leaf_nodes": 15, "min_samples_leaf": 200, "l2_regularization": 1.0}
+    COLUMNS: tuple[str, ...] = FEATURES
 
     def __init__(self, *a: Any, **k: Any):
         super().__init__(*a, **k)
+        self.columns = tuple(self.COLUMNS)
         self.model = None
         self.usable: np.ndarray | None = None
 
@@ -126,7 +130,7 @@ class GBM(ReturnModel):
         if len(rows) < 50:
             self.model = None
             return self
-        x = matrix(rows)
+        x = matrix(rows, self.columns)
         self.usable = usable_columns(x)
         self.model = HistGradientBoostingRegressor(loss="squared_error", early_stopping=False, random_state=self.seed,
                                                    **self.SETTINGS)
@@ -136,20 +140,36 @@ class GBM(ReturnModel):
     def point(self, rows: pd.DataFrame) -> np.ndarray:
         if self.model is None or not len(rows):
             return np.zeros(len(rows))
-        return self.model.predict(with_usable(matrix(rows), self.usable)) * self.sigma(rows)
+        return self.model.predict(with_usable(matrix(rows, self.columns), self.usable)) * self.sigma(rows)
 
     def params(self) -> dict[str, Any]:
         return {**super().params(), **self.SETTINGS}
 
 
-FAMILIES: dict[str, type[ReturnModel]] = {"no_change": NoChange, "drift": Drift, "engines30": Engines30, "ridge": Ridge, "gbm": GBM}
+class RidgeFactors(Ridge):
+    """Phase 7: the ridge model with the factor features (betas, correlation, idiosyncratic move) added."""
+    family = "ridge_f"
+    COLUMNS = FEATURES + FACTORS
+
+
+class GBMFactors(GBM):
+    """Phase 7: the boosted trees with the factor features added."""
+    family = "gbm_f"
+    COLUMNS = FEATURES + FACTORS
+
+
+FAMILIES: dict[str, type[ReturnModel]] = {"no_change": NoChange, "drift": Drift, "engines30": Engines30, "ridge": Ridge, "gbm": GBM,
+                                          "ridge_f": RidgeFactors, "gbm_f": GBMFactors}
 
 
 def make(family: str, horizon: int, interval: float = 0.80, seed: int = 7) -> ReturnModel:
+    if family.endswith("_spec"):
+        from .specialist import Specialist
+        return Specialist(horizon, interval=interval, seed=seed, base=family.removesuffix("_spec"))
     try:
         return FAMILIES[family](horizon, interval=interval, seed=seed)
     except KeyError:
         raise ValueError(f"Unknown model family {family!r}") from None
 
 
-__all__ = ["FAMILIES", "make", "Engines30", "Ridge", "GBM", "usable_columns", "with_usable"]
+__all__ = ["FAMILIES", "make", "Engines30", "Ridge", "GBM", "RidgeFactors", "GBMFactors", "usable_columns", "with_usable"]

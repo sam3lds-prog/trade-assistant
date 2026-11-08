@@ -30,3 +30,32 @@ def lab_workspace(cur: sqlite3.Cursor) -> None:
                    SELECT id, workspace, name, layout_json, state_json, is_default, created_at, updated_at FROM workspace_layouts""")
     cur.execute("DROP TABLE workspace_layouts")
     cur.execute("ALTER TABLE workspace_layouts_v4 RENAME TO workspace_layouts")
+
+
+@migration(23, "4.0 phase 6: which paper proposals the models wrote, and from which frozen forecast")
+def model_trade_links(cur: sqlite3.Cursor) -> None:
+    """Each proposal the deployed models wrote, tied to the frozen shadow forecast it came from (in replay.db) and to
+    the model version, so the paper record can be attributed: which forecasts made money, which lost, and what
+    abstaining would have done. Exits point back to their entry."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS model_trade_links (
+        proposal_id      TEXT PRIMARY KEY REFERENCES trade_proposals (id),
+        mode             TEXT NOT NULL,
+        account_kind     TEXT NOT NULL,
+        role             TEXT NOT NULL CHECK (role IN ('entry', 'exit')),
+        entry_proposal   TEXT REFERENCES trade_proposals (id),
+        created_at       TEXT NOT NULL,
+        deployment_id    TEXT NOT NULL,
+        shadow_run       TEXT NOT NULL,
+        prediction_id    INTEGER NOT NULL,
+        model_version    TEXT NOT NULL,
+        symbol           TEXT NOT NULL,
+        setup            TEXT,
+        p_target         REAL,
+        p_stop           REAL,
+        expected_return  REAL,
+        stop             REAL,
+        target           REAL,
+        time_exit        TEXT,
+        reason           TEXT NOT NULL DEFAULT ''
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_model_links_prediction ON model_trade_links (shadow_run, prediction_id, role)")

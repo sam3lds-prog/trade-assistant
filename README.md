@@ -11,7 +11,7 @@ go to Robinhood only if you switch live execution on in `.env` and choose it in 
 policy (see "Version 3" below). It is not financial advice, and passing every check does not
 make a trade safe. Buying an option always puts the whole premium at risk.
 
-## Version 4 (in progress): a model that learns from its own frozen predictions
+## Version 4: a model that learns from its own frozen predictions
 
 4.0 adds a learning engine that replays ten years of history one trading session at a time. On each session it
 forecasts every stock from what was knowable after that session's close, freezes the forecast, grades it once its
@@ -26,10 +26,11 @@ python run.py --replay run               # the development replay (Nov 2016 to O
 python run.py --replay report RUN        # what it was worth
 ```
 
-It is being delivered in three parts: the replay, the models and the trade-outcome model (part A); the held-out
-evaluation, live shadow forecasts and the **Model Lab** workspace (part B: the *Model Lab* button in the top bar);
-paper-trading integration and per-stock models (part C). Research's own saved forecasts are now graded too, once
-their horizon passes.
+It came in three parts: the replay, the models and the trade-outcome model (part A); the held-out evaluation, live
+shadow forecasts and the **Model Lab** workspace (part B: the *Model Lab* button in the top bar); and the models'
+trades on the paper desk, factor and per-stock specialist models, and news events (part C). Research's own saved
+forecasts are now graded too, once their horizon passes. The models' trades reach paper and shadow accounts only, and
+wait for your approval unless your policy is already capped_autopilot on such an account.
 
 ## Version 3: the workstation
 
@@ -1451,8 +1452,10 @@ tradeassist/
     learning/              the ledger, training, the promotion rule, the model registry
     models/                baselines, return models, the target/stop/timeout model, the take/pass gate
     live.py                the daily shadow forecasts of the deployed models (same code as the replay)
+    events.py              news read into a fixed vocabulary, kept with when it was published (MODEL_EVENTS=1)
   v4/                      4.0 in the app: the --replay command line, the /v4 routes, grading Research's forecasts,
-                           starting replays as their own process, the shadow-forecast job
+                           starting replays as their own process, the shadow-forecast job, the models' paper
+                           trades (paper.py) and the events job
   static/ws-lab.js         Model Lab, Model opportunities (Discover) and Model forecast (Research)
   features.py              version 2 feature switches (FEATURE_... in .env)
   migrations.py schema_v2.py   numbered database upgrades

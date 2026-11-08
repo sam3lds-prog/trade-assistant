@@ -17,7 +17,8 @@
   const VALIDATION = { holdout_tested: ["pass", "Tested on the held-out year"], holdout_reopened: ["warn", "Held-out year reopened"],
     replayed: ["info", "Replayed only: not yet tested on the held-out year"] };
   const FAMILY = { no_change: "No change", drift: "Drift", engines30: "3.0 engines", ridge: "Ridge", gbm: "Boosted trees",
-    base_rate: "Base rates", gbm_cls: "Boosted classifier" };
+    ridge_f: "Ridge + factors", gbm_f: "Trees + factors", ridge_spec: "Ridge + stock specialists", gbm_spec: "Trees + stock specialists",
+    ridge_f_spec: "Ridge + factors + specialists", gbm_f_spec: "Trees + factors + specialists", base_rate: "Base rates", gbm_cls: "Boosted classifier" };
   const famWord = f => FAMILY[f] || f || "n/a";
   const statusOf = r => (r.interrupted ? STATUS.interrupted : STATUS[r.status] || ["info", r.status]);
 
@@ -37,7 +38,9 @@
     const start = el("input", { type: "date", "aria-label": "First session", value: "2016-11-01" });
     const end = el("input", { type: "date", "aria-label": "Last session", value: "2025-10-31", max: "2025-10-31" });
     const retrain = el("select", { "aria-label": "Retraining" }, [["weekly", "Weekly"], ["monthly", "Monthly (faster)"], ["never", "Never"]].map(([v, t]) => el("option", { value: v }, t)));
-    const fams = ["drift", "engines30", "ridge", "gbm"].map(f => el("label", { class: "ws-check" }, el("input", { type: "checkbox", value: f, checked: true }), famWord(f)));
+    // The phase 7 families are opt-in: every extra challenger also raises the bar for all of them (alpha is divided).
+    const fams = [["drift", true], ["engines30", true], ["ridge", true], ["gbm", true], ["ridge_f", false], ["gbm_f", false], ["ridge_spec", false], ["gbm_spec", false]]
+      .map(([f, on]) => el("label", { class: "ws-check" }, el("input", { type: "checkbox", value: f, checked: on }), famWord(f)));
     const go = el("button", { class: "ws-btn primary", type: "button" }, "Start the replay");
     form.append(el("div", { class: "ws-row" }, field("From", start), field("To", end), field("Retraining", retrain)),
       el("div", { class: "ws-row ws-checks" }, el("span", { class: "small muted", text: "Challengers:" }), ...fams), el("div", { class: "ws-row" }, go),
@@ -369,6 +372,15 @@
         if (trade) kids.push(el("p", { class: "small" }, el("strong", { text: `Setup: ${trade.setup}. ` }),
           `Target first ${share(trade.p_target)}, stop first ${share(trade.p_stop)}, neither ${share(trade.p_timeout)}; expected ${pct(trade.expected_return)} net. `,
           statusTag(trade.take ? "pass" : "info", trade.take ? "The gate would take it" : "The gate passes"), ` ${trade.reason || ""}`));
+        try {
+          const ev = await w.api(`/v4/events?symbol=${enc(sym)}`);
+          if (!w.current(mine)) return;
+          if (ev.events && ev.events.length) kids.push(el("h4", { text: "News the price model does not see" }),
+            el("ul", { class: "ws-checks-list" }, ev.events.slice(0, 5).map(e => el("li", { class: "small" },
+              statusTag(e.direction === "positive" ? "pass" : e.direction === "negative" ? "fail" : "info", `${e.magnitude} ${e.kind}`),
+              ` ${e.summary} (${when(e.published_at)})`))));
+          else if (ev.on) kids.push(el("p", { class: "small muted", text: "No news events read for this stock in the last week." }));
+        } catch (e) { if (e === WS.GONE) return; }
         const rec = (d.record && d.record.daily && d.record.daily["1"]) || (d.replay_record && d.replay_record.daily && d.replay_record.daily["1"]);
         if (rec && rec.graded) kids.push(el("p", { class: "small muted", text: `On ${sym} so far: ${rec.graded} one-day forecasts graded, ${bp(rec.gain_bp)} against 'no change', band held ${share(rec.coverage)}${d.record && d.record.daily && d.record.daily["1"] ? " (live)" : " (replay)"}.` }));
         out.replaceChildren(...kids);
@@ -378,13 +390,80 @@
       helpFacts: () => [["Stock", w.ctx().symbol || "none"]] };
   } });
 
+  /* ---------- the models on the paper desk (phase 6) ---------- */
+  WS.register("lab_paper", { title: "Paper trading", category: "Model Lab", size: { w: 4, h: 9 }, minW: 3, symbolBadge: false, group: "green", create(w) {
+    const out = el("div"), msg = el("p", { class: "small", role: "status" });
+    w.body.append(msg, out);
+    async function load() {
+      try {
+        const d = await w.api("/v4/paper");
+        const kids = [];
+        if (d.deployment) {
+          const on = d.checks.find(c => c.key === "switch").ok;
+          kids.push(el("div", { class: "ws-row" }, el("button", { class: `ws-btn${on ? "" : " primary"}`, type: "button", onclick: async () => {
+            try { await api(`/v4/models/deployments/${enc(d.deployment)}/paper`, { on: !on }); load(); } catch (e) { msg.textContent = e.message; } } },
+            on ? "Stop sending setups to the paper desk" : "Send the gate's setups to the paper desk")));
+        }
+        kids.push(el("ul", { class: "ws-checks-list" }, d.checks.map(c => el("li", { class: "small" }, statusTag(c.ok ? "pass" : "warn", c.ok ? "OK" : "No"), ` ${c.text}`))));
+        kids.push(el("p", { class: "small muted", text: d.authorizes ? "Your policy is capped_autopilot on a paper or shadow account: it authorizes model trades within its daily order count."
+          : "Each model trade waits for your approval on the Trading Desk, like any other." }));
+        const r = d.record || {};
+        if (r.trades && r.trades.length) {
+          kids.push(el("p", { class: "small" }, `${r.closed} closed, ${r.open} open. Average ${pct(r.mean_return)} per closed trade` +
+            (isNum(r.fill_vs_simulation) ? `; paper fills ran ${pct(r.fill_vs_simulation)} against the simulation of the same forecasts.` : ".")),
+            table([{ label: "Stock", cell: t => t.symbol }, { label: "Expected", num: true, cell: t => pct(t.expected_return) },
+              { label: "Result", num: true, cell: t => (isNum(t.return) ? pct(t.return) : (t.entry ? "open" : "not filled")) },
+              { label: "Simulated", num: true, cell: t => (t.simulated && isNum(t.simulated.net_return) ? pct(t.simulated.net_return) : "–") },
+              { label: "Exit", cell: t => t.exit_reason || "" }], r.trades.slice(0, 12), { onRow: t => w.set({ symbol: t.symbol }) }));
+        } else kids.push(WS.empty("No model trade yet."));
+        if (r.abstained && r.abstained.passed_setups) kids.push(el("p", { class: "small muted", text: `The setups the gate passed on: ${r.abstained.passed_setups}, averaging ${pct(r.abstained.their_mean_net)} net.` }));
+        out.replaceChildren(...kids);
+      } catch (e) { if (e !== WS.GONE) out.replaceChildren(el("p", { class: "error", text: e.message })); }
+    }
+    load();
+    return { refresh: load };
+  } });
+
+  /* ---------- stock specialists (phase 7) ---------- */
+  WS.register("lab_specialists", { title: "Stock specialists", category: "Model Lab", size: { w: 6, h: 8 }, minW: 3, symbolBadge: false, group: "green", create(w) {
+    const out = el("div");
+    w.body.append(out);
+    async function load() {
+      const mine = w.ticket();
+      try {
+        const run = w.ctx().run;
+        const d = await w.api(`/v4/shadow/specialists${run ? `?run=${enc(run)}` : ""}`);
+        if (!w.current(mine)) return;
+        if (d.text) { out.replaceChildren(WS.empty(d.text)); return; }
+        const kids = [];
+        for (const [h, t] of Object.entries(d.tasks || {})) {
+          kids.push(el("h4", { text: `${h}-day forecast: ${famWord(t.family)}` }));
+          if (!t.specialist) { kids.push(el("p", { class: "small muted", text: "The champion is a general model: no stock has a correction of its own." })); continue; }
+          const rows = Object.entries(t.by_stock || {}).map(([sym, v]) => ({ sym, ...v })).sort((a, b) => Math.abs(b.t) - Math.abs(a.t));
+          const used = rows.filter(r => r.used);
+          kids.push(el("p", { class: "small" }, `${used.length} of ${rows.length} stocks have a correction; the rest fall back to the general model.`),
+            table([{ label: "Stock", cell: r => r.sym }, { label: "Cases", num: true, cell: r => String(r.n) }, { label: "Average miss (z)", num: true, cell: r => num(r.mean_z, 3) },
+              { label: "t", num: true, cell: r => num(r.t) }, { label: "Correction", num: true, cell: r => (r.used ? num(r.adjust_z, 3) : "none") }], rows.slice(0, 15), { onRow: r => w.set({ symbol: r.sym }) }));
+        }
+        const ch = Object.entries(d.challengers || {});
+        if (ch.length) kids.push(el("h4", { text: "As challengers" }), table([{ label: "Family", cell: r => famWord(r[0].split(":")[0]) }, { label: "Horizon", cell: r => `${r[0].split(":")[1]} days` },
+          { label: "Tested", num: true, cell: r => String(r[1].tested) }, { label: "Passed", num: true, cell: r => String(r[1].passed) }], ch));
+        else kids.push(el("p", { class: "small muted", text: "No specialist family competed in this run: tick them in New replay… to try them." }));
+        out.replaceChildren(...kids);
+      } catch (e) { if (e !== WS.GONE) out.replaceChildren(el("p", { class: "error", text: e.message })); }
+    }
+    load();
+    return { refresh: load, onContext: (_c, changed) => { if (changed.includes("run")) load(); } };
+  } });
+
   WS.DEFAULT_LAYOUTS.lab = [
     { type: "lab_runs", x: 0, y: 0, w: 7, h: 10, group: "green" },
     { type: "lab_shadow", x: 7, y: 0, w: 5, h: 10, group: "green" },
     { type: "lab_curve", x: 0, y: 10, w: 7, h: 9, group: "green" },
     { type: "lab_registry", x: 7, y: 10, w: 5, h: 9, group: "green" },
-    { type: "lab_errors", x: 0, y: 19, w: 6, h: 9, group: "green" },
-    { type: "lab_trades", x: 6, y: 19, w: 6, h: 9, group: "green" },
+    { type: "lab_errors", x: 0, y: 19, w: 4, h: 9, group: "green" },
+    { type: "lab_trades", x: 4, y: 19, w: 4, h: 9, group: "green" },
+    { type: "lab_paper", x: 8, y: 19, w: 4, h: 9, group: "green" },
   ];
   WS.DEFAULT_LAYOUTS.discover.push({ type: "model_ideas", x: 0, y: 18, w: 12, h: 8, group: "blue" });
 })();

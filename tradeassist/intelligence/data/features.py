@@ -25,6 +25,10 @@ FEATURE_VERSION = "features-4.0"
 FEATURES = ("ret1", "ret5", "ret20", "ret60", "move_atr", "gap_atr", "log_vol_ratio", "rsi", "dist50", "dist200",
             "rvol", "rvol_rank", "drawdown20", "atr_pct", "mkt_ret1", "mkt_ret5", "mkt_ret20", "mkt_rvol",
             "mkt_above200", "sec_rel5", "sec_rel20", "drift250")
+# Phase 7: how each stock moves with the market and its sector, and what is left over, over rolling 60 days. Read
+# only by the factor families (ridge_f, gbm_f); the families above, and their inputs' hashes, are unchanged.
+FACTOR_VERSION = "factors-4.0"
+FACTORS = ("beta60", "sec_beta60", "corr60", "idio_ret5", "idio_ret20", "idio_vol20")
 
 
 def symbol_features(bars: pd.DataFrame, market: pd.DataFrame | None, sector: pd.DataFrame | None) -> pd.DataFrame:
@@ -52,12 +56,34 @@ def symbol_features(bars: pd.DataFrame, market: pd.DataFrame | None, sector: pd.
         s = sector.set_index(pd.to_datetime(sector["date"]).dt.normalize())["close"].astype(float)
         out["sec_rel5"] = out["ret5"] - (s / s.shift(5) - 1).reindex(out.index).to_numpy()
         out["sec_rel20"] = out["ret20"] - (s / s.shift(20) - 1).reindex(out.index).to_numpy()
+        sret1 = (s / s.shift(1) - 1).reindex(out.index)
     else:
         out["sec_rel5"] = np.nan
         out["sec_rel20"] = np.nan
+        sret1 = pd.Series(np.nan, index=out.index)
+    _factors(out, sret1)
     out["mkt_above200"] = out["mkt_above200"].astype(float)
     out["above200"] = out["above200"].astype(float)
     return out
+
+
+def _factors(out: pd.DataFrame, sret1: pd.Series) -> None:
+    """Rolling 60-day betas to the market and the sector fund, the correlation with the market, and the stock's own
+    (idiosyncratic) move after the market's part is taken out. Each from that day and the 59 before it."""
+    r = pd.Series(out["ret1"].to_numpy(float), index=out.index)
+    m = pd.Series(out["mkt_ret1"].to_numpy(float), index=out.index)
+    w, lo = 60, 40
+    cov = r.rolling(w, min_periods=lo).cov(m)
+    var = m.rolling(w, min_periods=lo).var()
+    beta = cov / var.where(var > 0)
+    out["beta60"] = beta.to_numpy()
+    out["corr60"] = r.rolling(w, min_periods=lo).corr(m).to_numpy()
+    svar = sret1.rolling(w, min_periods=lo).var()
+    out["sec_beta60"] = (r.rolling(w, min_periods=lo).cov(sret1) / svar.where(svar > 0)).to_numpy()
+    resid = r - beta * m
+    out["idio_ret5"] = resid.rolling(5, min_periods=5).sum().to_numpy()
+    out["idio_ret20"] = resid.rolling(20, min_periods=15).sum().to_numpy()
+    out["idio_vol20"] = resid.rolling(20, min_periods=15).std().to_numpy()
 
 
 @dataclass
@@ -121,9 +147,9 @@ def _regimes(market: pd.DataFrame | None, sessions: pd.DatetimeIndex) -> pd.Seri
     return pd.Series(labels, index=pd.DatetimeIndex(f.index)).reindex(sessions).fillna("unknown")
 
 
-def matrix(rows: pd.DataFrame) -> np.ndarray:
-    """The model inputs of some feature rows, in FEATURES order (NaN where unknown)."""
-    return rows[list(FEATURES)].to_numpy(dtype=float)
+def matrix(rows: pd.DataFrame, columns: tuple[str, ...] = FEATURES) -> np.ndarray:
+    """The model inputs of some feature rows, in `columns` order (FEATURES by default; NaN where unknown)."""
+    return rows[list(columns)].to_numpy(dtype=float)
 
 
-__all__ = ["FEATURES", "FEATURE_VERSION", "Panel", "build_panel", "symbol_features", "matrix"]
+__all__ = ["FEATURES", "FEATURE_VERSION", "FACTORS", "FACTOR_VERSION", "Panel", "build_panel", "symbol_features", "matrix"]
