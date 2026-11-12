@@ -20,6 +20,31 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.5.0 — Forward evidence for scenarios
+
+The last of four steps of the one-click Research plan ([ONE_CLICK_RESEARCH.md](ONE_CLICK_RESEARCH.md)). **No trading
+permission is added or changed.**
+
+- **Every scenario study's predictions are frozen before its window opens** (`scenario_forecasts`, migration 27): the
+  base forecast, no change (with the base's band), the scenario provider, and, with `SCENARIO_CONTROL=1`, a
+  single-prompt control (one AI call on the same packet, its cases sized by the same rules, run beside the provider
+  and never used for the study's paths, valuation or decision). A provider's or the control's point forecast follows
+  the rule *catalyst-mean-1*: the equal-weighted mean of its cases' terminal moves, with their outer band (a convention
+  for comparing like with like, not a probability). One written after the first forecast session opens is kept as
+  *late* and never scored; a frozen one is never replaced once the window has opened.
+- **Graded on the target close** (a background job every three hours, and soon after start when one is due): the move
+  from the frozen anchor price, the error, whether it fell inside the band, and whether the median leaned the right
+  way. A conditional case is scored only when its trigger was recorded as observed with an independent source.
+- **The scorecard** (Research → Forecast record, *Forward evidence*; `GET /v3/scenarios/scorecard?horizon=5`): each
+  variant's average miss, coverage, direction, time and token use; **paired** comparisons on the same studies
+  (provider against the base, no change and the control); the observed conditional cases; how Qualified setups' stocks
+  moved. Below 30 paired observations it says so; it never gives the provider weight in the base.
+- The study's Scenarios panel lists what was frozen for it, and each forecast's outcome once graded.
+- **`python run.py --scenario-check [SYMBOL]`**: a read-only smoke check of Tradier data (quote, bars, chain, clock)
+  and the scenario provider (MiroFish's address and `/health`), with the opportunity limits in force; it never prints
+  a token.
+- New setting (`.env`): `SCENARIO_CONTROL` (default 0).
+
 ## 4.4.0 — Opportunities from scenarios
 
 The third of four steps of the one-click Research plan ([ONE_CLICK_RESEARCH.md](ONE_CLICK_RESEARCH.md)). **No trading

@@ -163,3 +163,24 @@ Set `SCENARIO_MAX_LOSS` (and `SCENARIO_BUDGET`) to what you would actually risk 
 A Qualified or Watch decision also appears in **Discover** as a scenario observation (the *Setup* filter shows them)
 and as a notice at the top of the workstation. A projected case payoff is not a historical edge: these are never
 eligible for the autopilot. Demo and sandbox results are labelled as examples.
+
+## 4. Forward evidence (4.5)
+
+```dotenv
+SCENARIO_CONTROL=1   # also run the single-prompt control (needs ANTHROPIC_API_KEY); default 0
+```
+
+For every 1- or 5-session study run with scenarios, these are frozen before the first forecast session opens:
+
+| Variant | Median | Band |
+| --- | --- | --- |
+| Base forecast | the study's base path at the target session | the study's band |
+| No change | 0% | the base's band |
+| Single-prompt control | the mean of its cases' terminal moves (catalyst-mean-1) | lowest case low to highest case high |
+| Scenario provider | the same rule on the provider's cases | the same |
+
+They are graded on the target session's close from the frozen anchor price. A conditional case is scored only when its
+trigger was recorded as observed. **Research → Forecast record → Forward evidence** shows the scorecard for the chosen
+horizon: average miss, coverage, direction, time and token use for each variant, the paired comparisons, and a
+verdict. Until there are 30 paired observations of the provider and the base it says there are too few to judge; in
+any case the provider is given no weight in the base by this release.
