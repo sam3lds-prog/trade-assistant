@@ -86,11 +86,17 @@
     const caseLabel = k => k.replace(/^./, x => x.toUpperCase());
     const fresh = v.freshness || {};
     const tags = [fresh.demo ? statusTag("warn", "Demo data") : "", fresh.delayed && !fresh.demo ? statusTag("warn", "Delayed quotes") : "",
-      fresh.stale ? statusTag("warn", "Stale quote") : ""].filter(Boolean);
+      fresh.stale ? statusTag("warn", "Stale quote") : "", fresh.session === "CLOSED" ? statusTag("info", "Market closed") : ""].filter(Boolean);
+    // 4.5.1: only execution-quality data can back a Qualified setup; research quality is modeled analysis only.
+    const QWORDS = { execution: ["pass", "Execution"], research: ["warn", "Research only"] };
+    const qcell = x => { const q = x.quality || {}; const t = QWORDS[q.tier] || ["warn", "Unknown"];
+      return el("span", { title: (q.words || []).join("; ") || "every quote it depends on is fresh, two-sided and liquid" }, statusTag(t[0], t[1])); };
     const kids = [el("h5", { text: `The study's strategies under each case (to ${v.target_date})` }),
       tags.length ? el("p", { class: "small" }, ...tags.flatMap(t => [t, " "])) : "",
       v.structures.length ? table([
-        { label: "Strategy", cell: x => el("span", {}, el("strong", { text: x.label }), x.flags.length ? el("span", { class: "muted", title: x.flags.join("; "), text: " ⚑" }) : "") },
+        { label: "Strategy", cell: x => el("span", {}, el("strong", { text: x.label }), x.flags.length ? el("span", { class: "muted", title: x.flags.join("; "), text: " ⚑" }) : "",
+          x.eval_session && x.eval_date !== v.target_date ? el("div", { class: "small muted", text: `valued at ${x.eval_date} (session ${x.eval_session})` }) : "") },
+        { label: "Data", cell: qcell },
         ...keys.map(k => ({ label: caseLabel(k), num: true, cell: x => el("span", { class: x.by_case[k].expected_pnl >= 0 ? "pos-text" : "neg-text", text: money(x.by_case[k].expected_pnl, 0) }) })),
         { label: "Worst case", num: true, cell: x => money(x.worst_case, 0) },
         { label: "Most it can lose", num: true, cell: x => (x.unlimited_loss ? "no limit" : isNum(x.max_loss) ? money(x.max_loss, 0) : "") },
@@ -102,7 +108,7 @@
         { label: "Most it can lose", num: true, cell: m => money(m.max_loss, 0) },
         { label: `Within ${money(v.limits.loss_limit, 0)}`, cell: m => (m.within_loss_limit ? "yes" : "no") },
         { label: "Capital", num: true, cell: m => money(m.capital, 0) }], v.mixes)) : "",
-      ...(v.failed || []).map(f => el("p", { class: "small" }, statusTag("warn", f.label || f.key), ` not valued: ${f.error}`)),
+      ...(v.failed || []).map(f => el("p", { class: "small" }, statusTag("warn", f.label || f.key), f.code === "cannot_value_reliably" ? " cannot be valued reliably: " : " not valued: ", f.error)),
       ...(v.problems || []).map(x => el("p", { class: "small" }, statusTag("warn", "Snapshot"), ` ${x}`)),
       el("p", { class: "small muted", text: `${v.note} Quotes as of ${new Date(v.snapshot_at).toLocaleString()}; ${v.iv_assumption}.` })];
     return el("div", { class: "ws-valuation", "data-status": v.status }, ...kids);
@@ -161,18 +167,24 @@
       const title = el("input", { type: "text", "aria-label": "Trigger source", placeholder: "What shows it happened, e.g. the company's release", maxlength: "200" });
       const when = el("input", { type: "datetime-local", "aria-label": "Trigger published" });
       const url = el("input", { type: "url", "aria-label": "Trigger address", placeholder: "https://…", maxlength: "500" });
-      const go = el("button", { class: "ws-btn", type: "button" }, "Record it");
+      const happened = el("input", { type: "datetime-local", "aria-label": "Trigger event time (optional)" });
+      const go = el("button", { class: "ws-btn", type: "button" }, "Submit it for checking");
       go.addEventListener("click", async () => {
-        go.disabled = true; note.replaceChildren(loading("Valuing the strategies again from a fresh quote…"));
+        go.disabled = true; note.replaceChildren(loading(url.value.trim() ? "Recording it; its source is checked in the background…" : "Recording it…"));
         try {
-          const r = await w.api(`/v3/studies/${enc(st.id)}/decision/trigger`, { case: s.case, title: title.value.trim(), published_at: when.value, url: url.value.trim() || null });
+          const r = await w.api(`/v3/studies/${enc(st.id)}/decision/trigger`, { case: s.case, title: title.value.trim(), published_at: when.value,
+            url: url.value.trim() || null, event_at: happened.value || null });
           note.replaceChildren(); repaint(r.pipeline);
         } catch (e) { if (e !== WS.GONE) note.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); }
         go.disabled = false;
       });
-      kids.push(el("details", { class: "ws-more ws-trigger" }, el("summary", { text: `The trigger happened? Record it with its source` }),
-        el("p", { class: "small muted", text: `${s.trigger} A source published after the study (${new Date(st.created_at).toLocaleString()}) that shows it; the setup is then checked again on a fresh quote.` }),
-        el("div", { class: "ws-row" }, field("Source", title), field("Published", when), field("Address", url), go)));
+      const te = s.trigger_evidence;
+      const TE_TONE = { verified: "pass", verification_pending: "info", unverified: "warn", rejected: "fail", expired: "info" };
+      if (te) kids.push(el("p", { class: "small ws-trigger-status", "data-trigger-status": te.status }, statusTag(TE_TONE[te.status] || "warn", `Trigger ${te.words || te.status}`),
+        ` ${te.title || ""}${te.reason ? `: ${te.reason}` : ""}`));
+      kids.push(el("details", { class: "ws-more ws-trigger" }, el("summary", { text: te ? "Submit another source" : "The trigger happened? Submit its source for checking" }),
+        el("p", { class: "small muted", text: `${s.trigger} Give a link to a source published after the study (${new Date(st.created_at).toLocaleString()}). The app reads it: it must give its own publication time inside the window, name ${st.symbol} and support what you describe. Only a verified source can make this a Qualified setup; without a link it stays unverified.` }),
+        el("div", { class: "ws-row" }, field("What it says", title), field("Published", when), field("Link", url), field("Event time (optional)", happened), go)));
     }
     if (row.children.length) kids.push(row);
     kids.push(note, el("p", { class: "small muted", text: d.note }));
@@ -215,10 +227,10 @@
       try { const r = await w.api(`/v3/studies/${enc(st.id)}/pipeline`); if (alive() && r.pipeline) paint(r.pipeline); }
       catch (e) { if (e !== WS.GONE && alive()) { note.textContent = e.message; timer = setTimeout(load, 5000); } }
     }
-    async function act(path, btn, words) {
+    async function act(path, btn, words, body) {
       if (busy) return;
       busy = true; btn.disabled = true; note.replaceChildren(loading(words));
-      try { const r = await w.api(`/v3/studies/${enc(st.id)}/pipeline/${path}`, {}); note.replaceChildren(); if (alive()) paint(r.pipeline); }
+      try { const r = await w.api(`/v3/studies/${enc(st.id)}/pipeline/${path}`, body || {}); note.replaceChildren(); if (alive()) paint(r.pipeline); }
       catch (e) { if (e !== WS.GONE) note.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); btn.disabled = false; }
       busy = false;
     }
@@ -241,11 +253,20 @@
         const ids = Object.entries(r.remote || {}).map(([k, x]) => `${k.replace(/_id$/, "")} ${x}`).join(", ");
         kids.push(el("p", { class: "small muted", text: `${r.status === "queued" ? "Waiting to start" : `${r.stage || "starting"}: ${r.detail || ""}`}${isNum(r.elapsed_seconds) ? ` · ${Math.round(r.elapsed_seconds)} s` : ""}${ids ? ` · ${ids}` : ""}. The quantitative study above is complete; this continues if you refresh or switch stocks.` }));
       }
+      if (r && r.stopped_early) kids.push(el("p", { class: "small" }, statusTag("warn", "Stopped early"), ` The simulation stopped on the server after ${r.rounds || "?"} of ${r.total_rounds || "?"} rounds: its cases come from an unfinished run.`));
       if (p.error) kids.push(el("p", { class: "small", role: "alert" }, statusTag(p.status === "canceled" ? "info" : p.status === "needs_attention" ? "warn" : "fail",
         p.status === "canceled" ? "Canceled" : p.status === "needs_attention" ? "Needs attention" : "Did not finish"), ` ${p.error}`));
       const row = el("div", { class: "ws-row" });
       if (p.can_cancel) { const b = el("button", { class: "ws-btn", type: "button" }, "Cancel"); b.addEventListener("click", () => act("cancel", b, "Canceling…")); row.append(b); }
-      if (p.can_retry) { const b = el("button", { class: "ws-btn primary", type: "button" }, "Retry"); b.addEventListener("click", () => act("retry", b, "Starting again…")); row.append(b); }
+      if (p.can_retry && p.retry_needs_confirmation) {
+        // 4.5.1: the last paid request's outcome is unknown; a new run may pay twice, so it is a separate, explicit choice.
+        const b = el("button", { class: "ws-btn", type: "button", title: "The last paid request may have run on the server: check it first" }, "Start a new run anyway");
+        b.addEventListener("click", () => act("retry", b, "Starting a new run…", { confirm_new_run: true })); row.append(b);
+      } else if (p.can_retry) {
+        const resume = r && r.report_received && !(p.history || []).length && p.status !== "canceled";
+        const b = el("button", { class: "ws-btn primary", type: "button", title: resume ? "Finish the saved report again: no new run" : "" }, resume ? "Retry (no new run)" : "Retry");
+        b.addEventListener("click", () => act("retry", b, "Starting again…")); row.append(b);
+      }
       if (p.version_id) { const b = el("button", { class: "ws-btn", type: "button" }, "Draw on the linked chart"); b.addEventListener("click", () => drawAuto(p.version_id)); row.append(b); }
       if (p.status === "complete" && p.version_id) { const b = el("button", { class: "ws-btn", type: "button", title: "One fresh quote snapshot, the same strategies" }, "Value again"); b.addEventListener("click", () => act("revalue", b, "Valuing the strategies again…")); row.append(b); }
       if (row.children.length) kids.push(row);

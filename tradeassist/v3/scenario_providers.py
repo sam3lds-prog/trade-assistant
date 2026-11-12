@@ -264,9 +264,15 @@ class MiroFish:
         if rs == "failed":
             raise Failed(f"the simulation failed: {st.get('error') or 'no reason given'}")
         if rs in ("completed", "stopped"):
-            return Step(self._go(state, "report", rounds=st.get("current_round")), next_in=0.0, stage="simulation",
-                        detail=f"simulation finished after {st.get('current_round') or '?'} rounds")
-        return self._poll(state, "simulation", f"round {st.get('current_round') or 0} of {st.get('total_rounds') or '?'}")
+            # 4.5.1: a simulation stopped on the server before its last round is not a finished one, and says so.
+            cur, total = st.get("current_round"), st.get("total_rounds")
+            early = rs == "stopped" or (isinstance(cur, int) and isinstance(total, int) and total > 0 and cur < total)
+            words = (f"simulation stopped early, after {cur or '?'} of {total or '?'} rounds" if early
+                     else f"simulation finished after {cur or '?'} rounds")
+            return Step(self._go(state, "report", rounds=cur, total_rounds=total, stopped_early=early), next_in=0.0, stage="simulation",
+                        detail=words)
+        return self._poll({**state, "total_rounds": st.get("total_rounds"), "rounds": st.get("current_round")}, "simulation",
+                          f"round {st.get('current_round') or 0} of {st.get('total_rounds') or '?'}")
 
     def _report(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
         try:

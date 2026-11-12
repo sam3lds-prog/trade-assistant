@@ -200,13 +200,18 @@ class Forward:
         return {"graded": graded, "closed_without_data": closed, "missing": missing[:20]}
 
     def _case_scores(self, r: Any, realized: float) -> list[dict[str, Any]]:
-        """A conditional case, scored only when its trigger was observed with an independent source."""
-        seen = {x["case_key"]: x for x in self.svc.db.query("SELECT case_key, observed_at, source_json FROM scenario_triggers WHERE study_id = ?",
-                                                             (r["study_id"],))}
+        """A conditional case, scored only when its trigger was **verified** from its source (4.5.1) and recorded before
+        the target session closed: one recorded once the outcome was known cannot improve the forecast's score."""
+        seen = {x["case_key"]: x for x in self.svc.db.query("SELECT * FROM scenario_triggers WHERE study_id = ?", (r["study_id"],))}
+        target_close = datetime.combine(date.fromisoformat(r["target_date"]), datetime.min.time().replace(hour=16), tzinfo=NY)
         out = []
         for c in json.loads(r["cases_json"] or "[]"):
             t = seen.get(c["key"])
-            if t is None:
+            if t is None or ("status" in t.keys() and t["status"] != "verified") or "status" not in t.keys():
+                continue
+            recorded = datetime.fromisoformat(str(t["recorded_at"]).replace("Z", "+00:00"))
+            recorded = recorded if recorded.tzinfo else recorded.replace(tzinfo=timezone.utc)
+            if recorded >= target_close:
                 continue
             out.append({"key": c["key"], "return_pct": c["return_pct"], "abs_error": abs(realized - c["return_pct"]),
                         "covered": int(c["low_pct"] <= realized <= c["high_pct"]), "observed_at": t["observed_at"],

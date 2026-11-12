@@ -146,7 +146,7 @@ class Database:
 
     def _backup_if_migrations_pending(self) -> Path | None:
         """Copy an existing database file before migrations change it (backup.py)."""
-        from . import schema_v2, schema_v3, schema_v4  # noqa: F401 - registers the migrations
+        from . import schema_v2, schema_v3, schema_v4, schema_v45  # noqa: F401 - registers the migrations
         from .backup import backup_connection, backup_path, prune
         from .migrations import MIGRATIONS
         has_table = self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"

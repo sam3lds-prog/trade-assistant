@@ -26,7 +26,7 @@ from ..jobs import Jobs, Schedule, Worker
 log = logging.getLogger(__name__)
 
 CALIBRATION_KINDS = ("research.calibrate", "research.warm")
-SCENARIO_KINDS = ("scenario.start", "scenario.step", "scenario.finish", "scenario.recover")
+SCENARIO_KINDS = ("scenario.start", "scenario.step", "scenario.finish", "scenario.recover", "scenario.grade", "scenario.verify_trigger")
 
 
 class ResearchWorkers:

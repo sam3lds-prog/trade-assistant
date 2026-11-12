@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import Field
@@ -43,17 +43,23 @@ from ..service import RequestError
 
 log = logging.getLogger(__name__)
 
-EVALUATOR_VERSION = "opportunity-4.4"
+EVALUATOR_VERSION = "opportunity-4.5.1"
 VALIDATED_CASES = 30
 STATUS_LABELS = {"qualified": "Qualified setup", "watch": "Watch for trigger", "no_setup": "No setup"}
 REASONS = {
     "valuation_failed": "the strategies could not be valued",
     "expired_session": "the study's sessions have passed",
-    "stale_quote": "the stock quote is older than the policy's limit",
+    "stale_quote": "a quote is older than the policy's limit",
     "delayed_quotes": "the quotes are delayed (sandbox): not fresh enough to qualify",
-    "expired_trigger": "the trigger's session has passed without it being observed",
+    "quote_freshness_unknown": "a quote's time is unknown: it cannot be called fresh",
+    "market_closed": "the market is closed: the quotes are the last session's, not executable now",
+    "crossed_quote": "a quote is crossed (the ask is below the bid)",
+    "one_sided_quote": "the stock quote has no bid or no ask on the side the setup trades",
+    "study_midpoint_used": "an option leg had no midpoint now: only the study's older midpoint was available",
+    "expired_trigger": "the trigger's session has passed without it being verified",
     "no_two_sided_quote": "an option leg has no two-sided quote",
     "wide_spread": "an option leg's spread is wider than OPPORTUNITY_MAX_SPREAD_PCT of its midpoint",
+    "low_open_interest": "an option leg's open interest is below OPPORTUNITY_MIN_OPEN_INTEREST",
     "cost_eroded": "spreads and fees consume the expected payoff",
     "payoff_below_minimum": "the modeled net upside is below OPPORTUNITY_MIN_NET_PCT of the capital",
     "no_base_support": "no validated directional edge or setup history behind the base case",
@@ -66,7 +72,13 @@ REASONS = {
 }
 PRIORITY = list(REASONS)                       # the order above is the order of materiality
 GLOBAL = {"valuation_failed", "expired_session"}
-QUALIFY_ONLY = {"stale_quote", "delayed_quotes"}       # a Watch is rechecked when its trigger happens
+# 4.5.1: execution-quality data is needed to qualify; a Watch is rechecked on a fresh snapshot when its trigger is verified.
+QUALIFY_ONLY = {"stale_quote", "delayed_quotes", "quote_freshness_unknown", "market_closed", "crossed_quote", "one_sided_quote",
+                "study_midpoint_used"}
+LIQUIDITY = {"no_two_sided_quote", "wide_spread", "low_open_interest"}     # a setup's own liquidity: checked for a Watch too
+TRIGGER_WORDS = {"unverified": "reported, not verified", "verification_pending": "reported; its source is being checked",
+                 "verified": "verified from its source", "rejected": "reported, but its source did not support it",
+                 "expired": "its window passed before it was verified"}
 
 
 def _f(x: Any) -> float | None:
@@ -122,7 +134,28 @@ def _quote_checks(su: dict[str, Any], max_spread: float) -> list[str]:
             sp = _f(lg.get("spread_pct"))
             if sp is not None and sp > max_spread:
                 fails.append("wide_spread")
+            if "low_open_interest" in ((lg.get("quality") or {}).get("reasons") or []):
+                fails.append("low_open_interest")
     return list(dict.fromkeys(fails))
+
+
+def _data_quality(su: dict[str, Any]) -> list[str]:
+    """Why a setup's data is not execution quality (4.5.1), from its structures' tiers. A valuation made before
+    4.5.1 carries no tier: its quotes' freshness is unknown, so it cannot qualify."""
+    codes: list[str] = []
+    for s, _ in su["parts"]:
+        q = s.get("quality")
+        if not isinstance(q, dict):
+            codes.append("quote_freshness_unknown")
+            continue
+        codes += [r for r in q.get("reasons") or [] if r in QUALIFY_ONLY]
+    return list(dict.fromkeys(codes))
+
+
+def trigger_verified(seen: dict[str, Any] | None) -> bool:
+    """Only a trigger verified from its source turns a Watch into a Qualified setup (4.5.1). A record without a
+    status was made before verification existed: it is unverified."""
+    return bool(seen) and seen.get("status") == "verified"
 
 
 def _support(direction: str, readiness: dict[str, Any] | None, base_pct: float | None, analogs: dict[str, Any] | None) -> tuple[bool, str]:
@@ -173,6 +206,7 @@ def evaluate(*, symbol: str, version: dict[str, Any], valuation: dict[str, Any],
     for su in setups_from(valuation, lim):
         common: list[str] = []
         common += _quote_checks(su, max_spread)
+        qualify_fails = list(dict.fromkeys(quote_fails + _data_quality(su)))
         if any(routes.get(s["key"]) == "research" for s, _ in su["parts"]):
             common.append("not_eligible")
         if su["unlimited_loss"]:
@@ -191,7 +225,7 @@ def evaluate(*, symbol: str, version: dict[str, Any], valuation: dict[str, Any],
         # Without a trigger: the Central case (the base path), inside the loss limit in every case.
         if "central" in cases and su["direction"] in ("LONG", "SHORT"):
             net = su["by_case"]["central"]["net"]
-            fails = list(globals_) + quote_fails + common + payoff(net)
+            fails = list(globals_) + qualify_fails + common + payoff(net)
             ok, why = _support(su["direction"], readiness, base_pct, analogs)
             if not ok:
                 fails.append("no_base_support")
@@ -212,12 +246,14 @@ def evaluate(*, symbol: str, version: dict[str, Any], valuation: dict[str, Any],
             if su["by_case"][k]["worst_tenth"] > lim["loss_limit"] + 1e-9:
                 fails.append("scenario_downside_over_limit")
             seen = observed.get(k)
-            if seen:
-                fails += quote_fails
+            verified = trigger_verified(seen)
+            if verified:
+                fails += qualify_fails
             elif trigger_day(k) < today:
                 fails.append("expired_trigger")
-            evaluated.append({"setup": su, "case": k, "mode": "triggered" if seen else "watch", "net": net, "fails": list(dict.fromkeys(fails)),
-                              "direction": want, "observed": seen})
+            evaluated.append({"setup": su, "case": k, "mode": "triggered" if verified else "watch", "net": net,
+                              "fails": list(dict.fromkeys(fails)), "direction": want, "observed": seen if verified else None,
+                              "reported": seen if (seen and not verified) else None})
 
     qualified = sorted([e for e in evaluated if not e["fails"] and e["mode"] in ("base", "triggered")],
                        key=lambda e: (-e["setup"]["worst_case"], e["setup"]["capital"]))
@@ -259,13 +295,22 @@ def evaluate(*, symbol: str, version: dict[str, Any], valuation: dict[str, Any],
                 "worst_case": round(su["worst_case"], 2), "worst_tenth": round(su["by_case"][k]["worst_tenth"], 2) if k in su["by_case"] else None,
                 "by_case": {kk: {"net": round(v["net"], 2), "worst_tenth": round(v["worst_tenth"], 2)} for kk, v in su["by_case"].items()},
                 "structures": [s["key"] for s, _ in su["parts"]], "fails": [{"code": f, "text": REASONS[f]} for f in e["fails"]],
-                "support": e.get("support")}
+                "support": e.get("support"),
+                "data_quality": "execution" if not _data_quality(su) else "research",
+                "trigger_evidence": ({"status": (e.get("observed") or e.get("reported") or {}).get("status") or "unverified",
+                                      "words": TRIGGER_WORDS.get((e.get("observed") or e.get("reported") or {}).get("status") or "unverified"),
+                                      "title": (e.get("observed") or e.get("reported") or {}).get("title"),
+                                      "reason": (e.get("observed") or e.get("reported") or {}).get("reason")}
+                                     if (e.get("observed") or e.get("reported")) else None)}
 
     setup = describe(shown)
     answers = None
     if setup and status != "no_setup":
         what = f"{setup['label']} on {symbol}, {'long' if setup['direction'] == 'LONG' else 'short' if setup['direction'] == 'SHORT' else setup['direction'].lower()}"
-        when_ = (f"Only if {setup['trigger']}, by {setup['expires_on']}." if status == "watch" else
+        te = setup.get("trigger_evidence") or {}
+        reported = (f" A report of it is recorded ({te.get('title')}): {te.get('words')}; it qualifies only once verified."
+                    if status == "watch" and te else "")
+        when_ = (f"Only if {setup['trigger']}, by {setup['expires_on']}.{reported}" if status == "watch" else
                  f"Now: the {setup['case_label']} trigger was observed ({(setup['observed'] or {}).get('title')}); until {setup['expires_on']}."
                  if setup["mode"] == "triggered" else f"Now, until the last session ({setup['expires_on']}).")
         risk = "no limit" if setup["unlimited_loss"] else f"{setup['max_loss']:,.0f}"
@@ -307,7 +352,12 @@ class Opportunities:
                 "max_spread_pct": s.opportunity_max_spread_pct}
 
     def observed(self, study_id: str) -> dict[str, dict[str, Any]]:
-        return {r["case_key"]: {**json.loads(r["source_json"]), "observed_at": r["observed_at"], "recorded_at": r["recorded_at"]}
+        """Each case's reported trigger with its verification status (4.5.1): only a verified one qualifies."""
+        tr = getattr(self.svc, "triggers", None)
+        if tr is not None:
+            return tr.for_study(study_id)
+        return {r["case_key"]: {**json.loads(r["source_json"]), "observed_at": r["observed_at"], "recorded_at": r["recorded_at"],
+                                "status": r["status"] if "status" in r.keys() else "unverified"}
                 for r in self.svc.db.query("SELECT * FROM scenario_triggers WHERE study_id = ?", (study_id,))}
 
     def evaluate_study(self, study_id: str, version: dict[str, Any], valuation: dict[str, Any], today: date | None = None) -> dict[str, Any]:
@@ -330,6 +380,13 @@ class Opportunities:
 
     # --- after the findings ------------------------------------------------------------------------------------------
     def on_findings(self, study_id: str, version: dict[str, Any], valuation: dict[str, Any]) -> dict[str, Any]:
+        # 4.5.1: a finalization resumed after a crash reaches here again with the same valuation: its decision is
+        # already recorded (and published and notified), so it is returned as it is, not recorded twice.
+        if valuation.get("id"):
+            r = self.svc.db.one("SELECT id FROM scenario_decisions WHERE study_id = ? AND valuation_id = ? ORDER BY created_at DESC LIMIT 1",
+                                (study_id, valuation["id"]))
+            if r is not None:
+                return self.latest(study_id) or {}
         d = self.evaluate_study(study_id, version, valuation)
         return self.record(study_id, version, valuation, d)
 
@@ -434,34 +491,11 @@ class Opportunities:
             return None
         return {**json.loads(r["decision_json"]), "notice_state": r["notice_state"], "opportunity_id": r["opportunity_id"]}
 
-    def trigger(self, study_id: str, case_key: str, title: str, published_at: str, url: str | None = None, note: str = "") -> dict[str, Any]:
-        """Record that a case's trigger happened, with an independent source published after the study's cutoff; then
-        value the same strategies again from a fresh snapshot and decide again."""
-        if case_key not in ("bullish", "bearish"):
-            raise RequestError("Only a Bullish or Bearish case's trigger can be recorded.")
-        r = self.svc.db.one("SELECT created_at, pipeline_json FROM studies WHERE id = ?", (study_id,))
-        if r is None or not r["pipeline_json"]:
-            raise RequestError("This study has no scenarios.")
-        p = json.loads(r["pipeline_json"])
-        if not p.get("version_id"):
-            raise RequestError("This study's scenarios have no version yet.")
-        try:
-            pub = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise RequestError(f"published_at must be a date and time, got {published_at!r}") from exc
-        pub = pub if pub.tzinfo else pub.replace(tzinfo=NY)
-        cutoff = datetime.fromisoformat(str(r["created_at"]).replace("Z", "+00:00"))
-        cutoff = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)
-        if pub <= cutoff:
-            raise RequestError("The source was published before the study's evidence cutoff: it cannot show the trigger happened afterwards.")
-        if pub > datetime.now(timezone.utc):
-            raise RequestError("The source's publication time is in the future.")
-        src = {"title": title.strip()[:200], "url": (url or "").strip()[:500] or None, "published_at": pub.astimezone(timezone.utc).isoformat(),
-               "note": note.strip()[:300]}
-        with self.svc.db.tx() as cur:
-            cur.execute("""INSERT INTO scenario_triggers (study_id, case_key, observed_at, recorded_at, source_json) VALUES (?, ?, ?, ?, ?)
-                           ON CONFLICT(study_id, case_key) DO UPDATE SET observed_at = excluded.observed_at, recorded_at = excluded.recorded_at,
-                           source_json = excluded.source_json""", (study_id, case_key, src["published_at"], C.utc_now(), json.dumps(src)))
+    def trigger(self, study_id: str, case_key: str, title: str, published_at: str, url: str | None = None, note: str = "",
+                event_at: str | None = None) -> dict[str, Any]:
+        """Record a report that a case's trigger happened, as evidence for review (4.5.1, v3/triggers.py). The setup is
+        decided again now (it stays a Watch: a report alone qualifies nothing) and again once the source is checked."""
+        self.svc.triggers.submit(study_id, case_key, title, published_at, url, note, event_at)
         self.svc.pipeline.revalue(study_id)                     # a fresh snapshot, then the decision again (via the hook)
         return self.latest(study_id) or {}
 
@@ -491,6 +525,7 @@ class TriggerIn(C.Strict):
     published_at: str = Field(min_length=10, max_length=40)
     url: str | None = Field(default=None, max_length=500)
     note: str = Field(default="", max_length=300)
+    event_at: str | None = Field(default=None, max_length=40)
 
 
 def install(svc: Any) -> None:
@@ -505,8 +540,12 @@ def install(svc: Any) -> None:
 
         @router.post("/studies/{study_id}/decision/trigger")
         def trigger(study_id: str, body: TriggerIn) -> dict[str, Any]:
-            return {"decision": op.trigger(study_id, body.case, body.title, body.published_at, body.url, body.note),
-                    "pipeline": svc.pipeline.view(study_id)}
+            return {"decision": op.trigger(study_id, body.case, body.title, body.published_at, body.url, body.note, body.event_at),
+                    "pipeline": svc.pipeline.view(study_id), "triggers": svc.triggers.for_study(study_id)}
+
+        @router.get("/studies/{study_id}/triggers")
+        def triggers(study_id: str) -> dict[str, Any]:
+            return {"triggers": svc.triggers.for_study(study_id), "history": svc.triggers.history(study_id)}
 
         @router.get("/scenarios/notices")
         def notices() -> dict[str, Any]:

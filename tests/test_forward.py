@@ -117,8 +117,12 @@ def test_grading_scores_the_variants_and_a_conditional_case_only_when_its_trigge
     anchor, target = rows["base"]["anchor_price"], rows["base"]["target_date"]
     realized = 3.0
     with svc.db.tx() as cur:
-        cur.execute("INSERT INTO scenario_triggers (study_id, case_key, observed_at, recorded_at, source_json) VALUES (?, 'bullish', ?, ?, ?)",
+        # 4.5.1: only a verified trigger, recorded before the target session closed, scores its case. The bearish one was
+        # recorded after the outcome was known, so it is not scored even though it was verified.
+        cur.execute("INSERT INTO scenario_triggers (study_id, case_key, observed_at, recorded_at, source_json, status) VALUES (?, 'bullish', ?, ?, ?, 'verified')",
                     (sid, "2026-10-23T12:00:00+00:00", "2026-10-23T12:05:00+00:00", json.dumps({"title": "Company release"})))
+        cur.execute("INSERT INTO scenario_triggers (study_id, case_key, observed_at, recorded_at, source_json, status) VALUES (?, 'bearish', ?, ?, ?, 'verified')",
+                    (sid, "2026-10-23T12:00:00+00:00", f"{target}T23:00:00+00:00", json.dumps({"title": "Hindsight"})))
         cur.execute("UPDATE scenario_forecasts SET status = 'late' WHERE study_id = ? AND variant = 'control'", (sid,))
     bars = pd.DataFrame({"date": pd.to_datetime([rows["base"]["anchor_date"], target]), "open": [anchor, anchor], "high": [anchor, anchor * 1.05],
                          "low": [anchor, anchor], "close": [anchor, anchor * (1 + realized / 100)], "volume": [1e6, 1e6]})

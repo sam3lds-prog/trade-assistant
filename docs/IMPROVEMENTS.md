@@ -1677,3 +1677,46 @@ first checked against the code; all were confirmed.
   run again (the Forecast record widget says so). Studies, which a trade can come from, are the ones made durable.
 - **Portfolio.** Holdings and Exposure are native; recording fills, stress tests and the trade history remain the
   classic screens until each is replaced and tested.
+
+
+## 4.6 plan: gap analysis on 4.5.0
+
+The 4.6 plan (*Trade Assistant 4.6 — MiroFish production hardening, simulation optimization and trading intelligence*)
+was reviewed against `main` at `333b81ac178d029714539f02d5fcdf5e36b78515` (4.5.0), which was still `HEAD` when the work
+started. The suite on that commit: **1512 passed, 2 skipped** (Python 3.13, 16 minutes). Each suspected defect was
+reproduced in the code before it was changed:
+
+| Plan item | Finding on `333b81a` | Status |
+| --- | --- | --- |
+| 3.1 expiration-aligned valuation | `valuation.value()` built every case grid from `return_pct[-1]`/`log_sd[-1]` and only moved the option's evaluation date to the first expiration | **Confirmed** (fixed in 4.5.1) |
+| 3.1 earnings collapse timing | the collapse was applied to every option when a release was inside the horizon, also to options valued before it | **Confirmed** (fixed) |
+| 3.1 extrapolation | `np.interp` clamped silently when a case's grid reached past the simulator's price range | **Confirmed** (fixed) |
+| 3.2 trigger verification | `Opportunities.trigger()` checked only the typed publication time; the evaluator counted any recorded trigger as observed | **Confirmed** (fixed) |
+| 3.3 idempotent finalization | `finish()` marked the run complete before `create_version()`; a failure or crash after that left a complete run with no version that `finish()` then skipped, and Retry paid for a new run | **Confirmed** (fixed) |
+| 3.4 freshness | `freshness.stale` was true only when an age was known and over the limit: a quote with no time counted as fresh; option legs' quote times were not judged | **Confirmed** (fixed) |
+| 3.5 cancellation | Cancel stopped the provider run but not the control run; a finishing pass did not check for a cancel before writing | **Confirmed** (fixed) |
+| 4.2 layered readiness | `MiroFish.ready()` checks `/health` only | Confirmed (4.5.2) |
+| 4.3–4.8 circuit breaker, profiles, cost estimate, approval, usage ledger | none existed | Gap (4.5.2) |
+| 4.9 duplicate paid work | ids were saved after each step, but a crash *during* a write (sent, answer not saved) re-sent it on resume | **Confirmed** (4.5.2) |
+| 4.4 agent cap | the pinned MiroFish has no agent-count parameter: agents are the graph's filtered entities (`/api/simulation/prepare`), and it reports no token usage | Upstream fact (4.5.2 checks the count before preparing) |
+| 5.x forward validation | MAE, RMSE, coverage, direction and a 30-pair rule existed; no bias, width, skill, breakdowns, dependence-aware intervals, strategy outcomes or profile comparison | Gap (4.5.3) |
+
+Already present and kept: Tradier readiness, the 1- and 5-session calibrations, frozen evidence packets, the staged
+MiroFish adapter with saved ids and reconciliation of timed-out writes, the deterministic sizing rules, the valuation,
+the opportunity checks, the forward scorecard and the single-prompt control.
+
+## 4.5.1: trading correctness, safety and recovery
+
+| Change | Where | Tests |
+| --- | --- | --- |
+| A structure is valued against the case's saved price and dispersion at the session it is held to (`session_index`, `case_grid`); legs of different expirations close at the first; a leg expiring before the first session, or a grid past the model's range, *cannot be valued reliably* | `v3/valuation.py` | `tests/test_v451.py` (Scenario F and the acceptance list in plan 3.1) |
+| The volatility collapse only at or after the release's session | `v3/valuation.py` | `test_a_release_collapses_volatility_only_from_its_own_session` |
+| Data quality tiers from each quote's own time (`freshness.observe` against the snapshot's clock), sides, spread, open interest; unknown age is never fresh | `v3/valuation.py`, `v3/opportunity.py` | the parametrized quote tests; `tests/test_opportunity.py` |
+| Triggers as evidence: statuses, deterministic source verification, safe fetching, separate timestamps, history; only verified ones qualify or score | `v3/triggers.py`, migration 28, `v3/opportunity.py`, `v3/forward.py` | trigger tests in `tests/test_v451.py`; `tests/test_opportunity.py`, `tests/test_forward.py` |
+| Resumable, idempotent finalization; one automatic version per run (unique index); a decision per valuation; retry without a new run; confirmation for an ambiguous paid write | `v3/pipeline.py`, migration 28 | a crash at each of six points, and a whole-app restart |
+| Cancel stops the control and queued steps; late results not applied; attempt history | `v3/pipeline.py` | `test_cancel_stops_the_control_too_and_nothing_late_is_applied` |
+
+Changed expectations in existing tests, each because 4.5.0 behaved as the plan says it must not: a recorded trigger
+alone no longer qualifies a setup (`tests/test_opportunity.py` now verifies it from a source, on the next session's
+market-open quotes), and a trigger without a verified status no longer scores its case (`tests/test_forward.py`).
+

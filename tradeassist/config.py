@@ -182,6 +182,7 @@ class Settings:
     # 4.4: what a setup must clear to be shown as an opportunity
     opportunity_min_net_pct: float = 1.0    # modeled net upside after costs, percent of the capital it ties up
     opportunity_max_spread_pct: float = 10.0  # an option leg's quoted spread, percent of its midpoint
+    opportunity_min_open_interest: float = 10.0  # 4.5.1: an option leg with a known open interest below this is research only
     scenario_notify: bool = False           # send qualified setups through the notification channels (in-app always)
 
     # 3.0 Trading Desk (phase 5): where its notifications go, who runs its jobs, and phone approvals.
@@ -308,6 +309,7 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         scenario_max_loss=max(_float("SCENARIO_MAX_LOSS", 0.0), 0.0),
         opportunity_min_net_pct=max(_float("OPPORTUNITY_MIN_NET_PCT", 1.0), 0.0),
         opportunity_max_spread_pct=max(_float("OPPORTUNITY_MAX_SPREAD_PCT", 10.0), 0.1),
+        opportunity_min_open_interest=max(_float("OPPORTUNITY_MIN_OPEN_INTEREST", 10.0), 0.0),
         scenario_notify=_flag("SCENARIO_NOTIFY"),
         robinhood_execution_account=_clean_token(os.getenv("ROBINHOOD_EXECUTION_ACCOUNT")),
         live_max_order=_float("LIVE_MAX_ORDER", 100.0),
