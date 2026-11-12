@@ -19,7 +19,10 @@ A candidate's rank is the weighted sum of components that mean the same whicheve
 | conflict | -0.15 | an active candidate in the opposite direction on the same stock and horizon |
 
 A candidate without a validated historical edge can rank and be researched, but is never eligible for the
-autopilot; neither is one with a conflict, poor liquidity, or prices that are made up (demo data).
+autopilot; neither is one with a conflict, poor liquidity, or prices that are made up (demo data). 4.4: a study's
+scenario decision is published as a **scenario observation** (source `study`, kind `scenario`, one per study and
+direction, updated on a repeat run); it carries no historical edge, and a candidate seen only by scenarios is never
+eligible for the autopilot.
 """
 
 from __future__ import annotations
@@ -331,8 +334,10 @@ class Discover:
         obs = []
         for r in rows:
             p = json.loads(r["payload_json"])
+            # 4.4: a scenario observation carries a projected case payoff, never a historical edge, whatever its payload says.
+            edge = _edge(None) if r["kind"] == "scenario" else (p.get("edge") or _edge(None))
             obs.append({"source": r["source"], "source_key": r["source_key"], "kind": r["kind"], "raw_score": r["raw_score"],
-                        "observed_at": r["observed_at"], "catalyst": p.get("catalyst"), "edge": p.get("edge") or _edge(None),
+                        "observed_at": r["observed_at"], "catalyst": p.get("catalyst"), "edge": edge,
                         "entry": p.get("entry"), "invalidation": p.get("invalidation"), "target": p.get("target"), "payload": p, "id": r["id"]})
         opposite = db.one("SELECT 1 FROM opportunity_candidates WHERE mode = ? AND symbol = ? AND direction = ? AND horizon = ? AND status = 'active'",
                           (self.mode, symbol, "SHORT" if direction == "LONG" else "LONG", horizon))
@@ -359,6 +364,8 @@ class Discover:
             reasons.append("too thin to trade automatically")
         if self.mode == "demo":
             reasons.append("demo prices are made up")
+        if all(o["kind"] == "scenario" for o in obs):
+            reasons.append("scenario evidence only: a projected case payoff is not a historical edge")
         eligible = ["shares" if direction == "LONG" else "short", "long_call" if direction == "LONG" else "long_put"]
         data_status = "reliable" if self.mode in ("live", "robinhood") else "partial" if self.mode == "sandbox" else "unknown"
         catalyst = next((o["catalyst"] for o in obs if o.get("catalyst")), None)
@@ -447,7 +454,7 @@ class Discover:
         c["observations"] = [{"source": o["source"], "source_key": o["source_key"], "kind": o["kind"], "observed_at": o["observed_at"],
                               "raw_score": o["raw_score"], **{k: v for k, v in json.loads(o["payload_json"]).items() if k in
                                                               ("setup_label", "why", "catalyst", "edge", "signal", "stage", "headline", "entry",
-                                                               "invalidation", "target", "source_score_scale")}}
+                                                               "invalidation", "target", "source_score_scale", "scenario")}}
                              for o in self.svc.db.query("SELECT * FROM opportunity_observations WHERE candidate_id = ? ORDER BY observed_at DESC", (cid,))]
         C.Opportunity(**{k: c[k] for k in ("id", "symbol", "direction", "horizon", "kinds", "status", "first_seen_at", "updated_at",
                                             "expires_at", "rank_score", "sources", "catalyst", "next_event", "entry", "invalidation", "target",

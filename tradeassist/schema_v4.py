@@ -145,3 +145,35 @@ def one_click_pipeline(cur: sqlite3.Cursor) -> None:
         result_json     TEXT NOT NULL
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_valuations_version ON scenario_valuations (version_id, created_at)")
+
+
+@migration(26, "4.4 opportunities from scenarios: each decision with its reason codes and notice, and observed triggers")
+def scenario_decisions(cur: sqlite3.Cursor) -> None:
+    """A decision (Qualified setup, Watch for trigger or No setup) is written each time a study's scenarios are valued,
+    with the checks behind it, a fingerprint of what would make it materially different (so a repeat run does not
+    notify again), the state of its in-app notice and the Discover candidate it was published to. A trigger is
+    recorded once per study and case, with the independent source that shows it happened."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS scenario_decisions (
+        id                 TEXT PRIMARY KEY,
+        study_id           TEXT NOT NULL REFERENCES studies (id),
+        version_id         TEXT NOT NULL REFERENCES scenario_versions (id),
+        valuation_id       TEXT,
+        created_at         TEXT NOT NULL,
+        status             TEXT NOT NULL CHECK (status IN ('qualified', 'watch', 'no_setup')),
+        fingerprint        TEXT NOT NULL,
+        decision_json      TEXT NOT NULL,
+        reason_codes_json  TEXT NOT NULL DEFAULT '[]',
+        notice_state       TEXT NOT NULL DEFAULT 'none' CHECK (notice_state IN ('none', 'new', 'seen')),
+        opportunity_id     TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_decisions_study ON scenario_decisions (study_id, created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_decisions_notice ON scenario_decisions (notice_state)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS scenario_triggers (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        study_id     TEXT NOT NULL REFERENCES studies (id),
+        case_key     TEXT NOT NULL CHECK (case_key IN ('bullish', 'bearish')),
+        observed_at  TEXT NOT NULL,
+        recorded_at  TEXT NOT NULL,
+        source_json  TEXT NOT NULL,
+        UNIQUE (study_id, case_key)
+    )""")

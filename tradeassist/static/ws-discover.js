@@ -9,9 +9,9 @@
   const pctText = (v, d = 2) => (isNum(v) ? `${v > 0 ? "+" : ""}${v.toFixed(d)}%` : "n/a");
   const HORIZON_WORDS = { intraday: "Today", swing: "Over days", event: "Around an event" };
   const SHORT_HORIZON = { intraday: "today", swing: "days", event: "event" };
-  const SOURCE_WORDS = { morning: "Morning plan", ideas: "Trade ideas", live: "Live news", reversal: "Reversals", scanner: "Scanner" };
+  const SOURCE_WORDS = { morning: "Morning plan", ideas: "Trade ideas", live: "Live news", reversal: "Reversals", scanner: "Scanner", study: "Research scenarios" };
   const KIND_WORDS = { reversal: "Reversal", fade: "Fade", news: "News", breakout: "Breakout", pullback: "Pullback", gap: "Gap",
-    earnings: "Earnings", momentum: "Momentum", other: "Other" };
+    earnings: "Earnings", momentum: "Momentum", scenario: "Scenario", other: "Other" };
   const words = (list, map) => list.map(k => map[k] || k).join(", ");
   const when = iso => (iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
   const select = (label, options, value) => el("select", { "aria-label": label }, options.map(([v, t]) => el("option", { value: v, selected: v === (value || "") }, t)));
@@ -31,15 +31,17 @@
   WS.register("feed", { title: "Opportunities", category: "Discover", size: { w: 8, h: 11 }, symbolBadge: false, create(w) {
     const horizon = select("Horizon", [["", "Any horizon"], ["intraday", "Today"], ["swing", "Over days"]], w.config.horizon);
     const way = select("Direction", [["", "Either way"], ["LONG", "Long"], ["SHORT", "Short"]], w.config.direction);
+    // 4.4: scenario observations (a study's Qualified or Watch decision) on their own.
+    const kindSel = select("Setup", [["", "Any setup"], ["scenario", "Scenario observations"]], w.config.kind);
     const eligible = el("input", { type: "checkbox", checked: !!w.config.eligible });
     const refresh = el("button", { class: "ws-btn", type: "button" }, "Refresh the scans");
     const scan = el("button", { class: "ws-btn", type: "button", title: "Also run the technical scanner over the watchlist: slower" }, "Scan the watchlist too");
     const status = el("span", { class: "small muted" });
     const list = el("div"), detail = el("div", { class: "ws-opp" });
-    w.body.append(el("div", { class: "ws-row" }, field("Horizon", horizon), field("Direction", way),
+    w.body.append(el("div", { class: "ws-row" }, field("Horizon", horizon), field("Direction", way), field("Setup", kindSel),
       el("label", { class: "ws-check" }, eligible, "Autopilot-eligible only")), el("div", { class: "ws-row" }, refresh, scan, status), list, detail);
     let rows = [], picked = w.config.picked || null, ticket = 0, weights = {}, lastMode = null, loadedAt = null;
-    for (const c of [horizon, way, eligible]) c.addEventListener("change", () => { w.save(); load(); });
+    for (const c of [horizon, way, eligible, kindSel]) c.addEventListener("change", () => { w.save(); load(); });
 
     async function load() {
       const mine = ++ticket;
@@ -48,6 +50,7 @@
         const q = new URLSearchParams({ limit: "60" });
         if (horizon.value) q.set("horizon", horizon.value);
         if (way.value) q.set("direction", way.value);
+        if (kindSel.value) q.set("kind", kindSel.value);
         if (eligible.checked) q.set("eligible_only", "true");
         const d = await w.api(`/v3/discover?${q}`);
         if (mine !== ticket) return;
@@ -116,6 +119,12 @@
         .filter(([, v]) => isNum(v));
       if (levels.length) kids.push(el("div", { class: "metrics" }, levels.map(([k, v]) => metric(money(v), k))));
       if (full.catalyst) kids.push(el("p", { class: "small" }, el("strong", { text: "Catalyst: " }), full.catalyst));
+      const scen = (full.observations || []).map(o => o.scenario).find(Boolean);
+      if (scen) kids.push(el("div", { class: `ws-decision ${scen.status}` }, el("h4", {}, statusTag(scen.status === "qualified" ? "pass" : "info", scen.label), ` ${scen.setup || ""}`,
+          scen.example ? el("span", {}, " ", statusTag("warn", "Example")) : ""),
+        el("p", { class: "small" }, scen.trigger ? `If ${scen.trigger}, by ${scen.expires_on}. ` : `Until ${scen.expires_on}. `,
+          `Modeled net ${money(scen.net_pnl, 0)}; most it can lose ${isNum(scen.max_loss) ? money(scen.max_loss, 0) : "no limit"}.`),
+        el("p", { class: "small muted", text: "A scenario observation: a projected case payoff from a study, not a historical edge. Never eligible for the autopilot." })));
       kids.push(el("h4", { text: "Autopilot" }), full.autopilot_eligible
         ? el("p", {}, statusTag("pass", "Eligible"), " It meets the bar for automatic trading, if you turn that on; the Trading Desk's limits still apply.")
         : el("ul", { class: "plain small" }, full.autopilot_reasons.map(r => el("li", { text: `Not eligible: ${r}.` }))));
@@ -158,7 +167,7 @@
 
     load();
     w.on("opportunity.", () => load());
-    return { refresh: load, config: () => ({ horizon: horizon.value, direction: way.value, eligible: eligible.checked, picked }),
+    return { refresh: load, config: () => ({ horizon: horizon.value, direction: way.value, kind: kindSel.value, eligible: eligible.checked, picked }),
       helpFacts: () => (loadedAt ? [["Shown", `${rows.length} ${rows.length === 1 ? "opportunity" : "opportunities"}, ranked ${loadedAt.toLocaleTimeString()}${lastMode === "demo" ? " on demo prices" : ""}`]] : []) };
   } });
 

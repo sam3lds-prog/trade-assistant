@@ -20,6 +20,41 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.4.0 — Opportunities from scenarios
+
+The third of four steps of the one-click Research plan ([ONE_CLICK_RESEARCH.md](ONE_CLICK_RESEARCH.md)). **No trading
+permission is added or changed; nothing is proposed or sent from a scenario.**
+
+- **A decision after every valuation: Qualified setup, Watch for trigger, or No setup**, by a deterministic evaluator
+  with reason codes. Every setup it considers is the valuation's own (a structure sized to the budget and the loss
+  limit, or the What-If allocator's split for a case), checked for fresh real-time quotes, two-sided option quotes
+  with spreads within `OPPORTUNITY_MAX_SPREAD_PCT`, an eligible route, a modeled net upside after round-trip costs of
+  at least `OPPORTUNITY_MIN_NET_PCT` of its capital, and the contract's most-it-can-lose and the modeled worst tenth
+  within the loss limit (`SCENARIO_MAX_LOSS`, else the policy's daily loss stop).
+  - *Qualified setup*: without a trigger, under the Central case with a validated directional edge or 30+ independent
+    past cases behind it, and safe in every case; or under a case whose trigger has been recorded as observed.
+  - *Watch for trigger*: a Bullish (long) or Bearish (short) case's setup that passes if its trigger happens; it stays
+    conditional until then and expires when the trigger's session passes unobserved.
+  - *No setup*: the most material failed check (for instance *spreads and fees consume the expected payoff*), with
+    how many setups each check stopped.
+  Qualified setups are ranked by their worst case across the cases; watched ones by their own case's net P&L.
+- **The card says what, when, why and what invalidates it**, above the findings. *Draft it* builds a Trading Desk draft
+  with the scenario recorded (version, case, valuation, decision), a fresh quote for an option, the case's trigger and
+  invalidation in its exit rules and the case's own direction; a draft for the wrong direction or from another study's
+  scenario is refused. The existing preview and policy checks apply as before.
+- **Record a trigger** with the independent source that shows it happened (published after the study's cutoff): the
+  same strategies are valued again from a fresh snapshot and decided again.
+- **Discover**: a Qualified or Watch decision is published as a *scenario observation* (source `study`, kind
+  `scenario`), one per study and direction, updated on a repeat run and withdrawn when the study has no setup; a
+  *Setup* filter shows them. It carries no historical edge, and a candidate seen only by scenarios is never eligible for
+  the autopilot (even a payload claiming a record is read as none).
+- **Notices**: a persistent notice at the top of the workstation for a new or materially changed setup (Open, Dismiss);
+  with `SCENARIO_NOTIFY=1`, the notification outbox too, once per material change.
+- Migration 26 adds `scenario_decisions` and `scenario_triggers`. New routes: `GET /v3/studies/{id}/decision`,
+  `POST /v3/studies/{id}/decision/trigger`, `GET /v3/scenarios/notices`, `POST /v3/scenarios/notices/{id}/seen`.
+- New settings (`.env`): `OPPORTUNITY_MIN_NET_PCT` (default 1), `OPPORTUNITY_MAX_SPREAD_PCT` (default 10),
+  `SCENARIO_NOTIFY` (default 0).
+
 ## 4.3.0 — One-click Research pipeline
 
 The second of four steps of the one-click Research plan ([ONE_CLICK_RESEARCH.md](ONE_CLICK_RESEARCH.md)). **No trading

@@ -132,3 +132,34 @@ the linked chart from their saved prices as soon as the version exists.
 `DATA_MODE=demo`, then in Research's Study settings choose **Demo provider** and tick *On by default*, and click Run
 the study. The demo provider returns canned cases built from the packet (labelled *Demo provider: nothing was
 simulated*), and the rest of the pipeline is the real one.
+
+## 3. Opportunities and reporting (4.4)
+
+```dotenv
+OPPORTUNITY_MIN_NET_PCT=1        # modeled net upside after spreads and fees, % of the capital it ties up
+OPPORTUNITY_MAX_SPREAD_PCT=10    # the widest option spread, % of the midpoint
+SCENARIO_NOTIFY=0                # 1: also send new or changed setups through the notification channels
+SCENARIO_BUDGET=0                # the budget setups are sized to (0: the Trading Desk policy's trial capital)
+SCENARIO_MAX_LOSS=0              # the loss limit (0: the policy's daily loss stop; the trial policy's is $25)
+```
+
+After every valuation the study's Scenarios panel opens with a decision card:
+
+| Decision | When | What it shows |
+| --- | --- | --- |
+| **Qualified setup** | Every check passes: without a trigger under the Central case (with a validated directional edge or 30+ independent past cases behind it, and inside the loss limit in every case), or under a case whose trigger was recorded as observed | What, when, why it cleared the checks, what invalidates it; Draft it |
+| **Watch for trigger** | A Bullish (long) or Bearish (short) case's setup passes on payoff, risk, liquidity and eligibility if its trigger happens | The trigger, the strategy, the date it expires, the failure condition; Draft it; record the trigger |
+| **No setup** | Nothing passes | The most material failed check, and how many setups each check stopped |
+
+The checks, in their order of materiality: the valuation worked; the sessions have not passed; the quote is fresh and
+real-time (for a Qualified setup); an unobserved trigger has not expired; every option leg has a two-sided quote within
+the spread limit; the payoff clears the minimum after costs (*cost eroded* when it would have before them); the base is
+supported (no trigger); the modeled worst tenth and the contract's most-it-can-lose are within the loss limit; the loss
+has a limit; it fits the budget; its route is not research-only; its direction is the case's.
+
+With the trial policy's $25 loss limit nearly everything is *No setup: the most it can lose is over the loss limit*.
+Set `SCENARIO_MAX_LOSS` (and `SCENARIO_BUDGET`) to what you would actually risk on one idea.
+
+A Qualified or Watch decision also appears in **Discover** as a scenario observation (the *Setup* filter shows them)
+and as a notice at the top of the workstation. A projected case payoff is not a historical edge: these are never
+eligible for the autopilot. Demo and sandbox results are labelled as examples.

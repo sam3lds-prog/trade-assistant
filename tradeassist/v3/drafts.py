@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,11 +47,67 @@ CALIBRATED_RANGE = "the calibrated 80% band"
 UNVALIDATED_RANGE = "the model-implied 10th to 90th percentile range (historical coverage not yet validated)"
 
 
+class ScenarioRefIn(BaseModel):
+    """4.4: the scenario a draft comes from: the version, the case it was chosen under, the valuation and decision."""
+    model_config = ConfigDict(extra="forbid")
+    version_id: str = Field(min_length=1, max_length=64)
+    case: Literal["central", "bullish", "bearish"] | None = None
+    valuation_id: str | None = Field(default=None, max_length=64)
+    decision_id: str | None = Field(default=None, max_length=64)
+
+
 class DraftIn(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     study_id: str = Field(min_length=1, max_length=64)
     strategy: str = Field(min_length=1, max_length=40)
     quantity: float | None = Field(default=None, gt=0, le=100_000)
+    scenario: ScenarioRefIn | None = None
+
+
+CASE_DIRECTION = {"bullish": "LONG", "bearish": "SHORT"}
+
+
+def scenario_ref(svc: Any, study_id: str, strategy: str, ref: ScenarioRefIn) -> dict[str, Any]:
+    """The scenario a draft is chosen under, checked against the study: a version, a case, a valuation or a decision
+    of another study is refused, and a case's draft must go its way (a Bearish case's draft is a short-direction one)."""
+    from .valuation import direction_of
+    sc = getattr(svc, "scenarios", None)
+    if sc is None:
+        raise RequestError("Catalyst Scenarios are not running in this app")
+    v = sc.version(ref.version_id)
+    if v.get("study_id") != study_id:
+        raise RequestError("That scenario version belongs to another study: draft from that study, or from this study's own scenarios.")
+    case = None
+    if ref.case:
+        case = next((c for c in v["cases"] if c["key"] == ref.case), None)
+        if case is None:
+            raise RequestError(f"That scenario version has no {ref.case} case")
+        want = CASE_DIRECTION.get(ref.case)
+        have = direction_of(strategy)
+        if want and have not in (want, "EVENT"):
+            raise RequestError(f"The {case['label']} case goes {'up' if want == 'LONG' else 'down'}: draft a "
+                               f"{'long' if want == 'LONG' else 'short'}-direction strategy for it, not {strategy.replace('_', ' ')}.")
+    out: dict[str, Any] = {"version_id": v["id"], "version": v["version"], "origin": v.get("origin"), "run_id": v["run_id"],
+                           "case": ref.case, "case_label": case["label"] if case else None, "trigger": case["trigger"] if case else None,
+                           "invalidation": case["invalidation"] if case else None,
+                           "case_price": case["terminal"]["price"] if case else None, "target_date": v["sessions"][-1]["date"]}
+    if ref.valuation_id:
+        from .valuation import load
+        val = load(svc, ref.valuation_id)
+        if val["version_id"] != v["id"]:
+            raise RequestError("That valuation is of another scenario version")
+        row = next((x for x in val["structures"] if x["key"] == strategy), None)
+        if row is None:
+            raise RequestError(f"That valuation did not value {strategy}")
+        out["valuation_id"] = val["id"]
+        out["valued"] = {k: {"expected_pnl": x["expected_pnl"], "worst_tenth": x["worst_tenth"]} for k, x in row["by_case"].items()}
+        out["unit_quantity"] = row.get("quantity")
+    if ref.decision_id:
+        d = svc.db.one("SELECT study_id, status FROM scenario_decisions WHERE id = ?", (ref.decision_id,))
+        if d is None or d["study_id"] != study_id:
+            raise RequestError("That decision is of another study")
+        out["decision_id"], out["decision_status"] = ref.decision_id, d["status"]
+    return out
 
 
 def _finite(x: Any) -> float | None:
@@ -137,6 +193,7 @@ def build(svc: Any, req: DraftIn) -> dict[str, Any]:
     if cand is None:
         raise RequestError(f"The study has no strategy {req.strategy!r}")
     sym, h = st["symbol"], int(st["horizon_days"])
+    scen = scenario_ref(svc, st["id"], req.strategy, req.scenario) if req.scenario is not None else None
     fc = st.get("forecast") or {}
     base = fc.get("base") or {}
     last = _finite(view.get("last"))
@@ -166,6 +223,18 @@ def build(svc: Any, req: DraftIn) -> dict[str, Any]:
         mid, ask = _finite(lg.get("mid")), _finite(lg.get("ask"))
         limit = min(x for x in (mid, ask) if x is not None) if (mid or ask) else None
         basis = "the midpoint when the study ran; price it on the Order ticket for the fair-price ladder from the live quote"
+        if scen is not None and lg.get("expiration"):
+            # 4.4: from a scenario, a fresh quote for the same contract (the study's may be hours old by now).
+            try:
+                row = svc._chain_for(sym, str(lg["expiration"])).find_by_terms(str(lg.get("option_type", "")).lower(), float(lg["strike"]))
+            except (DataError, RequestError, ValueError):
+                row = None
+            fm, fa = (_finite(row.get("mid")), _finite(row.get("ask"))) if row else (None, None)
+            if fm or fa:
+                limit = min(x for x in (fm, fa) if x is not None)
+                basis = "the midpoint now (a fresh quote); price it on the Order ticket for the fair-price ladder"
+            else:
+                notes.append("No fresh quote for the contract now: the limit is the study's midpoint.")
         if lg.get("option_symbol") and lg.get("strike") and lg.get("expiration"):
             option = C.OptionTerms(option_symbol=str(lg["option_symbol"]), underlying=sym, option_type=str(lg.get("option_type", "")).upper(),
                                    strike=float(lg["strike"]), expiration=str(lg["expiration"]))
@@ -246,10 +315,20 @@ def build(svc: Any, req: DraftIn) -> dict[str, Any]:
                            time_exit=time_exit, rules=rules)
 
     direction = st.get("direction") or ("LONG" if bullish else "SHORT")
+    if scen is not None and scen.get("case") in CASE_DIRECTION:
+        direction = CASE_DIRECTION[scen["case"]]                 # a bullish or bearish case carries its own direction
+        if scen.get("invalidation"):
+            rules.insert(1, f"Wrong if {scen['invalidation']} (the {scen['case_label']} case's invalidation).")
+        if scen.get("trigger"):
+            rules.insert(1, f"Conditional on: {scen['trigger']} (the {scen['case_label']} case's trigger).")
+        exit_plan = C.ExitPlan(stop=exit_plan.stop, target=exit_plan.target, time_exit=exit_plan.time_exit, rules=rules)
     thesis = (f"{cand.get('label')} on {sym} from study {st['id']} ({st.get('thesis')}, {h} trading days, {direction.lower()}). "
               + (f"Base path {scenario['expected_pct']:+.2f}%; {scenario['range_words']} {scenario['low_pct']:+.1f}% to {scenario['high_pct']:+.1f}%. "
                  if scenario["expected_pct"] is not None and scenario["low_pct"] is not None else "")
-              + (f"Model {scenario['model_version']}, {str(scenario['calibration']).replace('_', ' ')}." if scenario["model_version"] else ""))[:2000]
+              + (f"Model {scenario['model_version']}, {str(scenario['calibration']).replace('_', ' ')}." if scenario["model_version"] else "")
+              + (f" Scenario: the {scen['case_label'] or 'base'} case of scenario version {scen['version']} ({scen['origin']})"
+                 + (f", if {scen['trigger']}" if scen.get("trigger") else "") + (f"; valuation {scen['valuation_id']}" if scen.get("valuation_id") else "")
+                 + (f"; decision {scen['decision_id']}" if scen.get("decision_id") else "") + "." if scen else ""))[:2000]
 
     execution: dict[str, Any] = {**rt}
     if rt["route"] == "automatic" and limit and desk is not None:
@@ -281,12 +360,14 @@ def build(svc: Any, req: DraftIn) -> dict[str, Any]:
         execution["manual_order"] = lines
     if st.get("status") == "partial":
         notes.append("The study was partial: see its Missing list before relying on it.")
+    if scen is not None and scen.get("case") in CASE_DIRECTION and scen.get("decision_status") != "qualified":
+        notes.append(f"Conditional: it was chosen under the {scen['case_label']} case, whose trigger has not been recorded as observed.")
     if scenario["calibration"] != "calibrated":
         notes.append("The forecast behind it is not calibrated for this horizon: its range is the model's, not a validated one.")
 
     return {"kind": "draft_trade", "version": 1, "created_at": C.utc_now(), "symbol": sym,
             "source": {"study_id": st["id"], "opportunity_id": opp_id, "study_as_of": st.get("created_at"),
-                       "data_source": view.get("data_source"), "data_mode": view.get("data_mode")},
+                       "data_source": view.get("data_source"), "data_mode": view.get("data_mode"), "scenario": scen},
             "strategy": {"key": cand.get("key"), "label": cand.get("label"), "instrument": instrument,
                          "legs": [{k: lg.get(k) for k in ("side", "option_type", "strike", "expiration", "contracts", "bid", "ask", "mid", "option_symbol")} for lg in legs],
                          "legs_text": cand.get("legs_text") or []},
