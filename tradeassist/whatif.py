@@ -27,7 +27,7 @@ import math
 import re
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -103,6 +103,63 @@ def scenario_distribution(last: float, expected_pct: float, sd_pct: float, point
     w = np.exp(-0.5 * z * z)
     w /= w.sum()
     return last * np.exp(mu + s * z), w
+
+
+def cvar10(total: np.ndarray, weights: np.ndarray) -> float:
+    """The average loss in the worst tenth of outcomes (a positive number; 0 when even those gain)."""
+    order = np.argsort(total)
+    cum = np.cumsum(weights[order])
+    tail = order[cum <= 0.10 + 1e-12]
+    if len(tail) == 0:
+        tail = order[:1]
+    return max(0.0, -float((total[tail] * weights[tail]).sum() / weights[tail].sum()))
+
+
+def greedy_allocate(units_of: list[dict[str, Any]], weights: np.ndarray, *, budget: float, max_share: float, lam: float,
+                    allowed: Callable[[list[dict[str, Any]], int, int], bool] | None = None) -> tuple[np.ndarray, float]:
+    """The units of each strategy that maximise the expected P&L minus `lam` times the CVaR 10% of the total, within the
+    budget and `max_share` of it each: a greedy search in blocks (a tenth of the budget), then halved, then single
+    units. Each item is a dict with `capital` (per unit), `pnl` (per unit, on the shared price grid with `weights`),
+    `units` (updated in place) and `most`; `allowed(items, i, block)` can refuse a block (4.3: a loss limit).
+    Returns the total P&L vector and the money spent."""
+    def objective(total: np.ndarray) -> float:
+        return float((weights * total).sum()) - lam * cvar10(total, weights)
+
+    total = np.zeros_like(weights)
+    spent = 0.0
+    best_obj = objective(total)
+    blocks = [max(1, int(0.10 * budget / u["capital"])) for u in units_of]
+    steps = 0
+    while steps < 4000:
+        steps += 1
+        # The block that improves the objective most per dollar it spends; blocks differ in size.
+        best_i, best_rate, best_gain, best_block = None, 1e-12, 0.0, 0
+        for i, u in enumerate(units_of):
+            b = blocks[i]
+            if b < 1:
+                continue
+            if u["units"] + b > u["most"]:
+                u["capped"] = u["units"] >= u["most"]
+                continue
+            if spent + b * u["capital"] > budget + 1e-9 or (u["units"] + b) * u["capital"] > max_share * budget + 1e-9:
+                continue
+            if allowed is not None and not allowed(units_of, i, b):
+                continue
+            gain = objective(total + b * u["pnl"]) - best_obj
+            rate = gain / (b * u["capital"])
+            if gain > 1e-9 and rate > best_rate:
+                best_i, best_rate, best_gain, best_block = i, rate, gain, b
+        if best_i is None:
+            if all(b <= 1 for b in blocks):
+                break
+            blocks = [max(1, b // 2) if b > 1 else 1 for b in blocks]   # finer steps before giving up
+            continue
+        u = units_of[best_i]
+        u["units"] += best_block
+        total = total + best_block * u["pnl"]
+        spent += best_block * u["capital"]
+        best_obj += best_gain
+    return total, spent
 
 
 def analyst_calls(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -781,48 +838,7 @@ class WhatIf:
         if not units_of:
             raise RequestError("Nothing fits the budget: " + ("; ".join(f"{x['kind']}: {x['why']}" for x in skipped[:4]) or "no strategy to split across"))
         lam = float(risk)
-
-        def objective(total: np.ndarray) -> float:
-            order = np.argsort(total)
-            cum = np.cumsum(weights[order])
-            tail = order[cum <= 0.10 + 1e-12]
-            if len(tail) == 0:
-                tail = order[:1]
-            cvar = max(0.0, -float((total[tail] * weights[tail]).sum() / weights[tail].sum()))
-            return float((weights * total).sum()) - lam * cvar
-
-        total = np.zeros_like(weights)
-        spent = 0.0
-        best_obj = objective(total)
-        blocks = [max(1, int(0.10 * budget / u["capital"])) for u in units_of]
-        steps = 0
-        while steps < 4000:
-            steps += 1
-            # The block that improves the objective most per dollar it spends; blocks differ in size.
-            best_i, best_rate, best_gain, best_block = None, 1e-12, 0.0, 0
-            for i, u in enumerate(units_of):
-                b = blocks[i]
-                if b < 1:
-                    continue
-                if u["units"] + b > u["most"]:
-                    u["capped"] = u["units"] >= u["most"]
-                    continue
-                if spent + b * u["capital"] > budget + 1e-9 or (u["units"] + b) * u["capital"] > max_share * budget + 1e-9:
-                    continue
-                gain = objective(total + b * u["pnl"]) - best_obj
-                rate = gain / (b * u["capital"])
-                if gain > 1e-9 and rate > best_rate:
-                    best_i, best_rate, best_gain, best_block = i, rate, gain, b
-            if best_i is None:
-                if all(b <= 1 for b in blocks):
-                    break
-                blocks = [max(1, b // 2) if b > 1 else 1 for b in blocks]   # finer steps before giving up
-                continue
-            u = units_of[best_i]
-            u["units"] += best_block
-            total = total + best_block * u["pnl"]
-            spent += best_block * u["capital"]
-            best_obj += best_gain
+        total, spent = greedy_allocate(units_of, weights, budget=budget, max_share=max_share, lam=lam)
         capped = [u["row"]["label"] for u in units_of if u["units"] >= u["most"]]
         sc = units_of[0]["row"]["scenario"]
         stats = self._stats(prices, weights, total, sc["p10"], sc["p50"], sc["p90"]) if spent > 0 else None
@@ -877,4 +893,4 @@ class WhatIf:
 
 
 __all__ = ["WhatIf", "BAR_DAYS", "PROVIDERS", "STRATEGY_KINDS", "analyst_calls", "scenario_distribution", "lognormal_band",
-           "horizon_label"]
+           "horizon_label", "greedy_allocate", "cvar10"]

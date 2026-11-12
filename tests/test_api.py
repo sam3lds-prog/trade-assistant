@@ -33,6 +33,11 @@ V3_WRITES = {
     "/v3/studies/{study_id}/scenario-seeds", "/v3/studies/{study_id}/scenario-runs", "/v3/scenario-runs/{run_id}/versions",
     # 4.2: Check Tradier data: four read-only market-data requests (quote, history, a chain, the clock); writes nothing.
     "/v3/data/tradier-check",
+    # 4.3: the one-click pipeline. Research's scenario settings (the provider and the automatic switch), a readiness
+    # check of the provider, and a study's pipeline: start it for a finished study, cancel it, retry it, value its
+    # fixed strategies again. Models and records; no orders.
+    "/v3/scenarios/settings", "/v3/scenarios/check", "/v3/studies/{study_id}/pipeline/start", "/v3/studies/{study_id}/pipeline/cancel",
+    "/v3/studies/{study_id}/pipeline/retry", "/v3/studies/{study_id}/pipeline/revalue",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.

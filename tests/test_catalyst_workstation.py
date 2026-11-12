@@ -107,3 +107,48 @@ def test_catalyst_scenarios_export_import_apply_draw_refresh_and_reload(tmp_path
         assert widget(page, "study").locator(".ws-catalyst").count() == 0
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && Object.keys(l).length === 0; }})()", timeout=20000)
     assert errors == []
+
+
+def _demo_provider(svc):
+    """Research settings: the demo provider, run automatically (as a person would set once in the study's settings)."""
+    svc.db.cache_put("research:scenario_settings", {"provider": "demo", "auto": True})
+
+
+def test_one_click_run_study_draws_the_cases_and_values_the_strategies(tmp_path):
+    """4.3: one click on Run the study, nothing else: the study, then the provider in the background, then the cases
+    drawn on the linked chart from their saved prices and the study's strategies valued under each case."""
+    with demo_page(tmp_path, prepare=_demo_provider) as (page, errors):
+        open_research(page)
+        study = widget(page, "study")
+        study.locator(".ws-scen-settings input[aria-label='Run scenarios']").wait_for(timeout=15000)
+        assert study.locator("input[aria-label='Run scenarios']").is_checked()
+        assert study.locator("select[aria-label='Scenario provider']").input_value() == "demo"
+        study.locator("button:text-is('Run the study')").click()
+        page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-pipeline[data-status='complete']", timeout=90000)
+        panel = study.locator(".ws-pipeline")
+        assert panel.locator(".ws-stage").count() == 4 and panel.locator(".ws-stage.done").count() == 4
+        text = panel.inner_text()
+        assert "Demo provider" in text and "nothing was simulated" in text and "Findings:" in text and "None has a probability" in text
+        assert panel.locator(".ws-valuation table").count() >= 1 and "Cash" in panel.locator(".ws-valuation").inner_text()
+        # The saved version is drawn without an Apply click: dashed cases beside the solid base, at the stored prices.
+        page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:case:bullish'] && l['forecast:case:bearish']; }})()", timeout=20000)
+        lines = page.evaluate(LINES)
+        assert lines["forecast:case:bullish"]["style"] == 2 and lines["forecast:base"]["style"] == 0
+        vid = page.evaluate("WS.ctx.blue.scenario.catalyst.version_id")
+        v = page.evaluate(f"api('/v3/scenario-versions/{vid}')")
+        assert v["origin"] == "auto"
+        bull = next(c for c in v["cases"] if c["key"] == "bullish")
+        assert [p["value"] for p in lines["forecast:case:bullish"]["points"][1:]] == pytest.approx(bull["price"])
+        # The manual tools are still there, under Advanced.
+        study.locator(".ws-sections button:text-is('Forecast')").click()
+        adv = study.locator("details.ws-advanced")
+        assert adv.count() == 1 and adv.get_attribute("open") is None
+        before = _points(lines, "forecast:case:bearish")
+        # A reload: the study comes back finished, and the same points are drawn.
+        saved(page)
+        page.reload()
+        open_research(page)
+        page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-pipeline[data-status='complete']", timeout=30000)
+        page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:case:bearish']; }})()", timeout=20000)
+        assert _points(page.evaluate(LINES), "forecast:case:bearish") == before
+    assert errors == []

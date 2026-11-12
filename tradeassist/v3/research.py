@@ -25,6 +25,7 @@ import logging
 import math
 import os
 import socket
+import sqlite3
 import threading
 import time
 import traceback
@@ -89,6 +90,11 @@ class StudyIn(BaseModel):
     peers_add: list[str] = Field(default_factory=list, max_length=8)
     peers_remove: list[str] = Field(default_factory=list, max_length=20)
     opportunity_id: str | None = Field(default=None, max_length=64)
+    # 4.3 one-click: the click's own key (a browser retry of the same click finds the same study), whether to run the
+    # scenario provider after it (None: the Research setting), and an optional catalyst (else one is chosen).
+    request_key: str | None = Field(default=None, min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$")
+    scenarios: bool | None = None
+    catalyst: C.CatalystSpec | None = None
 
 
 class CalibrateIn(BaseModel):
@@ -192,6 +198,7 @@ class Research:
         if r["status"] == "running":
             raise RequestError("That study is still running")
         req = StudyIn.model_validate_json(r["inputs_json"])
+        req.request_key = None                       # a retry is a new click
         out = self.start(req, retry_of=study_id)
         out["retry_of"] = study_id
         return out
@@ -209,8 +216,19 @@ class Research:
                 raise RequestError("direction must be LONG, SHORT or empty")
         return req
 
+    def _by_request_key(self, key: str | None) -> dict[str, Any] | None:
+        if not key:
+            return None
+        r = self.svc.db.one("SELECT id, status, symbol FROM studies WHERE request_key = ?", (key,))
+        return {"id": r["id"], "status": r["status"], "symbol": r["symbol"], "reused": True} if r else None
+
     def start(self, req: StudyIn, retry_of: str | None = None) -> dict[str, Any]:
         req = self.check(req)
+        hit = self._by_request_key(req.request_key)
+        if hit is not None:                          # the same click again (a browser retry): the study it started
+            return hit
+        pl = getattr(self.svc, "pipeline", None)
+        intent = pl.intent(req.horizon_days, req.scenarios, req.catalyst.model_dump() if req.catalyst else None) if pl else None
         with self._lock:
             alive = {k: t for k, t in self._running.items() if t.is_alive()}
             self._running = alive
@@ -218,13 +236,20 @@ class Research:
                 raise RequestError(f"{len(alive)} studies are already running; wait for one to finish.")
             study_id = C.new_id("study")
             now = C.utc_now()
-            with self.svc.db.tx() as cur:
-                cur.execute("""INSERT INTO studies (id, mode, symbol, created_at, as_of, horizon_days, thesis, direction, objective, status,
-                               engine_version, contract_version, opportunity_id, inputs_json, evidence_json, fingerprint, worker, heartbeat_at,
-                               retry_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, '{}', '', ?, ?, ?)""",
-                            (study_id, self.svc.market.info.mode, req.symbol, now, now, req.horizon_days, req.thesis, req.direction,
-                             req.objective, ENGINE_VERSION, C.CONTRACT_VERSION, req.opportunity_id, req.model_dump_json(),
-                             self.worker, now, retry_of))
+            try:
+                with self.svc.db.tx() as cur:
+                    cur.execute("""INSERT INTO studies (id, mode, symbol, created_at, as_of, horizon_days, thesis, direction, objective, status,
+                                   engine_version, contract_version, opportunity_id, inputs_json, evidence_json, fingerprint, worker, heartbeat_at,
+                                   retry_of, request_key, pipeline_json)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, '{}', '', ?, ?, ?, ?, ?)""",
+                                (study_id, self.svc.market.info.mode, req.symbol, now, now, req.horizon_days, req.thesis, req.direction,
+                                 req.objective, ENGINE_VERSION, C.CONTRACT_VERSION, req.opportunity_id, req.model_dump_json(),
+                                 self.worker, now, retry_of, req.request_key, json.dumps(intent) if intent else None))
+            except sqlite3.IntegrityError:
+                hit = self._by_request_key(req.request_key)          # two copies of one click raced: the first one won
+                if hit is not None:
+                    return hit
+                raise
             t = threading.Thread(target=self._run_safely, args=(study_id, req), name=f"study-{req.symbol}", daemon=True)
             self._running[study_id] = t
             t.start()
@@ -235,7 +260,7 @@ class Research:
         if req.opportunity_id and d3 is not None:
             d3.link_study(req.opportunity_id, study_id, req.symbol)
         self.svc.bus.publish("study.started", study_id, symbol=req.symbol, horizon_days=req.horizon_days)
-        return {"id": study_id, "status": "running", "symbol": req.symbol}
+        return {"id": study_id, "status": "running", "symbol": req.symbol, "scenarios": bool(intent)}
 
     def _run_safely(self, study_id: str, req: StudyIn) -> None:
         try:
@@ -246,6 +271,12 @@ class Research:
                 cur.execute("UPDATE studies SET status = 'failed', error = ? WHERE id = ?", (redact(str(exc))[:500], study_id))
             self.svc.bus.publish("study.failed", study_id, symbol=req.symbol, error=str(exc)[:200])
             traceback.print_exc()
+        pl = getattr(self.svc, "pipeline", None)
+        if pl is not None:
+            try:
+                pl.after_study(study_id)             # 4.3: the scenario provider continues in the background, if asked for
+            except Exception:  # noqa: BLE001 - the saved study stands; recovery queues the continuation later
+                log.exception("Could not queue the scenario continuation for %s", study_id)
 
     def run(self, req: StudyIn, study_id: str | None = None) -> dict[str, Any]:
         """The whole study, synchronously (start() runs it in a thread)."""
@@ -504,6 +535,9 @@ class Research:
                 out["routes"] = routes_for(self.svc, (out["view"].get("strategies") or {}).get("candidates") or [])
             except Exception:  # noqa: BLE001 - a route is advice for the screen; the study is still readable without it
                 out["routes"] = {}
+        pl = getattr(self.svc, "pipeline", None)
+        if pl is not None and "pipeline_json" in r.keys() and r["pipeline_json"]:
+            out["pipeline"] = pl.view(r["id"])
         return out
 
     def recent(self, symbol: str | None = None, limit: int = 20) -> list[dict[str, Any]]:

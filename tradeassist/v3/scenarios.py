@@ -217,6 +217,8 @@ def factor_context(svc: Any, symbol: str, bar_date: date) -> dict[str, Any]:
         unavailable.append({"key": k, "label": r["label"], "reason": f"only {n} days shared with the stock: left out of the joint fit"})
     order = [r["key"] for r in rows if r["key"] in returns["proxies"]]
     fit = Fx.joint_fit(returns["stock"], returns["proxies"], order)
+    import numpy as np
+    sd_daily = {k: float(100.0 * np.std(v, ddof=1)) for k, v in returns["proxies"].items() if len(v) > 2}
     out_rows = []
     for r in rows:
         if r["key"] not in fit:
@@ -226,7 +228,8 @@ def factor_context(svc: Any, symbol: str, bar_date: date) -> dict[str, Any]:
                          "inverse": bool(r.get("inverse")), "scale": r.get("scale"), "index_scale": r.get("index_scale"),
                          "note": r.get("note", ""), "beta": float(r["beta"]), "correlation": float(r["correlation"]),
                          "beta_days": int(r["beta_days"]), "beta_unique": float(f["beta_unique"]), "explained": float(f["explained"]),
-                         "redundant": bool(f["redundant"]), "loadings": {k: float(v) for k, v in f["loadings"].items()}})
+                         "redundant": bool(f["redundant"]), "loadings": {k: float(v) for k, v in f["loadings"].items()},
+                         "sd_daily_pct": sd_daily.get(r["key"])})
     return {"basis": f"daily closes through {bar_date.isoformat()} ({returns['days']} shared days), fitted in this order: "
                      + ", ".join(order), "fit_days": int(returns["days"]), "rows": out_rows,
             "reference": {}, "unavailable": unavailable,
@@ -312,6 +315,55 @@ def case_paths(seed: dict[str, Any], a: dict[str, Any]) -> dict[str, Any]:
             "attribution": {"factor_pct": fe["pct"], "issuer_pct": issuer, "extra_sd_pct": [100.0 * e for e in extra], "terms": fe["terms"]}}
 
 
+RULE_TOLERANCE = 0.01
+MIN_ANALOG_TAIL = 20                 # independent cases the analogs' tail needs before it sizes a move
+
+
+def rule_value(seed: dict[str, Any], source: str, direction: str, factor: str | None = None) -> float | None:
+    """The size a deterministic rule gives a move (4.3), signed by `direction` (up or down), or None when the seed does
+    not carry what the rule needs. The one-click pipeline sizes cases only with these; a provider's citation alone
+    never sizes anything.
+
+    - options_implied_move: the move options price for the earnings release (percentage points);
+    - analog_tail: the comparable situations' 90th (up) or 10th (down) percentile less their median, with at least
+      20 independent cases;
+    - implied_sensitivity: one standard deviation of the move options imply to the horizon;
+    - factor_volatility: one standard deviation of the factor's own move over the horizon, from its daily moves up
+      to the cutoff, in the factor's unit (% or bp)."""
+    sign = 1.0 if direction == "up" else -1.0 if direction == "down" else 0.0
+    if not sign:
+        return None
+    vol = seed.get("volatility") or {}
+    if source == "options_implied_move":
+        v = _finite(vol.get("event_move_pct"))
+        return sign * v if v else None
+    if source == "implied_sensitivity":
+        v = _finite(vol.get("implied_sigma_pct"))
+        return sign * v if v else None
+    if source == "analog_tail":
+        an = seed.get("analogs") or {}
+        if (an.get("independent") or 0) < MIN_ANALOG_TAIL:
+            return None
+        med, lo, hi = (_finite(an.get(k)) for k in ("median_pct", "p10_pct", "p90_pct"))
+        if med is None or lo is None or hi is None:
+            return None
+        v = (hi - med) if sign > 0 else (lo - med)
+        return v if v * sign > 0 else None
+    if source == "factor_volatility":
+        row = next((r for r in (seed.get("factors") or {}).get("rows") or [] if r["key"] == factor), None)
+        sd = _finite((row or {}).get("sd_daily_pct"))
+        if not row or not sd:
+            return None
+        move = sd * math.sqrt(int(seed["horizon_sessions"]))                  # the proxy's move, percent
+        conv = float(row.get("scale") or 1.0) if row["unit"] == "bp" else float(row.get("index_scale") or 1.0)
+        return round(sign * move / conv, 4) if conv else None
+    return None
+
+
+def analog_source_ids(seed: dict[str, Any]) -> list[str]:
+    return [s["id"] for s in seed.get("sources") or [] if s.get("kind") == "analog"][:1]
+
+
 def markdown(seed: dict[str, Any], output_prompt: str, template: dict[str, Any]) -> str:
     """The packet a person uploads to a scenario provider. Plain text and figures; nothing about the account."""
     s, cat, b = seed, seed["catalyst"], seed["base"]
@@ -356,6 +408,8 @@ def markdown(seed: dict[str, Any], output_prompt: str, template: dict[str, Any])
     if v.get("event_move_pct"):
         lines.append(f"- Earnings in {v.get('event_in_days')} trading days; options price a move of ±{v['event_move_pct']:.1f}% for it.")
     lines.append(f"- Options data as of {v.get('as_of') or s['cutoff']}.")
+    if s.get("strategy_context"):
+        lines += ["", "## What the strategies being compared depend on", ""] + [f"- {x}" for x in s["strategy_context"]]
     lines += ["", "## Sources", ""]
     for src in s["sources"]:
         stamp = f"published {src['published_at']}, " if src.get("published_at") else ""
@@ -427,7 +481,9 @@ class Scenarios:
         return r
 
     # --- 1. the seed ---------------------------------------------------------------------------------------------------
-    def create_seed(self, study_id: str, body: SeedIn) -> dict[str, Any]:
+    def create_seed(self, study_id: str, body: SeedIn, strategy_context: list[str] | None = None) -> dict[str, Any]:
+        """`strategy_context` (4.3, the one-click pipeline): the kinds of strategy the study compares and what moves
+        matter to them, in words; never the contracts, the quantities, the budget or the account."""
         self._on()
         st = self._study(study_id)
         row, fc, ev, view = st["row"], st["forecast"], st["evidence"], st["view"]
@@ -496,6 +552,8 @@ class Scenarios:
                   "cutoff": _iso(cutoff), "horizon_sessions": h, "anchor": frame["anchor"], "sessions": frame["sessions"],
                   "catalyst": cat, "catalyst_session": cat_session, "catalyst_timing_note": timing_note, "base": base,
                   "analogs": analogs, "factors": fx, "volatility": volatility, "sources": sources, "missing": missing, "question": q}
+        if strategy_context:
+            packet["strategy_context"] = [str(x)[:300] for x in strategy_context][:8]
         seed_hash = C.digest({"seed_version": SEED_VERSION, **packet})
         hit = self.svc.db.one("SELECT id FROM scenario_seeds WHERE study_id = ? AND seed_hash = ?", (study_id, seed_hash))
         if hit is not None:
@@ -607,6 +665,19 @@ class Scenarios:
             out.append(a)
         return out
 
+    @staticmethod
+    def normalized(imp: C.ScenarioImport) -> list[dict[str, Any]]:
+        """The cases in order (central, bullish, bearish), labelled, each driver marked supported when it cites."""
+        order = {k: i for i, k in enumerate(C.CASE_KEYS)}
+        cases = []
+        for c in sorted(imp.cases, key=lambda x: order[x.key]):
+            d = c.model_dump()
+            d["label"] = C.CASE_LABELS[c.key]
+            for drv in d["drivers"]:
+                drv["supported"] = bool(drv["source_ids"])
+            cases.append(d)
+        return cases
+
     def import_run(self, study_id: str, body: RunIn) -> dict[str, Any]:
         self._on()
         if body.provider != "manual":
@@ -620,14 +691,7 @@ class Scenarios:
                                f"{study_id}. Open that study, or export this one's evidence.")
         seed = self._seed(body.seed_id)
         imp = self.check_import(seed, body.result)
-        order = {k: i for i, k in enumerate(C.CASE_KEYS)}
-        cases = []
-        for c in sorted(imp.cases, key=lambda x: order[x.key]):
-            d = c.model_dump()
-            d["label"] = C.CASE_LABELS[c.key]
-            for drv in d["drivers"]:
-                drv["supported"] = bool(drv["source_ids"])
-            cases.append(d)
+        cases = self.normalized(imp)
         response_hash = C.digest(imp.model_dump())
         excerpt = (body.report_excerpt or "").strip()[:MAX_EXCERPT] or None
         hit = self.svc.db.one("SELECT id FROM scenario_runs WHERE seed_id = ? AND provider = 'manual' AND response_hash = ? "
@@ -691,7 +755,18 @@ class Scenarios:
         if src == "provider" and not ids:
             issues.append(f"{where}: a size from the provider needs the packet's source ids it rests on (or call it a user stress)")
 
-    def create_version(self, run_id: str, body: C.ScenarioVersionIn) -> dict[str, Any]:
+    def _check_rule(self, seed: dict[str, Any], where: str, source: str, value: float, issues: list[str], factor: str | None = None) -> None:
+        """A size credited to a deterministic rule must be the rule's own (4.3); any other size is a user stress."""
+        if source not in ("analog_tail", "implied_sensitivity", "factor_volatility"):
+            return
+        want = rule_value(seed, source, "up" if value > 0 else "down", factor)
+        if want is None:
+            issues.append(f"{where}: the packet has nothing for the {source.replace('_', ' ')} rule; call it a user stress")
+        elif abs(value - want) > RULE_TOLERANCE * max(1.0, abs(want)):
+            issues.append(f"{where}: the {source.replace('_', ' ')} rule gives {want:+.2f}; another size is a user stress")
+
+    def create_version(self, run_id: str, body: C.ScenarioVersionIn, origin: str = "manual") -> dict[str, Any]:
+        """`origin` is "manual" (applied by a person) or "auto" (the one-click pipeline, 4.3)."""
         self._on()
         r = self._run_row(run_id)
         if r["status"] != "complete":
@@ -720,6 +795,9 @@ class Scenarios:
                         issues.append(f"{w}.issuer: the packet has no options-implied move; call it a user stress")
                     elif abs(abs(i.value_pct) - implied) > IMPLIED_TOLERANCE:
                         issues.append(f"{w}.issuer: the options-implied move is ±{implied:.2f}%; another size is a user stress")
+                if i.source == "factor_volatility":
+                    issues.append(f"{w}.issuer.source: a factor's volatility sizes a factor shock, not the stock's own move")
+                self._check_rule(seed, f"{w}.issuer", i.source, i.value_pct, issues)
                 self._check_source(f"{w}.issuer", i.source, i.source_ids, known, issues)
             fkeys = [f.key for f in a.factors]
             if len(set(fkeys)) != len(fkeys):
@@ -736,8 +814,10 @@ class Scenarios:
                     issues.append(f"{fw}.value: {f.value} {row['unit']} is outside ±{limit:g} {row['unit']} for {row['label']}")
                 if f.session > h:
                     issues.append(f"{fw}.session: {f.session} is after the horizon ({h} sessions)")
-                if f.source == "options_implied_move":
-                    issues.append(f"{fw}.source: the options-implied move is a size for the stock's own move, not a factor's")
+                if f.source in ("options_implied_move", "analog_tail", "implied_sensitivity"):
+                    issues.append(f"{fw}.source: {f.source.replace('_', ' ')} sizes the stock's own move, not a factor's")
+                else:
+                    self._check_rule(seed, fw, f.source, f.value, issues, factor=f.key)
                 self._check_source(fw, f.source, f.source_ids, known, issues)
             if a.dispersion is not None:
                 d = a.dispersion
@@ -745,6 +825,10 @@ class Scenarios:
                     issues.append(f"{w}.dispersion.session: {d.session} is after the horizon ({h} sessions)")
                 if d.source == "options_implied_move" and implied is None:
                     issues.append(f"{w}.dispersion: the packet has no options-implied move; call it a user stress")
+                if d.source in ("analog_tail", "factor_volatility"):
+                    issues.append(f"{w}.dispersion.source: {d.source.replace('_', ' ')} sizes a move, not extra uncertainty")
+                elif d.source == "implied_sensitivity":
+                    self._check_rule(seed, f"{w}.dispersion", d.source, d.value_pct, issues)
                 self._check_source(f"{w}.dispersion", d.source, d.source_ids, known, issues)
         if issues:
             raise RequestError("The assumptions were not applied: " + "; ".join(issues))
@@ -758,9 +842,9 @@ class Scenarios:
             cur.execute("SELECT COALESCE(MAX(version), 0) FROM scenario_versions WHERE run_id = ?", (run_id,))
             n = int(cur.fetchone()[0]) + 1
             cur.execute("""INSERT INTO scenario_versions (id, run_id, version, parent_version, created_at, calc_version, assumptions_json,
-                           result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (vid, run_id, n, body.parent_version, now, CALC_VERSION, json.dumps(assumptions), json.dumps(result)))
-        self.svc.bus.publish("scenario.applied", vid, run_id=run_id, study_id=r["study_id"], symbol=seed["symbol"], version=n)
+                           result_json, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (vid, run_id, n, body.parent_version, now, CALC_VERSION, json.dumps(assumptions), json.dumps(result), origin))
+        self.svc.bus.publish("scenario.applied", vid, run_id=run_id, study_id=r["study_id"], symbol=seed["symbol"], version=n, origin=origin)
         return self.version(vid)
 
     def compute(self, seed: dict[str, Any], cases: dict[str, dict[str, Any]], assumptions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -806,6 +890,7 @@ class Scenarios:
         last = date.fromisoformat(res["sessions"][-1]["date"])
         today = datetime.now(NY).date()
         return {"id": v["id"], "run_id": v["run_id"], "version": v["version"], "parent_version": v["parent_version"],
+                "origin": v["origin"] if "origin" in v.keys() else "manual",
                 "created_at": v["created_at"], "calc_version": v["calc_version"], "assumptions": json.loads(v["assumptions_json"]),
                 **res, "stale": last < today,
                 "stale_note": (f"Its last session ({last.isoformat()}) has passed: it is shown at its original dates and prices."
