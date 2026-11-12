@@ -299,6 +299,15 @@ def factor_terms(rows: list[dict[str, Any]], scenario: dict[str, Any], returns: 
     active = [r for r in rows if r.get("on") and r.get("beta") is not None and r["key"] in returns["proxies"]]
     order = [r["key"] for r in active]
     fit = joint_fit(returns["stock"], returns["proxies"], order)
+    return terms_from_fit(active, fit, scenario, returns.get("days"))
+
+
+def terms_from_fit(active: list[dict[str, Any]], fit: dict[str, dict[str, Any]], scenario: dict[str, Any],
+                   fit_days: int | None = None) -> list[dict[str, Any]]:
+    """The factor terms from a joint fit already made (`joint_fit`), for the rows in `active` in the fit's order: the
+    arithmetic of `factor_terms` without the daily returns, so a fit frozen at a cutoff (Catalyst Scenarios, 4.1) can
+    be priced again and again under different scenario values with exactly the same betas and loadings."""
+    order = [r["key"] for r in active]
     moves: dict[str, float] = {}
     values: dict[str, float] = {}
     for r in active:
@@ -318,7 +327,7 @@ def factor_terms(rows: list[dict[str, Any]], scenario: dict[str, Any], returns: 
         terms.append({"key": k, "label": r["label"], "value": values[k], "unit": r["unit"], "proxy_move_pct": moves[k],
                       "unique_move_pct": uniq[k], "shared_pct": moves[k] - uniq[k], "beta": r["beta"],
                       "beta_unique": fit[k]["beta_unique"], "explained": fit[k]["explained"],
-                      "redundant": bool(fit[k].get("redundant")), "contribution_pct": contrib, "fit_days": returns.get("days")})
+                      "redundant": bool(fit[k].get("redundant")), "contribution_pct": contrib, "fit_days": fit_days})
     return terms
 
 
@@ -530,4 +539,4 @@ def earnings_days(svc: Any, symbol: str) -> dict[str, Any] | None:
 
 
 __all__ = ["FACTORS", "NON_PRICE_FACTORS", "Factors", "Stooq", "parse_stooq", "beta_of", "model_path", "pct_move",
-           "earnings_days", "aligned_returns", "joint_fit", "unique_moves", "factor_terms", "log_returns"]
+           "earnings_days", "aligned_returns", "joint_fit", "unique_moves", "factor_terms", "terms_from_fit", "log_returns"]

@@ -63,3 +63,55 @@ def model_trade_links(cur: sqlite3.Cursor) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_model_links_prediction ON model_trade_links (shadow_run, prediction_id, role)")
     # one entry per frozen forecast, whatever happens after the proposal is written
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_links_one_entry ON model_trade_links (shadow_run, prediction_id) WHERE role = 'entry'")
+
+
+@migration(24, "4.1 Catalyst Scenarios: frozen evidence seeds, provider runs and reviewed scenario versions")
+def catalyst_scenarios(cur: sqlite3.Cursor) -> None:
+    """A study's Catalyst Scenarios. A seed is the shareable evidence packet frozen from a saved study (its anchor price,
+    its forecast sessions, the catalyst, the sources with stable ids); a run is one provider's Central, Bullish and
+    Bearish cases for one seed (a manual import in 4.1; the statuses for a queued provider are allowed now so a later
+    adapter needs no migration); a version is one reviewed set of assumptions and the price paths computed from them.
+    Edits make a new version: none is changed after it is written."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS scenario_seeds (
+        id              TEXT PRIMARY KEY,
+        study_id        TEXT NOT NULL REFERENCES studies (id),
+        mode            TEXT NOT NULL,
+        symbol          TEXT NOT NULL,
+        horizon_days    INTEGER NOT NULL CHECK (horizon_days > 0),
+        created_at      TEXT NOT NULL,
+        cutoff          TEXT NOT NULL,
+        schema_version  INTEGER NOT NULL,
+        seed_hash       TEXT NOT NULL,
+        packet_json     TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_seeds_study ON scenario_seeds (study_id, created_at)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS scenario_runs (
+        id              TEXT PRIMARY KEY,
+        seed_id         TEXT NOT NULL REFERENCES scenario_seeds (id),
+        study_id        TEXT NOT NULL REFERENCES studies (id),
+        provider        TEXT NOT NULL,
+        status          TEXT NOT NULL CHECK (status IN ('queued', 'running', 'complete', 'failed', 'canceled', 'needs_attention')),
+        created_at      TEXT NOT NULL,
+        completed_at    TEXT,
+        schema_version  INTEGER NOT NULL,
+        prompt_version  TEXT NOT NULL,
+        model_version   TEXT,
+        config_json     TEXT NOT NULL DEFAULT '{}',
+        external_json   TEXT NOT NULL DEFAULT '{}',
+        response_hash   TEXT,
+        cases_json      TEXT,
+        report_excerpt  TEXT,
+        error           TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_runs_study ON scenario_runs (study_id, created_at)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS scenario_versions (
+        id                TEXT PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES scenario_runs (id),
+        version           INTEGER NOT NULL CHECK (version > 0),
+        parent_version    INTEGER,
+        created_at        TEXT NOT NULL,
+        calc_version      TEXT NOT NULL,
+        assumptions_json  TEXT NOT NULL,
+        result_json       TEXT NOT NULL,
+        UNIQUE (run_id, version)
+    )""")

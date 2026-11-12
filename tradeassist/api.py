@@ -130,6 +130,13 @@ TEST_HOSTS: tuple[str, ...] = ()
 # API reads that another site must not be able to set off through the browser (an <img> or a
 # script tag), because they cost requests to the data source, Finnhub or more.
 GUARDED_READS = ("/api/", "/v2/", "/v4/")
+# 4.1: Catalyst Scenarios' evidence packets and results are the study's research: another site's page reads none of them.
+GUARDED_V3_READS = ("/v3/scenario-",)
+
+
+def guarded_read(path: str) -> bool:
+    return path.startswith(GUARDED_READS) or path.startswith(GUARDED_V3_READS) or (
+        path.startswith("/v3/studies/") and "/scenario-" in path)
 
 
 def create_app(settings: Settings | None = None, assistant: TradeAssistant | None = None) -> FastAPI:
@@ -148,7 +155,7 @@ def create_app(settings: Settings | None = None, assistant: TradeAssistant | Non
     async def _same_origin_writes(request: Request, call_next):
         # Reads: the browser marks a request another site's page made; the app's own page sends
         # same-origin, and typing an address sends none.
-        if request.method in ("GET", "HEAD") and request.url.path.startswith(GUARDED_READS) and \
+        if request.method in ("GET", "HEAD") and guarded_read(request.url.path) and \
                 request.headers.get("sec-fetch-site") in ("cross-site", "same-site"):
             emit("cross_site_refused", logging.WARNING, path=request.url.path, origin=request.headers.get("origin"))
             return JSONResponse(status_code=403, content={"error": "Refused: this request came from another web "
