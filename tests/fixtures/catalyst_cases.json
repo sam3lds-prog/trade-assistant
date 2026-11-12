@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "seed_id": "<exported-seed-id>",
+  "horizon_sessions": 5,
+  "cases": [
+    {
+      "key": "central",
+      "trigger": "Results and the outlook land close to the pre-event consensus",
+      "stock_direction": "flat",
+      "drivers": [
+        {"type": "issuer_event", "direction": "flat", "timing": "first_session_after_release",
+         "reason": "Little new information, so the stock trades with the market", "source_ids": ["S1"]}
+      ],
+      "priced_in": "The options market already prices a move of about the usual size",
+      "invalidation": "A guidance change in either direction",
+      "missing_evidence": ["Comparable pre-event consensus"],
+      "hypotheses": []
+    },
+    {
+      "key": "bullish",
+      "trigger": "Management raises the outlook above the pre-event consensus",
+      "stock_direction": "up",
+      "drivers": [
+        {"type": "issuer_event", "direction": "up", "timing": "first_session_after_release",
+         "reason": "Investors re-rate the growth path", "source_ids": ["S1"], "proposed_value": 4.0, "proposed_unit": "pp"},
+        {"type": "sector", "direction": "up", "timing": "spread_over_horizon", "factor": "sector",
+         "reason": "Peers rally in sympathy", "source_ids": []}
+      ],
+      "priced_in": "Part of a beat is expected after the recent run-up",
+      "invalidation": "The raise comes with weaker margins",
+      "missing_evidence": [],
+      "hypotheses": ["Short covering could extend the first-day move"]
+    },
+    {
+      "key": "bearish",
+      "trigger": "Management's outlook is below the pre-event consensus",
+      "stock_direction": "down",
+      "drivers": [
+        {"type": "issuer_event", "direction": "down", "timing": "first_session_after_release",
+         "reason": "Investors focus on the new outlook", "source_ids": ["S1"]},
+        {"type": "market", "direction": "down", "timing": "first_session_after_release", "factor": "us_market",
+         "reason": "A weak tape adds to the reaction", "source_ids": ["S2"], "proposed_value": -1.0, "proposed_unit": "%"}
+      ],
+      "priced_in": "Little: positioning is long into the release",
+      "invalidation": "Management maintains or raises the outlook",
+      "missing_evidence": ["Comparable pre-event consensus"],
+      "hypotheses": []
+    }
+  ]
+}

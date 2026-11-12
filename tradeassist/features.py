@@ -34,6 +34,8 @@ FEATURE_DEFAULTS: dict[str, bool] = {
     "opportunity_blend": True,
     "paper_trading": True,
     "options_backtest": False,
+    # 4.1: Catalyst Scenarios in the Research study (evidence export, manual import, scenario paths on the chart)
+    "catalyst_scenarios": True,
 }
 
 TRUE_WORDS = {"1", "true", "yes", "on"}

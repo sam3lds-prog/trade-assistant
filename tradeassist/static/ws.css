@@ -316,3 +316,17 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 .ws-notice { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 12px; font-size: 0.86rem;
   background: color-mix(in srgb, var(--accent) 10%, var(--panel)); border-bottom: 1px solid var(--line); }
 .ws-notice span { flex: 1 1 30rem; }
+
+/* 4.1 Catalyst Scenarios, in the study's Forecast section */
+.ws-catalyst { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 6px; }
+.ws-catalyst textarea { width: 100%; box-sizing: border-box; font: inherit; }
+.ws-catalyst .ws-cat-json, .ws-cat-report { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.ws-cat-report { white-space: pre-wrap; max-height: 220px; overflow: auto; background: var(--sunk); padding: 6px; border-radius: 4px; }
+.ws-cases { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin: 8px 0; }
+.ws-case { border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 6px; padding: 6px 8px; background: var(--panel); }
+.ws-case h5 { margin: 2px 0 4px; font-size: 13px; }
+.ws-case ul.plain li { margin: 2px 0; }
+.ws-case input[type="number"] { width: 6em; }
+.ws-cat-factor input[type="text"], .ws-cat-source input[type="text"] { width: 7em; }
+.ws-case-form { border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; }
+.ws-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }

@@ -28,6 +28,9 @@ V3_WRITES = {
     # 3.1: run a failed or interrupted study again (a model, from its saved inputs), and build a draft trade from a
     # study's strategy: it computes the draft and previews the risk checks, and writes no proposal and sends nothing.
     "/v3/studies/{study_id}/retry", "/v3/drafts",
+    # 4.1: Catalyst Scenarios. Freeze a study's evidence into a packet, save a provider's cases (a manual import, checked
+    # against the packet) and save reviewed assumptions with the paths they give. Models and records; no orders.
+    "/v3/studies/{study_id}/scenario-seeds", "/v3/studies/{study_id}/scenario-runs", "/v3/scenario-runs/{run_id}/versions",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.

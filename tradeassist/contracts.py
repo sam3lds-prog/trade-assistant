@@ -404,9 +404,197 @@ def can_move(current: str, target: str) -> bool:
     return target in TRANSITIONS.get(current, frozenset())
 
 
+# --- 4.1 Catalyst Scenarios -------------------------------------------------------------------------------------------
+#
+#     StudyRun
+#       └── ScenarioSeed (a frozen, shareable evidence packet)     scenario_seeds
+#             └── ScenarioRun (a provider's cases: manual import)  scenario_runs
+#                   └── ScenarioVersion (reviewed assumptions,     scenario_versions
+#                                        and the price paths they give)
+#
+# The provider (a person pasting a report, later an AI or a MiroFish simulation) proposes conditions and directions
+# in a fixed schema (ScenarioImport). It never writes a price or a probability: the sizes, units and timing are a
+# separate, reviewed object (CaseAssumptions) and the app computes the paths from the study's own base forecast.
+
+SCENARIO_SCHEMA_VERSION = 1
+CASE_KEYS = ("central", "bullish", "bearish")
+CASE_LABELS = {"central": "Central", "bullish": "Bullish", "bearish": "Bearish"}
+ScenarioCaseKey = Literal["central", "bullish", "bearish"]
+CatalystKind = Literal["earnings", "guidance", "sector_shock", "macro", "product", "regulatory", "analyst", "other"]
+EventTime = Literal["before_open", "during_session", "after_close", "unknown"]
+DriverType = Literal["issuer_event", "market", "sector", "macro", "positioning", "sentiment", "other"]
+DriverTiming = Literal["before_event", "first_session_after_release", "spread_over_horizon", "by_horizon", "unknown"]
+MoveDirection = Literal["up", "down", "flat"]
+AssumptionSource = Literal["options_implied_move", "provider", "user_stress"]
+
+
+class CatalystSpec(Strict):
+    """The event a set of scenarios is about: real (with its date and time) or hypothetical."""
+    kind: CatalystKind
+    title: str = Field(min_length=3, max_length=200)
+    description: str = Field(default="", max_length=1500)
+    hypothetical: bool = False
+    event_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    event_time: EventTime = "unknown"
+
+
+class SourceExcerptIn(Strict):
+    """A public source the user adds to the packet: a press release, an article. Published before the cutoff."""
+    title: str = Field(min_length=1, max_length=200)
+    published_at: str = Field(min_length=10, max_length=40)
+    url: str | None = Field(default=None, max_length=500)
+    excerpt: str = Field(default="", max_length=1200)
+
+    @field_validator("url")
+    @classmethod
+    def _web(cls, v: str | None) -> str | None:
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("a source's address must start with http:// or https://")
+        return v or None
+
+
+class ScenarioSource(Strict):
+    """One item of the packet's evidence, with a stable id the provider must cite (S1, S2 ...)."""
+    id: str = Field(pattern=r"^S\d{1,3}$")
+    title: str
+    kind: str
+    summary: str = ""
+    published_at: str | None = None    # when the source itself was published, when known
+    available_at: str                  # when the app had it (never after the cutoff)
+    url: str | None = None
+    origin: Literal["study", "user"]
+
+
+class ScenarioSession(Strict):
+    index: int = Field(ge=1)
+    date: str
+    close_at: str                      # the session's close, UTC
+
+
+class ScenarioAnchor(Strict):
+    """The price every path starts from, kept as it was: never the chart's latest close."""
+    price: float = Field(gt=0)
+    at: str                            # when the price was read (the study's as-of, UTC)
+    basis: Literal["study_quote"]
+    bar_date: str                      # the last complete daily bar before the first forecast session
+
+
+class ScenarioSeed(Strict):
+    schema_version: int = SCENARIO_SCHEMA_VERSION
+    seed_id: str
+    seed_hash: str
+    created_at: str
+    study_id: str
+    study_fingerprint: str
+    symbol: str
+    data_mode: str
+    data_source: str
+    cutoff: str
+    horizon_sessions: int = Field(gt=0)
+    anchor: ScenarioAnchor
+    sessions: list[ScenarioSession]
+    catalyst: CatalystSpec
+    catalyst_session: int | None = Field(default=None, ge=1)
+    catalyst_timing_note: str = ""
+    base: dict[str, Any]
+    analogs: dict[str, Any] = Field(default_factory=dict)
+    factors: dict[str, Any] = Field(default_factory=dict)
+    volatility: dict[str, Any] = Field(default_factory=dict)
+    sources: list[ScenarioSource]
+    missing: list[str] = Field(default_factory=list)
+    question: str
+
+
+class ScenarioDriver(Strict):
+    """One channel by which the catalyst could move the stock, as the provider proposes it."""
+    type: DriverType
+    direction: MoveDirection
+    timing: DriverTiming = "unknown"
+    session: int | None = Field(default=None, ge=1, le=20)
+    reason: str = Field(min_length=1, max_length=500)
+    source_ids: list[str] = Field(default_factory=list, max_length=10)
+    factor: str | None = Field(default=None, max_length=40)        # a known factor key, for market, sector and macro drivers
+    proposed_value: float | None = None                              # a size the provider suggests; reviewed before use
+    proposed_unit: Literal["%", "bp", "pp"] | None = None
+
+
+class ScenarioCase(Strict):
+    key: ScenarioCaseKey
+    trigger: str = Field(min_length=1, max_length=400)
+    stock_direction: Literal["up", "down", "flat", "mixed"]
+    drivers: list[ScenarioDriver] = Field(default_factory=list, max_length=6)
+    priced_in: str = Field(default="", max_length=600)
+    invalidation: str = Field(min_length=1, max_length=400)
+    missing_evidence: list[str] = Field(default_factory=list, max_length=8)
+    hypotheses: list[str] = Field(default_factory=list, max_length=8)
+    provider_confidence: float | None = Field(default=None, ge=0, le=1)   # research metadata, never a probability
+
+    @field_validator("missing_evidence", "hypotheses")
+    @classmethod
+    def _short(cls, v: list[str]) -> list[str]:
+        if any(not isinstance(x, str) or not x.strip() or len(x) > 300 for x in v):
+            raise ValueError("each entry is a sentence of at most 300 characters")
+        return v
+
+
+class ScenarioImport(Strict):
+    """A provider's answer: Central, Bullish and Bearish cases for one seed. Paths and probabilities are not accepted."""
+    schema_version: Literal[1]
+    seed_id: str = Field(min_length=1, max_length=64)
+    symbol: str | None = Field(default=None, max_length=12)
+    horizon_sessions: int | None = None
+    data_mode: str | None = Field(default=None, max_length=20)
+    sessions: list[str] | None = Field(default=None, max_length=20)
+    cases: list[ScenarioCase] = Field(min_length=1, max_length=3)
+
+
+class IssuerAssumption(Strict):
+    """A stock-specific jump for the catalyst, in percentage points of cumulative return, from its session on."""
+    value_pct: float = Field(ge=-60, le=60)
+    session: int = Field(ge=1, le=20)
+    source: AssumptionSource
+    source_ids: list[str] = Field(default_factory=list, max_length=10)
+    note: str = Field(default="", max_length=300)
+
+
+class FactorAssumption(Strict):
+    """A shock to one of the What-If factors, in the factor's own unit (% or bp), landing on a session and staying."""
+    key: str = Field(min_length=1, max_length=40)
+    value: float
+    session: int = Field(default=1, ge=1, le=20)
+    source: AssumptionSource = "user_stress"
+    source_ids: list[str] = Field(default_factory=list, max_length=10)
+    note: str = Field(default="", max_length=300)
+
+
+class DispersionAssumption(Strict):
+    """Extra uncertainty for the event, in percentage points of log-return standard deviation, from its session."""
+    value_pct: float = Field(ge=0, le=40)
+    session: int = Field(ge=1, le=20)
+    source: AssumptionSource
+    source_ids: list[str] = Field(default_factory=list, max_length=10)
+    note: str = Field(default="", max_length=300)
+
+
+class CaseAssumptions(Strict):
+    key: ScenarioCaseKey
+    visible: bool = True
+    issuer: IssuerAssumption | None = None
+    factors: list[FactorAssumption] = Field(default_factory=list, max_length=10)
+    dispersion: DispersionAssumption | None = None
+
+
+class ScenarioVersionIn(Strict):
+    parent_version: int | None = Field(default=None, ge=1)
+    cases: list[CaseAssumptions] = Field(min_length=1, max_length=3)
+
+
 CONTRACTS = {m.__name__: m for m in (Provenance, RankComponent, Edge, Observation, Opportunity, EvidenceItem, EvidenceSnapshot,
                                       ScenarioPath, Calibration, ForecastVersion, StrategyCandidate, StudyRun, OptionTerms,
-                                      OrderTerms, ExitPlan, RiskCheck, RiskAssessment, TradeProposal, Fill, BrokerOrder)}
+                                      OrderTerms, ExitPlan, RiskCheck, RiskAssessment, TradeProposal, Fill, BrokerOrder,
+                                      CatalystSpec, SourceExcerptIn, ScenarioSource, ScenarioSeed, ScenarioDriver, ScenarioCase,
+                                      ScenarioImport, IssuerAssumption, FactorAssumption, DispersionAssumption, CaseAssumptions,
+                                      ScenarioVersionIn)}
 
 
 def schemas() -> dict[str, Any]:

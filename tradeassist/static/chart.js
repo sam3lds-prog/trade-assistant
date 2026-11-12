@@ -427,6 +427,12 @@ function interactiveChart(symbol) {
   function onHover(param) {
     if (!placing) { const b0 = param && param.time && state_.data ? bar(indexOfTime(param.time)) : null; for (const fn of crossFns) { try { fn(b0 ? dayOfTl(b0.tl) : null); } catch (e) { console.error(e); } } }
     if (!param || !param.time || !state_.data) { return; }
+    // 4.1: lines that carry a note for the hovered time (a scenario's price, move, session and trigger) say it too;
+    // past the last bar there is no bar to describe, only them.
+    const tips = [];
+    for (const ln of Object.values(state_.lines)) { const t = ln.tips && ln.tips[param.time]; if (t) tips.push(t); }
+    const lastBar = state_.data.bars[state_.data.bars.length - 1];
+    if (lastBar && param.time > lastBar.tl) { if (tips.length) readout.textContent = tips.join("  ·  "); return; }
     const i = indexOfTime(param.time);
     const b = bar(i);
     if (!b) return;
@@ -435,7 +441,7 @@ function interactiveChart(symbol) {
     for (const [key, label] of [["ema20", "EMA20"], ["sma50", "SMA50"], ["sma200", "SMA200"], ["vwap", "VWAP"], ["rsi", "RSI"], ["macd", "MACD"], ["atr", "ATR"]]) {
       if (isNum(b[key]) && (state_.show[key] || key === "atr" || key === "rsi" && state_.show.rsi || key === "macd" && state_.show.macd)) parts.push(`${label} ${num(b[key], key === "rsi" ? 0 : 2)}`);
     }
-    readout.textContent = parts.join("  ·  ");
+    readout.textContent = parts.concat(tips).join("  ·  ");
   }
   function onClick(param) {
     if (!param || !param.time || !state_.data) return;
@@ -611,5 +617,7 @@ function interactiveChart(symbol) {
   loadStructure();
   return { panel, extras: [outlookBox, patternBox, turnBox], structure: structBox, dispose,
     setLines, chartArgs, showAhead, subscribe: fn => { listeners.push(fn); }, redraw: () => { if (state_.data) draw(); },
+    // 4.1: the lines drawn by key with their points, read-only (a copy), for the widgets and the tests that check them.
+    lines: prefix => JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(state_.lines).filter(([k]) => !prefix || k.startsWith(prefix))))),
     crosshair: { on: fn => { crossFns.add(fn); return () => crossFns.delete(fn); }, set: crosshairAt } };
 }

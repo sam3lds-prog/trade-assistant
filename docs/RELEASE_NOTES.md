@@ -20,6 +20,32 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.1.0 — Catalyst Scenarios (manual pilot)
+
+The first of four steps of the Trade Assistant + MiroFish plan ([CATALYST_SCENARIOS.md](CATALYST_SCENARIOS.md)).
+**No trading permission is added or changed**: nothing here proposes, approves or sends an order.
+
+- **Catalyst Scenarios** in the Research study's Forecast section (1- and 5-day studies): name an event, **Export
+  evidence** (a Markdown packet downloads and the forecasting question is copied), run it in a scenario provider such as
+  the MiroFish dashboard, **Import cases** (paste the JSON, or fill in a form from a text report), review each case's
+  assumptions with their sources, and **Apply assumptions** to save a version and draw it.
+- The packet is frozen from the study: its anchor price and when it was read, the exact exchange sessions, the session
+  the catalyst first trades in, the base forecast, comparable situations, a factor fit made only from closes up to the
+  study's last bar, options-implied figures, and sources with stable ids. Nothing about the account goes in it.
+- The provider's answer is checked whole against its packet; a result for another study, stock, horizon or data mode
+  is refused, as are unknown citations, factors and units, sessions past the horizon, non-finite numbers and any
+  probability or path. A claim citing nothing is kept and labelled a hypothesis.
+- Each case's path is the base forecast, plus the What-If factor model's incremental effect under the case's shocks
+  (the same arithmetic, on the frozen fit, so a sector shock counts only its own part), plus a stock-specific jump
+  from its session. A zero shock is the base exactly. Bands are the base's own, plus any extra event uncertainty.
+- **Fixed coordinates.** Scenario versions store the anchor, the session dates and the dollar points, and the study's
+  own *Draw on the linked chart* now draws from the study's anchor and dates too: a chart that refreshes to a newer
+  close no longer moves an old study's line. Hovering a future session on the chart shows each line's price, move,
+  session and trigger.
+- `FEATURE_CATALYST_SCENARIOS=0` hides it; the rest of Research is unchanged.
+- Trading-database migration 24 adds `scenario_seeds`, `scenario_runs` and `scenario_versions`. New routes are under
+  `/v3/studies/{id}/scenario-*`, `/v3/scenario-*`; their reads are refused to another site's page.
+
 ## 4.0.1 — building the replay's dataset from Robinhood
 
 - **SPY first, and a clear reason when it fails.** `--replay dataset build` fetches SPY (whose trading days are the

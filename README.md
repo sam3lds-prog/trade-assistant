@@ -11,6 +11,16 @@ go to Robinhood only if you switch live execution on in `.env` and choose it in 
 policy (see "Version 3" below). It is not financial advice, and passing every check does not
 make a trade safe. Buying an option always puts the whole premium at risk.
 
+## 4.1: Catalyst Scenarios
+
+A Research study can now carry **Catalyst Scenarios**: one event's Central, Bullish and Bearish reactions. Export the
+study's evidence (a Markdown packet, with nothing about your account in it), run it in a scenario provider such as the
+MiroFish dashboard, import the cases it returns, review each case's assumptions with their sources, and draw them
+dashed beside the base forecast on the chart. The app computes every path from the study's own base, its anchor price
+and its session dates; no case has a probability. It is the manual pilot (the first of four steps in the plan): strategy
+comparison under the cases, an automated provider and forward scoring come later. How to use and test it:
+[docs/CATALYST_SCENARIOS.md](docs/CATALYST_SCENARIOS.md).
+
 ## Version 4: a model that learns from its own frozen predictions
 
 4.0 adds a learning engine that replays ten years of history one trading session at a time. On each session it

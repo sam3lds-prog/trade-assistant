@@ -410,7 +410,8 @@ class Research:
         study = C.StudyRun(id=study_id, symbol=sym, created_at=as_of, horizon_days=h, thesis=req.thesis, direction=req.direction,
                            objective=req.objective, opportunity_id=req.opportunity_id, status=status, evidence=evidence,
                            forecast=forecast_contract, strategies=cands, fingerprint=evidence.provenance.inputs_hash or "")
-        view = {"last": last, "future_times": self._future_times(bars, h), "peers": pr, "analogs": found, "strategies": strategies,
+        view = {"last": last, "future_times": self._future_times(bars, h), "last_bar_date": str(pd.Timestamp(bars["date"].iloc[-1]).date()),
+                "peers": pr, "analogs": found, "strategies": strategies,
                 "forecast": {k: fc[k] for k in ("median_pct", "low_pct", "high_pct", "sigma", "band_k", "regime")},
                 "data_source": svc.market.info.label, "data_mode": svc.market.info.mode}
         self._save(study, req, view)
@@ -471,6 +472,13 @@ class Research:
                             "evidence": json.loads(r["evidence_json"]), "forecast": json.loads(r["forecast_json"]) if r["forecast_json"] else None,
                             "strategies": json.loads(r["strategies_json"] or "[]"), "fingerprint": r["fingerprint"]}
             out["view"] = json.loads(r["view_json"] or "{}")
+            # 4.1: the study's fixed coordinates (its anchor price and session dates), so the chart draws it where it was
+            # made instead of from the chart's newest close.
+            from .scenarios import study_frame
+            try:
+                out["frame"] = study_frame(r["created_at"], out["view"])
+            except (ValueError, TypeError):
+                out["frame"] = None
             # Where each strategy can go under the policy and broker in force now (not when the study ran).
             from .drafts import routes_for
             try:

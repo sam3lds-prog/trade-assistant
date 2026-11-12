@@ -11,6 +11,11 @@
   const THESES = [["swing", "Multi-day swing"], ["intraday_bounce", "Intraday bounce"], ["earnings_reaction", "Earnings reaction"],
     ["reversal", "Reversal"], ["investment", "Longer-term investment"]];
   const FORECAST_COLOR = "#2a9d8f", ALT_COLOR = "#8a96a3";
+  // 4.1 Catalyst Scenarios: each case's colour on the chart, and the daily chart's time for a session's date (its bars
+  // are drawn at 09:30 New York written as UTC: chartview.local_shift).
+  const CASE_COLORS = { central: "#6c757d", bullish: "#2f9e44", bearish: "#d9480f" };
+  const dayTime = d => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), 9, 30) / 1000;
+  const catalystOn = () => typeof state !== "undefined" && !!state.status && !!state.status.features && state.status.features.catalyst_scenarios === true;
 
   /* ---------- the study ----------
      3.1: read in four sections (Summary, Evidence, Forecast, Strategies) instead of one long report; the range is
@@ -114,7 +119,7 @@
       const t = tabs();
       const head = [el("h3", { text: `${st.symbol}, ${h} trading day${h === 1 ? "" : "s"}${st.direction ? `, ${st.direction === "LONG" ? "long" : "short"}` : ""}` }),
         el("p", { class: "small muted", text: `As of ${new Date(st.created_at).toLocaleString()} on ${v.data_source || "the data source"}; ${st.status === "complete" ? "complete" : "partial: see what is missing (Evidence)"}.` })];
-      const actions = fc ? el("div", { class: "ws-row" }, el("button", { class: "ws-btn", type: "button", onclick: () => draw(st) }, "Draw on the linked chart"),
+      const actions = fc ? el("div", { class: "ws-row" }, el("button", { class: "ws-btn", type: "button", onclick: () => draw(st, s.frame) }, "Draw on the linked chart"),
         el("button", { class: "ws-btn", type: "button", onclick: e => challenge(st.id, e.currentTarget) }, "Ask the AI to challenge it")) : "";
       const sg = v.strategies || {};
 
@@ -158,7 +163,9 @@
           el("ul", { class: "plain small" }, fc.explanation.map(x => el("li", { text: x }))),
           fc.alternatives.length ? el("div", {}, el("h4", { text: "Other paths to test against (assumptions, not predictions)" }),
             el("ul", { class: "plain small" }, fc.alternatives.map(a => el("li", {}, el("strong", { text: `${a.label}: ${pctText(a.path_pct[a.path_pct.length - 1])}. ` }), a.assumption)))) : "",
-          el("h4", { text: "What would prove it wrong" }), el("ul", { class: "plain small" }, fc.invalidators.map(x => el("li", { text: x }))), actionsFor(st));
+          el("h4", { text: "What would prove it wrong" }), el("ul", { class: "plain small" }, fc.invalidators.map(x => el("li", { text: x }))), actionsFor(st, s.frame));
+        // 4.1: one event's Central, Bullish and Bearish reactions, reviewed and drawn beside the base.
+        if (catalystOn()) fcp.append(catalystSection(w, s, () => current === s && !w.disposed));
       } else fcp.append(WS.empty("No forecast could be made: see Evidence for what is missing."));
 
       // Strategies: every candidate, its risk in separate terms, its estimated fillability and its route now.
@@ -188,8 +195,8 @@
       t.pick(SECTIONS.some(([k]) => k === section) ? section : "summary");
       form.open = false;
     }
-    function actionsFor(st) {
-      return el("div", { class: "ws-row" }, el("button", { class: "ws-btn", type: "button", onclick: () => draw(st) }, "Draw on the linked chart"));
+    function actionsFor(st, frame) {
+      return el("div", { class: "ws-row" }, el("button", { class: "ws-btn", type: "button", onclick: () => draw(st, frame) }, "Draw on the linked chart"));
     }
 
     function pickStrategy(c) {
@@ -218,9 +225,12 @@
       btn.disabled = false;
     }
 
-    function draw(st) {
+    // 4.1: drawn from the study's own anchor price and session dates (its frame), so a chart that refreshes to a newer
+    // close draws an old study where it was made instead of moving it.
+    function draw(st, frame) {
       const fc = st.forecast;
       w.set({ scenario: { kind: "forecast", study: st.id, symbol: st.symbol, horizon: st.horizon_days, base: fc.base, calibrated: fc.calibration.status === "calibrated",
+        anchor: frame ? frame.anchor : null, sessions: frame ? frame.sessions : null,
         alternatives: fc.alternatives.map(a => ({ key: a.key, label: a.label, path_pct: a.path_pct })) } });
       if (!WS.find(w, "chart")) WS.toast("Link a stock chart to this widget (the same colour) to see the forecast on it.");
     }
@@ -270,6 +280,332 @@
           ...(fc ? [["Model", `${fc.model_version}; ${(CAL_WORDS[fc.calibration.status] || ["", fc.calibration.status])[1].toLowerCase()} for ${st.horizon_days} days`]] : [])];
       } };
   } });
+
+  /* ---------- 4.1 Catalyst Scenarios: one event's Central, Bullish and Bearish reactions inside the study ----------
+     Export evidence freezes the study into a packet (downloaded as Markdown, its question copied) for a scenario
+     provider such as the MiroFish dashboard; Import cases takes the provider's JSON (or a form filled in from its
+     report); each case's assumptions are reviewed here, with their sources, and Apply assumptions saves a version whose
+     price paths are drawn, dashed, beside the base. The provider writes no number the chart draws: the app computes
+     every path from the study's base, its frozen factor fit and the sizes you accept. Every reply is checked against the
+     study it was asked for, so a late answer never lands on another stock. Report text is shown as text. */
+  const CATALYST_KINDS = [["earnings", "Earnings"], ["guidance", "Guidance"], ["sector_shock", "Sector shock"], ["macro", "Macro"],
+    ["product", "Product"], ["regulatory", "Regulatory"], ["analyst", "Analyst call"], ["other", "Other"]];
+  const EVENT_TIMES = [["after_close", "After the close"], ["before_open", "Before the open"], ["during_session", "During the session"], ["unknown", "Time unknown"]];
+  const DRIVER_TYPES = ["issuer_event", "market", "sector", "macro", "positioning", "sentiment", "other"];
+  const TIMINGS = ["first_session_after_release", "before_event", "spread_over_horizon", "by_horizon", "unknown"];
+  const SOURCE_WORDS = { user_stress: "Your stress", provider: "Provider (cited)", options_implied_move: "Options-implied move" };
+  const DIR_WORDS = { up: "Up", down: "Down", flat: "Flat", mixed: "Mixed" };
+  const words = k => String(k).replace(/_/g, " ");
+  const ids = text => String(text || "").split(/[\s,]+/).map(x => x.trim().toUpperCase()).filter(Boolean);
+  const choose = (label, options, value) => el("select", { "aria-label": label }, options.map(([v, t]) => el("option", { value: v, selected: v === value }, t)));
+  async function copy(text, note, what) {
+    try { await navigator.clipboard.writeText(text); note.textContent = `${what} copied.`; }
+    catch (e) { note.textContent = `${what} could not be copied here: select it below and copy it.`; }
+  }
+  function download(name, text) {
+    const a = el("a", { href: URL.createObjectURL(new Blob([text], { type: "text/markdown" })), download: name });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+
+  function catalystSection(w, s, alive) {
+    const st = s.study, h = st.horizon_days;
+    const body = el("div"), note = el("div", { class: "small", "aria-live": "polite" });
+    const box = el("section", { class: "ws-catalyst", "aria-label": "Catalyst Scenarios", "data-study": st.id },
+      el("h4", { text: "Catalyst Scenarios" }),
+      el("p", { class: "small muted", text: "Pick an event, export the study's evidence for a scenario provider (the MiroFish dashboard, say), import its Central, Bullish and Bearish cases, review their assumptions and draw them beside the base. The provider proposes conditions and directions; the app computes every path. No case has a probability." }),
+      note, body);
+    let tick = 0;
+    const turn = () => ++tick;
+    const fresh = n => n === tick && alive();              // the latest request, for the study still shown
+    const fail = (e, n) => { if (e !== WS.GONE && fresh(n)) note.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); };
+    if (![1, 5].includes(h)) {
+      body.append(WS.empty(`Catalyst Scenarios use a 1- or 5-session study in this release; this one is ${h} sessions. Run the study with a horizon of 1 or 5 trading days.`));
+      return box;
+    }
+    load();
+    return box;
+
+    async function load() {
+      const n = turn();
+      body.replaceChildren(loading("Looking for this study's scenarios…"));
+      try {
+        const r = await w.api(`/v3/studies/${enc(st.id)}/scenario-runs`);
+        if (!fresh(n)) return;
+        if (r.runs.length) return openRun(r.runs[0].id);
+        if (r.seeds.length) {
+          const sv = await w.api(`/v3/scenario-seeds/${enc(r.seeds[0].id)}`);
+          if (!fresh(n)) return;
+          return importPanel(sv);
+        }
+        catalystForm();
+      } catch (e) { fail(e, n); body.replaceChildren(); }
+    }
+
+    // 1. The catalyst, and Export evidence.
+    function catalystForm(prev) {
+      const c = (prev && prev.catalyst) || {};
+      const kind = choose("Kind of catalyst", CATALYST_KINDS, c.kind || "earnings");
+      const title = el("input", { type: "text", "aria-label": "Catalyst", placeholder: "e.g. Q3 results and outlook", value: c.title || "", maxlength: "200" });
+      const when = el("input", { type: "date", "aria-label": "Event date", value: c.event_date || (s.frame && s.frame.sessions[0] ? s.frame.sessions[0].date : "") });
+      const time = choose("Event time", EVENT_TIMES, c.event_time || "after_close");
+      const hypo = el("input", { type: "checkbox", "aria-label": "Hypothetical", checked: !!c.hypothetical });
+      const desc = el("textarea", { rows: "2", "aria-label": "What is expected", placeholder: "What is expected, in a sentence or two (optional)", maxlength: "1500" }, c.description || "");
+      const sources = el("div", { class: "ws-cat-sources" });
+      const addSource = () => {
+        if (sources.children.length >= 6) return;
+        const row = el("div", { class: "ws-row ws-cat-source" },
+          el("input", { type: "text", "aria-label": "Source title", placeholder: "Title", "data-f": "title", maxlength: "200" }),
+          el("input", { type: "datetime-local", "aria-label": "Published", "data-f": "published_at" }),
+          el("input", { type: "url", "aria-label": "Address", placeholder: "https://…", "data-f": "url", maxlength: "500" }),
+          el("textarea", { rows: "2", "aria-label": "Excerpt", placeholder: "The public excerpt", "data-f": "excerpt", maxlength: "1200" }),
+          el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: e => e.currentTarget.parentElement.remove() }, "Remove"));
+        sources.append(row);
+      };
+      const go = el("button", { class: "ws-btn primary", type: "button" }, "Export evidence");
+      go.addEventListener("click", async () => {
+        const n = turn();
+        go.disabled = true; note.replaceChildren(loading("Freezing the study's evidence…"));
+        const srcs = [...sources.children].map(r => Object.fromEntries([...r.querySelectorAll("[data-f]")].map(i => [i.dataset.f, i.value.trim()])))
+          .filter(x => x.title).map(x => ({ title: x.title, published_at: x.published_at, url: x.url || null, excerpt: x.excerpt }));
+        try {
+          const sv = await w.api(`/v3/studies/${enc(st.id)}/scenario-seeds`, { catalyst: { kind: kind.value, title: title.value.trim(), description: desc.value.trim(),
+            hypothetical: hypo.checked, event_date: when.value || null, event_time: time.value }, sources: srcs });
+          if (!fresh(n)) return;
+          note.replaceChildren();
+          importPanel(sv, true);
+        } catch (e) { fail(e, n); }
+        go.disabled = false;
+      });
+      body.replaceChildren(
+        el("div", { class: "ws-row" }, field("Kind", kind), field("Catalyst", title)),
+        el("div", { class: "ws-row" }, field("Date", when), field("Time", time), el("label", { class: "check" }, hypo, " Hypothetical")),
+        field("What is expected", desc),
+        el("details", { class: "ws-more" }, el("summary", { text: "Public source excerpts (optional, published before the study ran)" }), sources,
+          el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: addSource }, "Add a source")),
+        el("div", { class: "ws-row" }, go),
+        el("p", { class: "small muted", text: `The packet holds the study's evidence as of ${new Date(st.created_at).toLocaleString()}, its anchor price and sessions, and the sources you add. Nothing about your account, positions or budget goes in it.` }));
+    }
+
+    // 2. The packet, and Import cases (pasted JSON, or a form filled in from the report).
+    function importPanel(sv, justMade) {
+      const seed = sv.seed;
+      const getPacket = async () => (await fetch(sv.markdown_url)).text();
+      if (justMade) {
+        getPacket().then(t => { if (alive()) download(sv.filename, t); }).catch(() => {});
+        copy(sv.question, note, "The forecasting question");
+      }
+      const result = el("textarea", { rows: "7", class: "ws-cat-json", "aria-label": "Result JSON", placeholder: "Paste the provider's JSON result here" });
+      const excerpt = el("textarea", { rows: "3", "aria-label": "Report excerpt", placeholder: "The report's text, or a part of it (optional; kept as text)", maxlength: "8000" });
+      const go = el("button", { class: "ws-btn primary", type: "button" }, "Import cases");
+      const err = el("div", { class: "small", "aria-live": "polite" });
+      const sendImport = async payload => {
+        const n = turn();
+        go.disabled = true; err.replaceChildren(loading("Checking the cases against the packet…"));
+        try {
+          const r = await w.api(`/v3/studies/${enc(st.id)}/scenario-runs`, { provider: "manual", seed_id: seed.seed_id, result: payload, report_excerpt: excerpt.value.trim() || null });
+          if (!fresh(n)) return;
+          note.replaceChildren(); showRun(r);
+        } catch (e) { if (e !== WS.GONE && fresh(n)) err.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); }
+        go.disabled = false;
+      };
+      go.addEventListener("click", () => {
+        if (!result.value.trim()) { err.textContent = "Paste the result first, or fill in the form."; return; }
+        sendImport(result.value);
+      });
+      const tpl = JSON.stringify(sv.template, null, 2);
+      body.replaceChildren(
+        el("div", { class: "panel" },
+          el("p", { class: "small" }, el("strong", { text: "Evidence packet " }), el("code", { text: seed.seed_id }), ` · hash ${seed.seed_hash.slice(0, 12)} · cutoff ${seed.cutoff}`),
+          el("p", { class: "small", text: `${seed.catalyst.title}: ${seed.catalyst_timing_note} Anchor ${money(seed.anchor.price)} (read ${new Date(seed.anchor.at).toLocaleString()}); sessions ${seed.sessions.map(x => x.date).join(", ")}.` }),
+          el("details", { class: "ws-more" }, el("summary", { text: `Sources in the packet (${seed.sources.length})` }),
+            el("ul", { class: "plain small" }, seed.sources.map(x => el("li", {}, el("strong", { text: `${x.id} ` }), `${x.title}: ${x.summary}`)))),
+          seed.missing.length ? el("details", { class: "ws-more" }, el("summary", { text: `Missing or not yet trusted (${seed.missing.length})` }),
+            el("ul", { class: "plain small" }, seed.missing.map(x => el("li", { text: x })))) : "",
+          el("div", { class: "ws-row" },
+            el("button", { class: "ws-btn", type: "button", onclick: () => getPacket().then(t => download(sv.filename, t)) }, "Download the packet"),
+            el("button", { class: "ws-btn", type: "button", onclick: () => copy(sv.question, note, "The forecasting question") }, "Copy the question"),
+            el("button", { class: "ws-btn", type: "button", onclick: () => catalystForm(seed) }, "Change the catalyst"))),
+        el("ol", { class: "small" }, el("li", { text: "In the MiroFish dashboard, choose New Scenario, upload the packet and paste the question (it is on your clipboard)." }),
+          el("li", { text: "Run the simulation, then paste its JSON result below. A text-only report: copy the output prompt and template, have them turn the report into JSON, or fill in the form." })),
+        field("Result", result), field("Report excerpt", excerpt),
+        el("div", { class: "ws-row" }, go,
+          el("button", { class: "ws-btn", type: "button", onclick: () => copy(`${sv.output_prompt}\n\n${tpl}`, note, "The output prompt and template") }, "Copy the output prompt"),
+          el("button", { class: "ws-btn", type: "button", onclick: () => copy(tpl, note, "The JSON template") }, "Copy the JSON template"),
+          el("button", { class: "ws-btn", type: "button", onclick: () => caseForm(seed, sendImport, err) }, "Fill in a form instead")),
+        err);
+    }
+
+    function caseForm(seed, send, err) {
+      const blocks = [["central", "flat"], ["bullish", "up"], ["bearish", "down"]].map(([key, dir]) => {
+        const f = {
+          trigger: el("input", { type: "text", "aria-label": `${key} trigger`, maxlength: "400" }),
+          direction: choose(`${key} direction`, ["up", "down", "flat", "mixed"].map(d => [d, DIR_WORDS[d]]), dir),
+          reason: el("input", { type: "text", "aria-label": `${key} why`, maxlength: "500" }),
+          type: choose(`${key} channel`, DRIVER_TYPES.map(t => [t, words(t)]), "issuer_event"),
+          timing: choose(`${key} timing`, TIMINGS.map(t => [t, words(t)]), "first_session_after_release"),
+          sources: el("input", { type: "text", "aria-label": `${key} sources`, placeholder: "S1, S3" }),
+          priced: el("input", { type: "text", "aria-label": `${key} priced in`, maxlength: "600" }),
+          invalid: el("input", { type: "text", "aria-label": `${key} invalidation`, maxlength: "400" }),
+          missing: el("input", { type: "text", "aria-label": `${key} missing evidence`, placeholder: "Separate with ;" }),
+        };
+        const node = el("fieldset", { class: "ws-case-form", "data-case": key }, el("legend", { text: words(key).replace(/^./, x => x.toUpperCase()) }),
+          el("div", { class: "ws-row" }, field("Trigger", f.trigger), field("Direction", f.direction)),
+          el("div", { class: "ws-row" }, field("Why it could move the stock", f.reason), field("Channel", f.type), field("Timing", f.timing), field("Source IDs", f.sources)),
+          el("div", { class: "ws-row" }, field("What may be priced in", f.priced), field("What would invalidate it", f.invalid), field("Missing evidence", f.missing)));
+        return { key, f, node };
+      });
+      const save = el("button", { class: "ws-btn primary", type: "button" }, "Save these cases");
+      save.addEventListener("click", () => {
+        const cases = blocks.filter(b => b.f.trigger.value.trim()).map(({ key, f }) => ({ key, trigger: f.trigger.value.trim(), stock_direction: f.direction.value,
+          drivers: f.reason.value.trim() ? [{ type: f.type.value, direction: f.direction.value === "mixed" ? "flat" : f.direction.value, timing: f.timing.value,
+            reason: f.reason.value.trim(), source_ids: ids(f.sources.value) }] : [],
+          priced_in: f.priced.value.trim(), invalidation: f.invalid.value.trim() || "Not stated",
+          missing_evidence: f.missing.value.split(";").map(x => x.trim()).filter(Boolean), hypotheses: [] }));
+        if (!cases.length) { err.textContent = "Write at least one case's trigger."; return; }
+        send({ schema_version: 1, seed_id: seed.seed_id, symbol: seed.symbol, horizon_sessions: seed.horizon_sessions, cases });
+      });
+      body.append(el("div", { class: "panel ws-cat-form" }, ...blocks.map(b => b.node), el("div", { class: "ws-row" }, save)));
+    }
+
+    // 3. The cases, their reviewed assumptions, and Apply assumptions.
+    async function openRun(runId) {
+      const n = turn();
+      try {
+        const r = await w.api(`/v3/scenario-runs/${enc(runId)}`);
+        if (fresh(n)) showRun(r);
+      } catch (e) { fail(e, n); }
+    }
+
+    function showRun(r) {
+      const run = r.run, seed = r.seed, sources = Object.fromEntries(seed.sources.map(x => [x.id, x]));
+      const start = r.latest ? r.latest.assumptions : r.suggested;
+      const byKey = Object.fromEntries((start || []).map(a => [a.key, a]));
+      const implied = seed.volatility && isNum(seed.volatility.event_move_pct) ? seed.volatility.event_move_pct : null;
+      const sessionPick = (label, v) => choose(label, seed.sessions.map(x => [String(x.index), `${x.index} (${x.date})`]), String(v || seed.catalyst_session || 1));
+      const sourcePick = (label, v, allowImplied) => choose(label, Object.entries(SOURCE_WORDS).filter(([k]) => allowImplied || k !== "options_implied_move"), v || "user_stress");
+      const editors = [];
+      const cards = run.cases.map(c => {
+        const a = byKey[c.key] || { key: c.key, visible: true, issuer: null, factors: [], dispersion: null };
+        const iss = a.issuer || {};
+        const ed = { key: c.key,
+          visible: el("input", { type: "checkbox", "aria-label": `Draw ${c.label}`, checked: a.visible !== false }),
+          jump: el("input", { type: "number", step: "0.1", "aria-label": `${c.label} stock-specific move`, value: isNum(iss.value_pct) ? String(iss.value_pct) : "" }),
+          jumpSession: sessionPick(`${c.label} move session`, iss.session),
+          jumpSource: sourcePick(`${c.label} move source`, iss.source, implied !== null),
+          jumpIds: el("input", { type: "text", "aria-label": `${c.label} move sources`, placeholder: "S1", value: (iss.source_ids || []).join(", ") }),
+          disp: el("input", { type: "number", step: "0.1", min: "0", "aria-label": `${c.label} extra uncertainty`, value: a.dispersion ? String(a.dispersion.value_pct) : "" }),
+          factors: el("div", { class: "ws-cat-factors" }) };
+        const addFactor = f => {
+          f = f || {};
+          const row = el("div", { class: "ws-row ws-cat-factor" },
+            choose(`${c.label} factor`, seed.factors.map(x => [x.key, `${x.label} (${x.unit})`]), f.key || (seed.factors[0] || {}).key),
+            el("input", { type: "number", step: "0.1", "aria-label": `${c.label} factor shock`, value: isNum(f.value) ? String(f.value) : "" }),
+            sessionPick(`${c.label} factor session`, f.session || 1), sourcePick(`${c.label} factor source`, f.source, false),
+            el("input", { type: "text", "aria-label": `${c.label} factor sources`, placeholder: "S2", value: (f.source_ids || []).join(", ") }),
+            el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: e => e.currentTarget.parentElement.remove() }, "Remove"));
+          ed.factors.append(row);
+        };
+        for (const f of a.factors || []) addFactor(f);
+        editors.push(ed);
+        const useImplied = implied === null ? "" : el("button", { class: "ws-btn ws-btn-mini", type: "button", title: "The move options price for the event, as a size reference",
+          onclick: () => { ed.jump.value = String((c.stock_direction === "down" ? -1 : 1) * implied); ed.jumpSource.value = "options_implied_move"; ed.jumpSession.value = String(seed.catalyst_session || 1); } },
+          `Use ±${implied.toFixed(1)}% (options)`);
+        const driver = d => el("li", {}, `${d.reason} `, el("span", { class: "muted", text: `(${words(d.type)}, ${words(d.direction)}, ${words(d.timing)}${d.factor ? `, ${d.factor}` : ""}${isNum(d.proposed_value) ? `, proposed ${d.proposed_value}${d.proposed_unit}` : ""}) ` }),
+          d.supported ? el("span", { class: "small", title: d.source_ids.map(x => (sources[x] ? `${x}: ${sources[x].title}` : x)).join("; "), text: d.source_ids.join(", ") })
+            : statusTag("warn", "Hypothesis: no exported source"));
+        return el("article", { class: `ws-case ${c.key}`, "data-case": c.key, style: `border-left-color: ${CASE_COLORS[c.key]}` },
+          el("h5", {}, `${c.label} `, el("span", { class: "muted small", text: DIR_WORDS[c.stock_direction] || c.stock_direction })),
+          el("p", { class: "small" }, el("strong", { text: "Trigger: " }), c.trigger),
+          c.drivers.length ? el("div", { class: "small" }, el("strong", { text: "Why it could move the stock" }), el("ul", { class: "plain" }, c.drivers.map(driver))) : "",
+          c.priced_in ? el("p", { class: "small" }, el("strong", { text: "What may be priced in: " }), c.priced_in) : "",
+          el("p", { class: "small" }, el("strong", { text: "Invalidated if: " }), c.invalidation),
+          c.missing_evidence.length ? el("p", { class: "small muted" }, "Missing: ", c.missing_evidence.join("; ")) : "",
+          c.hypotheses.length ? el("p", { class: "small" }, statusTag("warn", "Hypotheses"), ` ${c.hypotheses.join("; ")}`) : "",
+          isNum(c.provider_confidence) ? el("p", { class: "small muted", text: `The provider's own confidence ${Math.round(100 * c.provider_confidence)}% (its metadata; not a probability).` }) : "",
+          el("details", { class: "ws-more ws-cat-assume", open: c.key !== "central" || !!(a.issuer || (a.factors || []).length) },
+            el("summary", { text: "Assumptions (sizes, timing and sources)" }),
+            el("div", { class: "ws-row" }, field("Stock-specific move, pp", ed.jump), field("From session", ed.jumpSession), field("Source", ed.jumpSource), field("Source IDs", ed.jumpIds), useImplied),
+            el("div", { class: "small muted", text: "Factor shocks, in each factor's unit, from their session on. A factor left out moves only as the shocked ones above it imply." }),
+            ed.factors, seed.factors.length ? el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: () => addFactor() }, "Add a factor shock")
+              : el("p", { class: "small muted", text: "No factor fit in this packet." }),
+            el("div", { class: "ws-row" }, field("Extra event uncertainty, pp (from the move's session)", ed.disp), el("label", { class: "check" }, ed.visible, " Draw on the chart"))));
+      });
+      const apply = el("button", { class: "ws-btn primary", type: "button" }, "Apply assumptions");
+      const err = el("div", { class: "small", "aria-live": "polite" });
+      const out = el("div");
+      apply.addEventListener("click", async () => {
+        const n = turn();
+        const num = i => (i.value.trim() === "" ? null : Number(i.value));
+        const cases = editors.map(ed => {
+          const jump = num(ed.jump), disp = num(ed.disp);
+          return { key: ed.key, visible: ed.visible.checked,
+            issuer: jump === null || jump === 0 ? null : { value_pct: jump, session: Number(ed.jumpSession.value), source: ed.jumpSource.value, source_ids: ids(ed.jumpIds.value) },
+            factors: [...ed.factors.children].map(row => { const [k, v, ss, src, idl] = row.querySelectorAll("select, input");
+              return { key: k.value, value: num(v), session: Number(ss.value), source: src.value, source_ids: ids(idl.value) }; }).filter(f => f.value !== null && f.value !== 0),
+            dispersion: disp ? { value_pct: disp, session: Number(ed.jumpSession.value), source: ed.jumpSource.value === "options_implied_move" ? "user_stress" : ed.jumpSource.value, source_ids: ids(ed.jumpIds.value) } : null };
+        });
+        apply.disabled = true; err.replaceChildren(loading("Computing the paths…"));
+        try {
+          const v = await w.api(`/v3/scenario-runs/${enc(run.id)}/versions`, { parent_version: r.latest ? r.latest.version : null, cases });
+          if (!fresh(n)) return;
+          err.replaceChildren();
+          r.latest = v; r.versions.push({ id: v.id, version: v.version, created_at: v.created_at });
+          showVersion(v, out, r);
+          drawVersion(v);
+        } catch (e) { if (e !== WS.GONE && fresh(n)) err.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); }
+        apply.disabled = false;
+      });
+      body.replaceChildren(
+        el("p", { class: "small muted", text: `${seed.catalyst.title} · cases imported ${new Date(run.created_at).toLocaleString()} (${run.provider}) · packet ${seed.seed_id} · ${seed.catalyst_timing_note}` }),
+        el("div", { class: "ws-cases" }, cards),
+        run.report_excerpt ? el("details", { class: "ws-more" }, el("summary", { text: "The provider's report (excerpt, shown as text)" }), el("pre", { class: "ws-cat-report", text: run.report_excerpt })) : "",
+        el("div", { class: "ws-row" }, apply, el("button", { class: "ws-btn", type: "button", onclick: () => reimport(seed.seed_id) }, "Import other cases")),
+        err, out);
+      if (r.latest) showVersion(r.latest, out, r);
+    }
+    async function reimport(seedId) {
+      const n = turn();
+      try { const sv = await w.api(`/v3/scenario-seeds/${enc(seedId)}`); if (fresh(n)) importPanel(sv); } catch (e) { fail(e, n); }
+    }
+
+    function showVersion(v, out, r) {
+      const last = v.horizon_sessions - 1;
+      const drawn = () => { const sc = w.ctx().scenario; return !!(sc && sc.catalyst && sc.catalyst.version_id === v.id); };
+      const pick = r.versions.length > 1 ? choose("Version", [...r.versions].reverse().map(x => [x.id, `Version ${x.version}, ${new Date(x.created_at).toLocaleString()}`]), v.id) : null;
+      if (pick) pick.addEventListener("change", async () => {
+        const n = turn();
+        try { const old = await w.api(`/v3/scenario-versions/${enc(pick.value)}`); if (fresh(n)) showVersion(old, out, r); } catch (e) { fail(e, n); }
+      });
+      const rows = [{ key: "base", label: "Base forecast", return_pct: v.base.return_pct, price: v.base.price, low_price: v.base.low_price, high_price: v.base.high_price,
+        attribution: null, terminal: { vs_base_pp: 0 } }, ...v.cases];
+      const status = el("span", { class: "small muted", text: drawn() ? "Drawn on the linked chart." : "" });
+      out.replaceChildren(el("div", { class: "panel ws-cat-version", "data-version": String(v.version) },
+        el("div", { class: "ws-row" }, el("strong", { text: `Version ${v.version}` }), pick ? field("Show", pick) : "",
+          el("button", { class: "ws-btn", type: "button", onclick: () => { drawVersion(v); status.textContent = "Drawn on the linked chart."; } }, "Draw on the linked chart"), status),
+        v.stale ? el("p", { class: "small" }, statusTag("info", "Past"), ` ${v.stale_note}`) : "",
+        table([{ label: "Case", cell: c => el("span", {}, el("span", { class: "ws-swatch", style: `background: ${c.key === "base" ? FORECAST_COLOR : CASE_COLORS[c.key]}` }), ` ${c.label}`) },
+          { label: `By session ${v.horizon_sessions}`, num: true, cell: c => pctText(c.return_pct[last]) },
+          { label: "Price", num: true, cell: c => money(c.price[last]) },
+          { label: "Vs base", num: true, cell: c => (c.key === "base" ? "" : `${c.terminal.vs_base_pp >= 0 ? "+" : ""}${c.terminal.vs_base_pp.toFixed(2)} pts`) },
+          { label: "Factors", num: true, cell: c => (c.attribution ? `${c.attribution.factor_pct[last] >= 0 ? "+" : ""}${c.attribution.factor_pct[last].toFixed(2)} pts` : "") },
+          { label: "Stock-specific", num: true, cell: c => (c.attribution ? `${c.attribution.issuer_pct[last] >= 0 ? "+" : ""}${c.attribution.issuer_pct[last].toFixed(2)} pts` : "") },
+          { label: "Range", num: true, cell: c => `${money(c.low_price[last])} to ${money(c.high_price[last])}` }], rows),
+        ...v.cases.flatMap(c => c.warnings.map(x => el("p", { class: "small" }, statusTag("warn", c.label), ` ${x}`))),
+        ...v.cases.filter(c => c.attribution.terms.length).map(c => el("p", { class: "small muted", text: `${c.label} factors: ${c.attribution.terms.map(t => `${t.label} ${t.value >= 0 ? "+" : ""}${t.value}${t.unit} from session ${t.session} (its own part ${t.unique_move_pct.toFixed(2)}% × ${t.beta_unique.toFixed(2)} = ${t.contribution_pp >= 0 ? "+" : ""}${t.contribution_pp.toFixed(2)} pts)`).join("; ")}.` })),
+        el("p", { class: "small muted", text: `${v.band_note} Anchor ${money(v.anchor.price)}, read ${new Date(v.anchor.at).toLocaleString()}; calculation ${v.calc_version}.` })));
+    }
+
+    function drawVersion(v) {
+      const fc = st.forecast;
+      w.set({ scenario: { kind: "forecast", study: st.id, symbol: st.symbol, horizon: v.horizon_sessions, calibrated: v.base.calibrated,
+        base: { path_pct: v.base.return_pct, low_pct: v.base.low_pct, high_pct: v.base.high_pct }, anchor: v.anchor, sessions: v.sessions,
+        alternatives: fc ? fc.alternatives.map(a => ({ key: a.key, label: a.label, path_pct: a.path_pct })) : [],
+        catalyst: { run_id: v.run_id, version_id: v.id, version: v.version,
+          cases: v.cases.filter(c => c.visible && c.quantified).map(c => ({ key: c.key, label: c.label, price: c.price, trigger: c.trigger })) } } });
+      if (!WS.find(w, "chart")) WS.toast("Link a stock chart to this widget (the same colour) to see the scenarios on it.");
+    }
+  }
 
   /* ---------- the option's own price chart ---------- */
   WS.register("optionchart", { title: "Option chart", category: "Options", size: { w: 4, h: 8 }, minW: 3, create(w) {
@@ -376,21 +712,38 @@
     return { refresh: load, dispose() { clearTimeout(timer); }, config: () => ({ horizon: Number(horizon.value) }) };
   } });
 
-  /* ---------- the stock chart draws a study's forecast ---------- */
+  /* ---------- the stock chart draws a study's forecast, and its Catalyst Scenarios ----------
+     4.1: in the study's fixed coordinates when it has them (its anchor price, read when the study ran, and its sessions
+     by date), never the chart's newest close; a scenario's cases are drawn from their stored prices. Daily bars only:
+     the paths are in trading sessions. Older saved contexts without a frame still draw from the chart, as before. */
   WS.chartOverlays = WS.chartOverlays || [];
   WS.chartOverlays.push((chart, c) => {
     const sc = c.scenario;
     if (!sc || sc.kind !== "forecast" || sc.symbol !== c.symbol) { chart.setLines("forecast", []); return; }
     const a = chart.chartArgs();
-    if (!a || !a.future_times || a.future_times.length < sc.horizon || !isNum(a.last_close)) { chart.setLines("forecast", []); return; }
-    if (a.group !== "1d") { chart.setLines("forecast", []); return; }   // the forecast is in trading days: daily bars only
-    const pts = arr => [{ time: a.last_time, value: a.last_close }].concat(arr.map((p, i) => ({ time: a.future_times[i], value: a.last_close * (1 + p / 100) })));
+    if (!a || a.group !== "1d") { chart.setLines("forecast", []); return; }   // the forecast is in trading days: daily bars only
+    const fixed = sc.anchor && isNum(sc.anchor.price) && Array.isArray(sc.sessions) && sc.sessions.length >= sc.horizon;
+    let t0, p0, times;
+    if (fixed) { t0 = dayTime(sc.anchor.bar_date); p0 = sc.anchor.price; times = sc.sessions.map(x => dayTime(x.date)); }
+    else {
+      if (!a.future_times || a.future_times.length < sc.horizon || !isNum(a.last_close)) { chart.setLines("forecast", []); return; }
+      t0 = a.last_time; p0 = a.last_close; times = a.future_times;
+    }
+    const pts = arr => [{ time: t0, value: p0 }].concat(arr.map((p, i) => ({ time: times[i], value: p0 * (1 + p / 100) })));
+    const day = i => (fixed ? ` · session ${i + 1}, ${sc.sessions[i].date} close` : ` · session ${i + 1}`);
+    const tipsOf = (label, prices, why) => Object.fromEntries(prices.map((v, i) => [times[i], `${label}: ${money(v)} (${pctText(100 * (v / p0 - 1))})${day(i)}${why ? ` · if ${why}` : ""}`]));
     const lines = [
-      { key: "forecast:base", points: pts(sc.base.path_pct), color: FORECAST_COLOR, width: 2, style: 0, title: "Forecast" },
+      { key: "forecast:base", points: pts(sc.base.path_pct), color: FORECAST_COLOR, width: 2, style: 0, title: sc.catalyst ? "Base" : "Forecast",
+        tips: tipsOf("Base forecast", sc.base.path_pct.map(p => p0 * (1 + p / 100))) },
       { key: "forecast:low", points: pts(sc.base.low_pct), color: FORECAST_COLOR + "99", width: 1, style: 3, title: sc.calibrated ? "80% band" : "Model P10" },
       { key: "forecast:high", points: pts(sc.base.high_pct), color: FORECAST_COLOR + "99", width: 1, style: 3, title: sc.calibrated ? "" : "Model P90" },
-      ...sc.alternatives.map(alt => ({ key: `forecast:${alt.key}`, points: pts(alt.path_pct), color: ALT_COLOR, width: 1, style: 2, title: alt.label })),
     ];
+    if (sc.catalyst && fixed) {
+      for (const k of sc.catalyst.cases || []) {
+        lines.push({ key: `forecast:case:${k.key}`, points: [{ time: t0, value: p0 }].concat(k.price.map((v, i) => ({ time: times[i], value: v }))),
+          color: CASE_COLORS[k.key] || ALT_COLOR, width: 2, style: 2, title: `${k.label} (v${sc.catalyst.version})`, tips: tipsOf(k.label, k.price, k.trigger) });
+      }
+    } else lines.push(...(sc.alternatives || []).map(alt => ({ key: `forecast:${alt.key}`, points: pts(alt.path_pct), color: ALT_COLOR, width: 1, style: 2, title: alt.label })));
     chart.setLines("forecast", lines);
     if (chart.showAhead) chart.showAhead(sc.horizon);
   });
