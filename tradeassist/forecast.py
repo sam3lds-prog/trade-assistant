@@ -48,6 +48,13 @@ RANGE_WORDS = {"calibrated": "the calibrated 80% band",
 NOMINAL = 0.80
 COVERAGE_TOLERANCE = 0.07
 MIN_TEST_CASES = 30
+# 4.2: how a calibration is made. "cal-4.2" fits on the earliest 60% of dates, decides on the next 20% and reports on
+# the last 20%, with outcomes that overlap the next period purged; artifacts without a method came from the 3.0 fit
+# (70/30, no purge) and stay usable until a refresh replaces them.
+CALIBRATION_METHOD = "cal-4.2"
+SPLITS = (0.6, 0.8)
+MIN_DATES = 12
+HORIZON_WORDS = {1: "One-session", 3: "Three-session", 5: "Five-session", 10: "Ten-session", 20: "Twenty-session"}
 
 
 def components_at(target: A.Series, pool: Sequence[A.Series], i: int, horizon: int, *, with_analogs: bool = True) -> dict[str, Any]:
@@ -87,56 +94,117 @@ def _metrics(y: np.ndarray, mu: np.ndarray, s: np.ndarray, k: float) -> dict[str
             "directional_accuracy": float(hit.mean()) if len(hit) else None, "directional_cases": int(len(hit))}
 
 
-def fit(rows: pd.DataFrame, horizon: int, split: float = 0.7) -> dict[str, Any]:
-    """Weights and band width from the earlier dates; every figure reported is from the later ones."""
+def _label_ends(dates: np.ndarray, horizon: int) -> dict[Any, pd.Timestamp]:
+    """Each forecast date's label end: the session its outcome is read at, `horizon` trading sessions later."""
+    from .marketdays import add_trading_days
+    out = {}
+    for d in dates:
+        day = pd.Timestamp(d).date()
+        out[d] = pd.Timestamp(add_trading_days(day, horizon))
+    return out
+
+
+def _gain_t(y: np.ndarray, mu: np.ndarray, dates: np.ndarray) -> tuple[float, float, int]:
+    """The median's gain in absolute error over "no move", averaged per date (one day across stocks is one market
+    event, not many): its mean in percentage points, its t statistic, and the number of dates."""
+    gain = pd.Series(np.abs(y) - np.abs(y - mu)).groupby(dates).mean()
+    n = len(gain)
+    sd = float(gain.std(ddof=1)) if n > 2 else 0.0
+    t = float(gain.mean() / (sd / math.sqrt(n))) if n > 2 and sd > 0 else 0.0
+    return float(100 * gain.mean()) if n else 0.0, t, n
+
+
+def _band_k(y: np.ndarray, mu: np.ndarray, s: np.ndarray) -> float:
+    z = np.abs(np.log1p(y) - np.log1p(mu)) / s
+    return float(np.quantile(z, NOMINAL) / Z80) if len(z) else 1.0
+
+
+def fit(rows: pd.DataFrame, horizon: int, split: tuple[float, float] = SPLITS) -> dict[str, Any]:
+    """Weights chosen before the final holdout; every figure reported is from the holdout (4.2).
+
+    The dates are split three ways: the earliest 60% fit the weights (ridge), the next 20% decide whether those weights
+    beat "no move" (validation), and the last 20% are the final holdout the reported figures come from. A row whose
+    label (its outcome, `horizon` sessions on) ends inside the next period is purged, so no fitting row has seen the
+    future of the rows it is judged on. The band's width is set from the fitting and validation rows only. A direction
+    is used only when it beat "no move" on the validation dates (one-sided 95%) and still beat it on the holdout;
+    otherwise the weights are zero and the base path is flat."""
     rows = rows.dropna(subset=["realized", "sigma"]).sort_values("date").reset_index(drop=True)
-    rows = rows[rows["sigma"] > 0]
-    out: dict[str, Any] = {"model_version": MODEL_VERSION, "horizon_days": horizon, "interval": NOMINAL, "weights": {c: 0.0 for c in COMPONENTS},
-                           "band_k": 1.0, "status": "insufficient_data", "cases": int(len(rows)), "by_regime": {}, "text": ""}
-    if len(rows) < MIN_TEST_CASES * 2:
-        out["text"] = f"{len(rows)} historical forecasts could be checked; at least {MIN_TEST_CASES * 2} are needed."
+    rows = rows[rows["sigma"] > 0].reset_index(drop=True)
+    dates = np.sort(rows["date"].unique()) if len(rows) else np.array([])
+    diag = {"rows": int(len(rows)), "symbols": int(rows["symbol"].nunique()) if "symbol" in rows and len(rows) else 0,
+            "dates": int(len(dates)), "first_date": str(pd.Timestamp(dates[0]).date()) if len(dates) else None,
+            "last_date": str(pd.Timestamp(dates[-1]).date()) if len(dates) else None}
+    out: dict[str, Any] = {"model_version": MODEL_VERSION, "method": CALIBRATION_METHOD, "horizon_days": horizon, "interval": NOMINAL,
+                           "weights": {c: 0.0 for c in COMPONENTS}, "band_k": 1.0, "status": "insufficient_data", "cases": int(len(rows)),
+                           "by_regime": {}, "text": "", "directional": False, "reason": None, "diagnostics": diag}
+    if len(rows) < MIN_TEST_CASES * 3:
+        out.update(reason="too_few_cases",
+                   text=f"{len(rows)} historical forecasts could be checked; at least {MIN_TEST_CASES * 3} are needed (fit, validation and a holdout).")
         return out
-    dates = np.sort(rows["date"].unique())
-    cut = dates[int(len(dates) * split)]
-    train, test = rows[rows["date"] < cut], rows[rows["date"] >= cut]
-    x_tr, y_tr = train[list(COMPONENTS)].to_numpy(float), train["realized"].to_numpy(float)
+    if len(dates) < MIN_DATES * 3:
+        out.update(reason="too_few_dates",
+                   text=f"The forecasts fall on only {len(dates)} distinct dates; at least {MIN_DATES * 3} are needed, since one day across "
+                        "many stocks is one market event, not many.")
+        return out
+    v_start, h_start = dates[int(len(dates) * split[0])], dates[int(len(dates) * split[1])]
+    ends = rows["date"].map(_label_ends(dates, horizon))
+    train = rows[(rows["date"] < v_start) & (ends < v_start)]
+    val = rows[(rows["date"] >= v_start) & (rows["date"] < h_start) & (ends < h_start)]
+    hold = rows[rows["date"] >= h_start]
+    purged = int(len(rows) - len(train) - len(val) - len(hold))
+    hold_dates = int(hold["date"].nunique())
+    diag.update(train_cases=int(len(train)), validation_cases=int(len(val)), holdout_cases=int(len(hold)), purged_cases=purged,
+                holdout_dates=hold_dates, validation_start=str(pd.Timestamp(v_start).date()), holdout_start=str(pd.Timestamp(h_start).date()))
+    if min(len(train), len(val), len(hold)) < MIN_TEST_CASES or hold_dates < MIN_DATES:
+        out.update(reason="too_few_cases",
+                   text=f"After purging overlapping outcomes, {len(train)} fitting, {len(val)} validation and {len(hold)} holdout forecasts "
+                        f"({hold_dates} holdout dates) remain; each needs at least {MIN_TEST_CASES} (and {MIN_DATES} dates).")
+        return out
+    X = list(COMPONENTS)
+
+    def arrays(part: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        return part[X].to_numpy(float), part["realized"].to_numpy(float), part["sigma"].to_numpy(float), part["date"].to_numpy()
+    x_tr, y_tr, s_tr, _ = arrays(train)
+    x_va, y_va, s_va, d_va = arrays(val)
+    x_ho, y_ho, s_ho, d_ho = arrays(hold)
     w = _ridge(x_tr, y_tr)
-    mu_tr = x_tr @ w
-    z_tr = np.abs(np.log1p(y_tr) - np.log1p(mu_tr)) / train["sigma"].to_numpy(float)
-    k = float(np.quantile(z_tr, NOMINAL) / Z80)
-    x_te, y_te, s_te = test[list(COMPONENTS)].to_numpy(float), test["realized"].to_numpy(float), test["sigma"].to_numpy(float)
-    mu_te = x_te @ w
-    m = _metrics(y_te, mu_te, s_te, k)
-    flat = _metrics(y_te, np.zeros_like(y_te), s_te, float(np.quantile(np.abs(np.log1p(y_tr)) / train["sigma"].to_numpy(float), NOMINAL) / Z80))
-    # The median must beat "no move" by more than chance: the gain in absolute error, averaged per date (the same day
-    # across stocks is one market event, not many), must be positive with one-sided 95% confidence.
-    gain = pd.Series(np.abs(y_te) - np.abs(y_te - mu_te)).groupby(test["date"].to_numpy()).mean()
-    t_stat = float(gain.mean() / (gain.std(ddof=1) / math.sqrt(len(gain)))) if len(gain) > 2 and gain.std(ddof=1) > 0 else 0.0
-    directional = bool(t_stat > 1.645)
-    m["edge_t"] = t_stat
-    if not directional:
-        w = np.zeros_like(w)                                      # no direction it can support out of sample
-        m = flat
-        k = float(np.quantile(np.abs(np.log1p(y_tr)) / train["sigma"].to_numpy(float), NOMINAL) / Z80)
-    out.update({"weights": {c: float(v) for c, v in zip(COMPONENTS, w)}, "band_k": k, "train_cases": int(len(train)),
-                "test_cases": int(len(test)), "split_date": str(pd.Timestamp(cut).date()), "directional": bool(directional), **m})
-    for regime, sub in test.groupby("regime"):
+    _, t_val, _ = _gain_t(y_va, x_va @ w, d_va)
+    chosen = bool(t_val > 1.645)                                 # decided on the validation dates, before the holdout
+    zero = np.zeros_like(w)
+    pre_x, pre_y, pre_s = np.vstack([x_tr, x_va]), np.concatenate([y_tr, y_va]), np.concatenate([s_tr, s_va])
+    k_flat = _band_k(pre_y, np.zeros_like(pre_y), pre_s)
+    gain_h, t_hold, _ = _gain_t(y_ho, x_ho @ w, d_ho)
+    directional = chosen and gain_h > 0                          # the holdout is a pass/fail gate, never a refit
+    use = w if directional else zero
+    k = _band_k(pre_y, pre_x @ use, pre_s) if directional else k_flat
+    m = _metrics(y_ho, x_ho @ use, s_ho, k)
+    flat = _metrics(y_ho, np.zeros_like(y_ho), s_ho, k_flat)
+    m["edge_t"] = t_val
+    out.update({"weights": {c: float(v) for c, v in zip(COMPONENTS, use)}, "band_k": k, "train_cases": int(len(train)),
+                "validation_cases": int(len(val)), "test_cases": int(len(hold)), "purged_cases": purged,
+                "split_date": str(pd.Timestamp(h_start).date()), "validation_start": str(pd.Timestamp(v_start).date()),
+                "directional": directional, "directional_validation": chosen, "holdout_edge_t": t_hold, "holdout_gain_pct": gain_h,
+                "flat_mae_pct": flat["mae_pct"], **m})
+    for regime, sub in hold.groupby("regime"):
         if len(sub) >= 10:
-            out["by_regime"][str(regime)] = _metrics(sub["realized"].to_numpy(float), sub[list(COMPONENTS)].to_numpy(float) @ w,
+            out["by_regime"][str(regime)] = _metrics(sub["realized"].to_numpy(float), sub[X].to_numpy(float) @ use,
                                                      sub["sigma"].to_numpy(float), k)
     cov = m["coverage"]
-    if len(test) < MIN_TEST_CASES:
-        out["status"] = "insufficient_data"
-    elif abs(cov - NOMINAL) <= COVERAGE_TOLERANCE:
-        out["status"] = "calibrated"
+    if abs(cov - NOMINAL) <= COVERAGE_TOLERANCE:
+        out["status"], out["reason"] = "calibrated", ("directional_edge" if directional else "no_directional_edge")
     else:
         out["status"] = "not_calibrated"
-    parts = [f"Checked on {len(test)} later forecasts it never saw ({len(train)} earlier ones fitted it)."]
-    parts.append(f"The 80% band held {100 * cov:.0f}% of outcomes.")
+        out["reason"] = "coverage_below_target" if cov < NOMINAL else "coverage_above_target"
+    parts = [f"Fitted on {len(train)} earlier forecasts, chosen on {len(val)} later ones, and checked on {len(hold)} later forecasts it "
+             f"never saw ({hold_dates} dates; {purged} whose outcome overlapped the next period were purged)."]
+    parts.append(f"The band held {100 * cov:.0f}% of outcomes on the holdout (the target is 80%).")
     if directional:
         acc = m["directional_accuracy"]
         parts.append(f"The median was {m['mae_pct']:.2f} points off on average against {flat['mae_pct']:.2f} for 'no move'"
                      + (f"; it had the direction right {100 * acc:.0f}% of the time it leaned." if acc is not None else "."))
+    elif chosen:
+        parts.append("Its median beat assuming no move on the validation dates but not on the final holdout, so the base path is flat: "
+                     "a direction is used only when it holds up on dates it was not chosen on.")
     else:
         parts.append("Its median did not beat assuming no move by more than chance, so the base path is flat: the evidence "
                      "below may still lean, but the forecast does not claim a direction.")
@@ -173,6 +241,81 @@ def calibration_contract(cal: dict[str, Any] | None, horizon: int) -> dict[str, 
     return {"status": cal["status"], "horizon_days": horizon, "cases": int(cal.get("test_cases") or cal.get("cases") or 0), "interval": NOMINAL,
             "coverage": cal.get("coverage"), "directional_accuracy": cal.get("directional_accuracy"), "mae_pct": cal.get("mae_pct"),
             "baseline_mae_pct": cal.get("baseline_mae_pct"), "by_regime": cal.get("by_regime") or {}, "text": cal.get("text") or ""}
+
+
+def readiness(cal: dict[str, Any] | None, horizon: int, job: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Whether this horizon's forecast is ready, in two separate parts (4.2): **directional evidence** (did a direction
+    beat assuming no move on dates it was not chosen on?) and **range validation** (did the band hold about 80% of
+    outcomes on the holdout?), each with its reason, the sample behind it and when it was last checked. A flat base
+    path with a validated range is an honest outcome, not a failure: "No reliable directional edge · range shown"."""
+    words = HORIZON_WORDS.get(horizon, f"{horizon}-session")
+    job = job or {}
+    state = job.get("state")
+    usable = bool(cal) and cal.get("horizon_days") == horizon and cal.get("model_version", MODEL_VERSION) == MODEL_VERSION
+    sample: dict[str, Any] = {}
+    if usable:
+        d = cal.get("diagnostics") or {}
+        sample = {"cases": int(cal.get("test_cases") or cal.get("cases") or 0), "train_cases": cal.get("train_cases"),
+                  "validation_cases": cal.get("validation_cases"), "holdout_cases": cal.get("test_cases"), "purged_cases": cal.get("purged_cases"),
+                  "symbols": len(cal.get("symbols") or []) or d.get("symbols"), "failed_symbols": cal.get("failed") or [],
+                  "first_date": d.get("first_date"), "last_date": d.get("last_date"), "cutoff": cal.get("cutoff"),
+                  "checked_at": cal.get("run_at"), "data_source": cal.get("data_source"), "method": cal.get("method") or "cal-3.0"}
+    if not usable:
+        pending = state in ("queued", "running", "deferred")
+        label = f"{words} calibration " + ("running" if state == "running" else "pending" if pending else
+                                            "failed" if state == "failed" else "not run yet")
+        text = ({"running": "Testing this horizon's forecasts on history now.", "queued": "Queued: it runs in the background.",
+                 "deferred": f"Waiting for the data source's request quota to reset ({job.get('until') or 'soon'})."}.get(state)
+                or (f"The last attempt failed: {job.get('error')}" if state == "failed" else
+                    "Not checked yet: it runs in the background once real market data is connected, or run it from the Forecast record."))
+        part = {"status": "pending", "label": "Pending", "text": text}
+        return {"horizon_days": horizon, "state": "failed" if state == "failed" else "pending", "reason": "calibration_failed" if state == "failed"
+                else "calibration_pending", "label": label, "text": text, "directional": dict(part), "range": dict(part), "sample": {},
+                "job": job or None, "refresh_due": True}
+    status, cov = cal.get("status"), cal.get("coverage")
+    reason = cal.get("reason")
+    if status == "insufficient_data":
+        code = reason or "too_few_cases"
+        text = cal.get("text") or "Too little history to check this horizon's forecasts."
+        part = {"status": "insufficient", "label": "Insufficient history", "text": text}
+        return {"horizon_days": horizon, "state": "ready", "reason": "insufficient_history", "detail": code,
+                "label": f"Insufficient history for the {words.lower()} calibration", "text": text, "directional": dict(part),
+                "range": dict(part), "sample": sample, "job": job or None, "refresh_due": state not in ("queued", "running")}
+    directional = bool(cal.get("directional"))
+    if directional:
+        d_part = {"status": "edge", "label": "Directional edge validated",
+                  "text": f"The median beat assuming no move on the holdout ({cal.get('mae_pct', 0):.2f} against {cal.get('flat_mae_pct') or cal.get('baseline_mae_pct') or 0:.2f} "
+                          "points of average error)."}
+    elif cal.get("directional_validation"):
+        d_part = {"status": "not_held", "label": "No reliable directional edge",
+                  "text": "A direction beat assuming no move on the validation dates but not on the final holdout, so the base path is flat."}
+    else:
+        d_part = {"status": "no_edge", "label": "No reliable directional edge",
+                  "text": "On history the engines did no better than assuming no move, so the base path is flat; the range is still shown."}
+    d_part.update(mae_pct=cal.get("mae_pct"), no_change_mae_pct=cal.get("flat_mae_pct") or cal.get("baseline_mae_pct"),
+                  directional_accuracy=cal.get("directional_accuracy"), validation_t=cal.get("edge_t"), holdout_gain_pct=cal.get("holdout_gain_pct"))
+    if status == "calibrated":
+        r_part = {"status": "validated", "label": "Range validated", "text": f"The band held {100 * cov:.0f}% of holdout outcomes (target 80%)."}
+    elif cov is not None and cov < NOMINAL:
+        r_part = {"status": "below_target", "label": "Range coverage below target",
+                  "text": f"The band held {100 * cov:.0f}% of holdout outcomes, below the 80% target: treat the range as too narrow."}
+    elif cov is not None:
+        r_part = {"status": "above_target", "label": "Range coverage above target",
+                  "text": f"The band held {100 * cov:.0f}% of holdout outcomes, above the 80% target: the range is wider than it needs to be."}
+    else:
+        r_part = {"status": "insufficient", "label": "Range not checked", "text": cal.get("text") or ""}
+    r_part.update(coverage=cov, target=NOMINAL, tolerance=COVERAGE_TOLERANCE)
+    if not directional and r_part["status"] == "validated":
+        label = "No reliable directional edge · range shown"
+    elif not directional:
+        label = f"No reliable directional edge · {r_part['label'].lower()}"
+    else:
+        label = f"Directional edge validated · {r_part['label'].lower()}"
+    method_old = (cal.get("method") or "cal-3.0") != CALIBRATION_METHOD
+    return {"horizon_days": horizon, "state": "ready", "reason": d_part["status"] if r_part["status"] == "validated" else r_part["status"],
+            "label": label, "text": f"{d_part['text']} {r_part['text']}", "directional": d_part, "range": r_part, "sample": sample,
+            "job": job or None, "refresh_due": method_old,
+            "method_note": "Made with the 3.0 fit (no purge between fit and test); a refresh with the 4.2 method is due." if method_old else None}
 
 
 def forecast(target: A.Series, pool: Sequence[A.Series], horizon: int, *, calibration: dict[str, Any] | None = None,
@@ -267,4 +410,5 @@ def record_target(as_of: date, horizon: int) -> date:
     return add_trading_days(as_of, horizon)
 
 
-__all__ = ["RANGE_WORDS", "MODEL_VERSION", "COMPONENTS", "components_at", "fit", "walk_forward", "forecast", "calibration_contract", "record_target", "Z80"]
+__all__ = ["RANGE_WORDS", "MODEL_VERSION", "COMPONENTS", "components_at", "fit", "walk_forward", "forecast", "calibration_contract",
+           "record_target", "readiness", "Z80", "CALIBRATION_METHOD"]

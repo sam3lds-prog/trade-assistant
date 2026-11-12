@@ -20,6 +20,38 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.2.0 — Tradier and forecast readiness
+
+The first of four steps of the one-click Research plan ([ONE_CLICK_RESEARCH.md](ONE_CLICK_RESEARCH.md)). **No trading
+permission is added or changed.**
+
+- **Check Tradier data** (Research → Forecast record): four read-only requests (a quote, two weeks of daily bars, the
+  nearest option chain, the market clock), each reported on its own: provider, real time or delayed, the quote's age,
+  how old the Greeks are (Tradier refreshes them about hourly, separately from bid and ask), missing fields, and a useful
+  message for a rejected token (401/403). It uses the existing `DATA_MODE` and `TRADIER_LIVE_TOKEN` /
+  `TRADIER_SANDBOX_TOKEN` settings, and checks the token in `.env` even before you switch to it. The token is never shown.
+- **Quota handling.** Tradier's HTTP 400 "Quota Violation" now pauses requests until the reset (from
+  `X-Ratelimit-Expiry`, else a minute) instead of failing like an outage; background work (calibrations) is deferred to
+  the reset without losing an attempt. Ordinary 400s still fail at once; 429 and 5xx are retried as before.
+- **Forecast readiness, in two parts.** Every study now says separately whether there is **directional evidence** (did
+  a direction beat assuming no move on dates it was not chosen on?) and whether the **range is validated** (did the band
+  hold about 80% of outcomes on the holdout?), with the reason: *Five-session calibration pending*, *Insufficient
+  history*, *Range coverage below target*, *No reliable directional edge · range shown*, or *Directional edge
+  validated*; the sample count, date span, when it was last checked, the error against no change and the observed
+  coverage. A flat base path with a validated range is an honest result, not an error.
+- **The calibration is fitted three ways (method cal-4.2).** The earliest 60% of dates fit the weights, the next 20%
+  decide whether they beat "no move", and the last 20% are the holdout every reported figure comes from; outcomes that
+  overlap the next period are purged. A direction is used only when it beat no move on the validation dates and still
+  did on the holdout. The band is set before the holdout. Too few cases, too few distinct dates and stocks without
+  enough history are explicit outcomes (each failed stock is listed).
+- **Calibrations are durable background jobs** on Research's own worker (never in front of the Trading Desk's): they
+  survive a page refresh and an app restart (an interrupted one is taken up again), show their progress, a failure
+  shows Retry, and a refresh that finds too little history is kept beside the last usable calibration, never over it.
+  Once real market data is connected (live, sandbox or Robinhood), the 1- and 5-session calibrations are queued in the
+  background (three minutes after start, so the first pages are not slowed) when missing, older than a week or made
+  with the 3.0 method. Running a study never queues one.
+- Finished studies keep the forecast they were made with; a new calibration applies to the next study.
+
 ## 4.1.0 — Catalyst Scenarios (manual pilot)
 
 The first of four steps of the Trade Assistant + MiroFish plan ([CATALYST_SCENARIOS.md](CATALYST_SCENARIOS.md)).

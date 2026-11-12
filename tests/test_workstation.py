@@ -205,7 +205,8 @@ def test_a_study_runs_draws_its_forecast_and_sends_a_contract_to_the_ticket_and_
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] .ws-sections", timeout=60000)
         # 3.1: read in sections.
         text = study.inner_text()
-        for words in ("Not calibrated", "Strategies under the same scenarios", "Model-implied 10th–90th percentile range"):
+        # 4.2: the readiness says why there is no validated forecast (here: the calibration has not run on demo data).
+        for words in ("calibration not run yet", "Strategies under the same scenarios", "Model-implied 10th–90th percentile range"):
             assert words in text, words
         for section, words in (("Evidence", ("Missing or not yet trusted", "Similar past situations")),
                                ("Forecast", ("Other paths to test against", "What would prove it wrong"))):

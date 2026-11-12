@@ -221,6 +221,8 @@ class ForecastVersion(Strict):
     calibration: Calibration
     explanation: list[str] = Field(default_factory=list)
     invalidators: list[str] = Field(default_factory=list)
+    # 4.2: directional evidence and range validation, each with its reason and sample (forecast.readiness)
+    readiness: dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyCandidate(Strict):
