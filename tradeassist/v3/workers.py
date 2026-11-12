@@ -40,9 +40,15 @@ class ResearchWorkers:
 
     def add(self, pool: str, kind: str, fn: Callable[[dict[str, Any]], Any]) -> None:
         self.handlers[pool][kind] = fn
+        w = self.workers.get(pool)
+        if w is not None:                      # a worker already made (at start, for left-over work) takes it on too
+            w.handlers[kind] = fn
 
     def schedule(self, pool: str, sched: Schedule) -> None:
         self.schedules[pool].append(sched)
+        w = self.workers.get(pool)
+        if w is not None and sched not in w.schedules:
+            w.schedules.append(sched)
 
     def worker(self, pool: str) -> Worker:
         with self._lock:

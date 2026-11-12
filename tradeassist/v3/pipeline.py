@@ -201,6 +201,12 @@ class Pipeline:
             return None
         self._update(study_id, status="running", stage="provider", stages={"evidence": {"state": "done"},
                                                                             "provider": {"state": "queued", "detail": "waiting to start"}})
+        fw = getattr(self.svc, "forward", None)              # 4.5: the base and no change, frozen before the window opens
+        if fw is not None:
+            try:
+                fw.freeze_study(study_id)
+            except Exception:  # noqa: BLE001 - forward evidence never stops the study
+                log.exception("Could not freeze the forward forecasts of %s", study_id)
         return self._enqueue(START, {"study_id": study_id}, self._start_key(study_id, p))
 
     # --- 1. start: the seed and the run ------------------------------------------------------------------------------
@@ -315,7 +321,36 @@ class Pipeline:
             self._fail(study_id, "provider", f"{prov.label} is not available: {ready.get('detail')}")
             return {"failed": ready.get("detail"), "run_id": run_id}
         self._enqueue(STEP, {"run_id": run_id, "n": 0}, f"{STEP}:{run_id}:0")
-        return {"run_id": run_id, "seed_id": seed["seed_id"]}
+        control = self._start_control(study_id, seed, name, int(p.get("attempt") or 1))
+        return {"run_id": run_id, "seed_id": seed["seed_id"], "control_run_id": control}
+
+    def _start_control(self, study_id: str, seed: dict[str, Any], main: str, attempt: int) -> str | None:
+        """4.5 (SCENARIO_CONTROL=1): the single-prompt control on the same packet, beside the provider. Its cases are
+        sized by the same rules and frozen for the scorecard; they never drive the study's paths, valuation or decision."""
+        if not self.svc.settings.scenario_control or main == "ai" or attempt > 1:
+            return None
+        try:
+            prov = self.provider("ai")
+        except ValueError:
+            return None
+        run_id = C.new_id("srun")
+        ready = prov.ready()
+        ext = {"stage": "", "detail": "", "step": 0, "state": {}, "started_at": None, "role": "control", "attempt": attempt}
+        with self.svc.db.tx() as cur:
+            cur.execute("""INSERT INTO scenario_runs (id, seed_id, study_id, provider, status, created_at, schema_version, prompt_version,
+                           config_json, external_json) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
+                        (run_id, seed["seed_id"], study_id, getattr(prov, "name", "ai"), C.utc_now(), C.SCENARIO_SCHEMA_VERSION,
+                         SC.PROMPT_VERSION, json.dumps(self.config_for("ai")), json.dumps(ext)))
+        self._update(study_id, control_run_id=run_id)
+        if not ready.get("ok"):
+            self._finish_run(run_id, "failed", error=f"The control is not available: {ready.get('detail')}")
+            return run_id
+        self._enqueue(STEP, {"run_id": run_id, "n": 0}, f"{STEP}:{run_id}:0")
+        return run_id
+
+    @staticmethod
+    def _role(r: Any) -> str:
+        return json.loads(r["external_json"] or "{}").get("role") or "provider"
 
     # --- 2. the provider's steps --------------------------------------------------------------------------------------
     def _run(self, run_id: str) -> Any:
@@ -349,6 +384,15 @@ class Pipeline:
             vals.append(v)
         with self.svc.db.tx() as cur:
             cur.execute(f"UPDATE scenario_runs SET {', '.join(sets)} WHERE id = ? AND status NOT IN ('complete', 'canceled')", (*vals, run_id))
+
+    def _fail_run(self, r: Any, stage: str, detail: str, attention: bool = False) -> None:
+        """A provider run's failure is the study's; a control run's is only its own."""
+        if self._role(r) != "control":
+            self._fail(r["study_id"], stage, detail, attention)
+
+    def _stage_of(self, r: Any, **kw: Any) -> None:
+        if self._role(r) != "control":
+            self._update(r["study_id"], **kw)
 
     def _fail(self, study_id: str, stage: str, detail: str, attention: bool = False) -> None:
         self._update(study_id, status="needs_attention" if attention else "failed", stage=stage, error=detail[:1000],
@@ -386,7 +430,7 @@ class Pipeline:
                     raise Deferred(_now() + timedelta(seconds=WAIT_TURN), "waiting for a free MiroFish slot")
             ext["started_at"] = C.utc_now()
             self._save_external(run_id, ext, status="running")
-            self._update(r["study_id"], stages={"provider": {"state": "running", "detail": f"{prov.label} started"}})
+            self._stage_of(r, stages={"provider": {"state": "running", "detail": f"{prov.label} started"}})
         started = _ts(ext.get("started_at")) or _now()
         budget = s.mirofish_run_minutes * 60.0
         if (_now() - started).total_seconds() > budget:
@@ -406,7 +450,7 @@ class Pipeline:
             return {"skipped": f"the run became {now_status} while the step ran; its result was not applied"}
         if out is None:
             self._finish_run(run_id, "failed", error=err)
-            self._fail(r["study_id"], "provider", f"{prov.label} failed: {err}")
+            self._fail_run(r, "provider", f"{prov.label} failed: {err}")
             return {"failed": err}
         ext.update({"state": out.state, "stage": out.stage, "detail": out.detail, "step": n + 1, "last_step_at": C.utc_now()})
         if out.model:
@@ -416,12 +460,12 @@ class Pipeline:
         if out.failed:
             self._save_external(run_id, ext)
             self._finish_run(run_id, "failed", error=out.failed)
-            self._fail(r["study_id"], "provider", f"{prov.label}: {out.failed}")
+            self._fail_run(r, "provider", f"{prov.label}: {out.failed}")
             return {"failed": out.failed}
         if out.attention:
             self._save_external(run_id, ext)
             self._finish_run(run_id, "needs_attention", error=out.attention)
-            self._fail(r["study_id"], "provider", f"{prov.label}: {out.attention}", attention=True)
+            self._fail_run(r, "provider", f"{prov.label}: {out.attention}", attention=True)
             return {"attention": out.attention}
         if out.report is not None:
             ext["parsed_cases"] = out.cases
@@ -429,12 +473,11 @@ class Pipeline:
             with self.svc.db.tx() as cur:
                 cur.execute("UPDATE scenario_runs SET external_json = ?, report_text = ?, model_version = ? WHERE id = ?",
                             (json.dumps(ext, default=str), out.report[:REPORT_LIMIT], out.model, run_id))
-            self._update(r["study_id"], stages={"provider": {"state": "done", "detail": f"{prov.label}: report received"}},
-                         stage="paths")
+            self._stage_of(r, stages={"provider": {"state": "done", "detail": f"{prov.label}: report received"}}, stage="paths")
             self._enqueue(FINISH, {"run_id": run_id}, f"{FINISH}:{run_id}")
             return {"report": True}
         self._save_external(run_id, ext)                          # every acknowledged id is saved before the next step is queued
-        self._update(r["study_id"], stages={"provider": {"state": "running", "detail": f"{out.stage}: {out.detail}"[:300]}})
+        self._stage_of(r, stages={"provider": {"state": "running", "detail": f"{out.stage}: {out.detail}"[:300]}})
         self._enqueue(STEP, {"run_id": run_id, "n": n + 1}, f"{STEP}:{run_id}:{n + 1}", delay=out.next_in or 0.0)
         return {"next_in": out.next_in, "stage": out.stage}
 
@@ -442,7 +485,7 @@ class Pipeline:
         prov = self.provider(r["provider"])
         said = prov.stop(ext.get("state") or {}) if hasattr(prov, "stop") else "nothing to stop"
         self._finish_run(r["id"], "failed", error=f"Stopped: {why} ({said}).")
-        self._fail(r["study_id"], "provider", f"{prov.label} was stopped: {why} ({said}).")
+        self._fail_run(r, "provider", f"{prov.label} was stopped: {why} ({said}).")
         return {"failed": why}
 
     # --- 3. finish: cases, an automatic version, the valuation, the findings --------------------------------------
@@ -553,7 +596,7 @@ class Pipeline:
         excerpt = (r["report_text"] or "").strip()[: SC.MAX_EXCERPT] or None
         if imp is None:
             self._finish_run(run_id, "needs_attention", error=why, report_excerpt=excerpt)
-            self._fail(study_id, "paths", why, attention=True)
+            self._fail_run(r, "paths", why, attention=True)
             return {"attention": why}
         cases = sc.normalized(imp)
         with self.svc.db.tx() as cur:
@@ -564,11 +607,21 @@ class Pipeline:
                 return {"skipped": "the run changed while its report was read"}
         self.svc.bus.publish("scenario.imported", run_id, study_id=study_id, symbol=seed["symbol"], cases=len(cases), provider=r["provider"])
         assumptions, notes = self.auto_assumptions(seed, cases)
+        role = self._role(r)
         try:
-            ver = sc.create_version(run_id, C.ScenarioVersionIn(cases=[C.CaseAssumptions(**a) for a in assumptions]), origin="auto")
+            ver = sc.create_version(run_id, C.ScenarioVersionIn(cases=[C.CaseAssumptions(**a) for a in assumptions]),
+                                    origin="control" if role == "control" else "auto")
         except (RequestError, ValueError) as exc:
-            self._fail(study_id, "paths", f"The cases were saved but no price paths could be made from them: {exc}")
+            self._fail_run(r, "paths", f"The cases were saved but no price paths could be made from them: {exc}")
             return {"failed": str(exc)}
+        fw = getattr(self.svc, "forward", None)              # 4.5: frozen for the scorecard (late if the window has opened)
+        if fw is not None:
+            try:
+                fw.freeze_version(study_id, ver, self._run(run_id), role)
+            except Exception:  # noqa: BLE001 - forward evidence never stops the pipeline
+                log.exception("Could not freeze the forward forecast of %s", run_id)
+        if role == "control":
+            return {"version_id": ver["id"], "role": "control"}
         self._update(study_id, version_id=ver["id"], sizing_notes=notes,
                      stages={"paths": {"state": "running", "detail": f"version {ver['version']} saved; valuing the strategies"}})
         return self.revalue(study_id, ver)
@@ -741,6 +794,9 @@ class Pipeline:
     def _decision(self, study_id: str, p: dict[str, Any]) -> dict[str, Any] | None:
         return _decision_of(self.svc, study_id, p)
 
+    def _has_forward(self) -> bool:
+        return getattr(self.svc, "forward", None) is not None
+
     def view(self, study_id: str) -> dict[str, Any] | None:
         p = self.load(study_id)
         if p is None:
@@ -771,6 +827,9 @@ class Pipeline:
                 "attempt": p.get("attempt", 1), "stages": stages, "run": run, "seed_id": p.get("seed_id"), "version_id": p.get("version_id"),
                 "valuation": val, "findings": p.get("findings"), "decision": self._decision(study_id, p), "error": p.get("error"),
                 "catalyst": p.get("catalyst_used"), "catalyst_basis": p.get("catalyst_basis"), "sizing_notes": p.get("sizing_notes") or [],
+                "forward": [{k: r[k] for k in ("variant", "status", "median_pct", "low_pct", "high_pct", "realized_pct", "abs_error")}
+                            for r in self.svc.db.query("SELECT * FROM scenario_forecasts WHERE study_id = ? ORDER BY variant", (study_id,))]
+                if self._has_forward() else [],
                 "can_cancel": status == "running", "can_retry": status in ("failed", "needs_attention", "canceled")
                 or (status == "complete" and (p.get("stages") or {}).get("paths", {}).get("state") == "failed"),
                 "updated_at": p.get("updated_at"), "demo": prov == "demo"}

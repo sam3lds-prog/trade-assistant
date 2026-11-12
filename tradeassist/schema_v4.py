@@ -177,3 +177,42 @@ def scenario_decisions(cur: sqlite3.Cursor) -> None:
         source_json  TEXT NOT NULL,
         UNIQUE (study_id, case_key)
     )""")
+
+
+@migration(27, "4.5 forward evidence: each scenario study's predictions, frozen before the window opens and graded after")
+def scenario_forecasts(cur: sqlite3.Cursor) -> None:
+    """One row per study and variant (the base, no change, the single-prompt control, the scenario provider): its median
+    move to the target session and its band, from the frozen anchor price, written before the first forecast session
+    opens (`frozen`) or after (`late`, never scored), then graded once the target close is final."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS scenario_forecasts (
+        id               TEXT PRIMARY KEY,
+        study_id         TEXT NOT NULL REFERENCES studies (id),
+        mode             TEXT NOT NULL,
+        symbol           TEXT NOT NULL,
+        horizon          INTEGER NOT NULL CHECK (horizon > 0),
+        variant          TEXT NOT NULL CHECK (variant IN ('base', 'no_change', 'control', 'provider')),
+        provider         TEXT,
+        run_id           TEXT,
+        version_id       TEXT,
+        made_at          TEXT NOT NULL,
+        window_start     TEXT NOT NULL,
+        target_date      TEXT NOT NULL,
+        anchor_price     REAL NOT NULL CHECK (anchor_price > 0),
+        anchor_date      TEXT NOT NULL,
+        median_pct       REAL NOT NULL,
+        low_pct          REAL NOT NULL,
+        high_pct         REAL NOT NULL,
+        cases_json       TEXT NOT NULL DEFAULT '[]',
+        rule             TEXT,
+        latency_seconds  REAL,
+        cost_json        TEXT NOT NULL DEFAULT '{}',
+        status           TEXT NOT NULL CHECK (status IN ('frozen', 'late', 'graded', 'late_graded', 'ungradable')),
+        realized_pct     REAL,
+        abs_error        REAL,
+        covered          INTEGER,
+        direction_hit    INTEGER,
+        case_scores_json TEXT,
+        graded_at        TEXT,
+        UNIQUE (study_id, variant)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_forecasts_due ON scenario_forecasts (status, target_date)")

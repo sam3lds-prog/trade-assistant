@@ -251,6 +251,12 @@
       if (row.children.length) kids.push(row);
       kids.push(note);
       if (p.valuation) kids.push(valuationBlock(p.valuation));
+      // 4.5: what was frozen for the forward scorecard (Forecast record), before the window opened or late.
+      if ((p.forward || []).length) {
+        const FW = { base: "base", no_change: "no change", control: "single-prompt control", provider: p.provider_label };
+        const st2 = { frozen: "frozen before the window", late: "late: not scored", graded: "graded", late_graded: "late: not scored", ungradable: "no close to grade" };
+        kids.push(el("p", { class: "small muted ws-forward-line", text: `Forward evidence: ${p.forward.map(f => `${FW[f.variant] || f.variant} ${pctText(f.median_pct)} (${st2[f.status] || f.status}${isNum(f.realized_pct) ? `; it moved ${pctText(f.realized_pct)}` : ""})`).join("; ")}.` }));
+      }
       box.replaceChildren(...kids);
       if (p.status === "running") timer = setTimeout(load, 1500);
       else if (p.version_id && !drawn) { drawn = true; drawAuto(p.version_id); }
@@ -1003,10 +1009,39 @@
           kids.push(el("p", { class: "small muted", text: `Weights: ${Object.entries(cal.weights).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", ")}. ${cal.symbols ? `${cal.symbols.length} stocks, ` : ""}${cal.years || ""} years${cal.cutoff ? ` to ${cal.cutoff}` : ""}, run ${cal.run_at ? new Date(cal.run_at).toLocaleString() : ""} on ${cal.data_source || ""}; method ${cal.method || "cal-3.0"}.` }));
         }
         out.replaceChildren(...kids);
+        scorecard(mineAt);
       } catch (e) { if (e !== WS.GONE) out.replaceChildren(el("p", { class: "error", text: e.message })); }
+    }
+    // 4.5: forward evidence. Every scenario study's base, no change, single-prompt control and provider forecasts, frozen
+    // before the window opened, graded on the target close and compared on the same studies.
+    const fwd = el("div", { class: "ws-forward" });
+    w.body.append(fwd);
+    let mineAt = 0;
+    async function scorecard() {
+      const n = ++mineAt;
+      try {
+        const d = await w.api(`/v3/scenarios/scorecard?horizon=${enc(horizon.value)}`);
+        if (n !== mineAt) return;
+        const pct = v => (isNum(v) ? `${Math.round(100 * v)}%` : "n/a"), pts = v => (isNum(v) ? v.toFixed(2) : "n/a");
+        const any = d.variants.some(v => v.n || v.frozen || v.late);
+        fwd.replaceChildren(el("h4", { text: `Forward evidence: scenarios against the base (${horizon.value}-session studies)` }),
+          any ? table([{ label: "Forecast", cell: v => v.label }, { label: "Graded", num: true, cell: v => String(v.n) },
+            { label: "Waiting", num: true, cell: v => String(v.frozen) }, { label: "Late", num: true, cell: v => String(v.late) },
+            { label: "Average miss", num: true, cell: v => pts(v.mae) }, { label: "Inside the band", num: true, cell: v => pct(v.coverage) },
+            { label: "Direction right", num: true, cell: v => pct(v.direction_hits) },
+            { label: "Time", num: true, cell: v => (isNum(v.latency_median_s) ? `${Math.round(v.latency_median_s)} s` : "") },
+            { label: "Tokens", num: true, cell: v => (v.tokens ? v.tokens.toLocaleString() : "") }], d.variants)
+            : WS.empty("No scenario study has been frozen yet: run a 1- or 5-session study with scenarios."),
+          ...d.pairs.filter(x => x.n).map(x => el("p", { class: "small", text: x.text })),
+          d.cases.n ? el("p", { class: "small", text: `Conditional cases whose trigger was observed: ${d.cases.n}, average miss ${pts(d.cases.mae)} points, ${pct(d.cases.coverage)} inside their band.` }) : "",
+          d.setups.n ? el("p", { class: "small", text: `Qualified setups: ${d.setups.n}; the stock went their way ${pct(d.setups.went_its_way)} of the time.` }) : "",
+          el("p", { class: "small" }, el("strong", { text: "Verdict: " }), d.verdict),
+          el("p", { class: "small muted", text: d.note }));
+      } catch (e) { if (e !== WS.GONE && n === mineAt) fwd.replaceChildren(el("p", { class: "error", text: e.message })); }
     }
     load();
     w.on("study.calibrated", load);
+    w.on("scenario.graded", () => scorecard());
     return { refresh: load, dispose() { clearTimeout(timer); }, config: () => ({ horizon: Number(horizon.value) }) };
   } });
 
