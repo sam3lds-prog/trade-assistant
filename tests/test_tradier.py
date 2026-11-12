@@ -145,9 +145,10 @@ def test_client_only_reads_market_data():
     assert all("/markets/" in url for url, _ in session.calls)
     public = [name for name in dir(TradierData) if not name.startswith("_")]
     # 2.12 adds two reads of /markets/timesales (bars within the day); 2.16 two more (trade prints, for the news
-    # replay); 3.0 one read of /markets/history for an option contract. Still no order, account or write method.
+    # replay); 3.0 one read of /markets/history for an option contract; 4.2 `rate_state`, the client's own record of the
+    # rate limit and any quota pause (no request). Still no order, account or write method.
     assert sorted(public) == ["chain", "clock", "expirations", "history", "intraday", "intraday_reach", "option_history", "quotes",
-                              "tick_reach", "ticks"]
+                              "rate_state", "tick_reach", "ticks"]
 
 
 def test_an_option_contracts_history_is_a_market_data_read_of_its_occ_symbol():
