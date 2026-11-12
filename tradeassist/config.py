@@ -59,6 +59,19 @@ def _flag(name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be 1 or 0, got {raw!r}")
 
 
+def _loopback_url(raw: str | None) -> str:
+    """4.3: the self-hosted MiroFish server's address, which must be on this computer (127.0.0.1, ::1 or localhost):
+    the packet goes to it, and it calls its own language model and Zep with its own keys."""
+    value = (raw or "").strip().rstrip("/")
+    if not value:
+        return ""
+    from urllib.parse import urlparse
+    u = urlparse(value)
+    if u.scheme not in ("http", "https") or (u.hostname or "") not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError(f"MIROFISH_URL must be a loopback address such as http://127.0.0.1:5001, got {value!r}")
+    return value
+
+
 def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     raw = (os.getenv(name) or "").strip().lower() or default
     if raw not in allowed:
@@ -152,6 +165,24 @@ class Settings:
     autopilot_live: bool = False                                        # the autopilot may trade live (phase 7), if it has earned it
     # 4.0 phase 7: read the deployed models' stocks' headlines into structured events with the AI (uses the daily AI limit)
     model_events: bool = False
+
+    # 4.3 one-click Research: the scenario provider each 1- or 5-session study is sent to, in the background.
+    # SCENARIO_PROVIDER: mirofish (a self-hosted MiroFish server at MIROFISH_URL, bound to this computer), ai (one call to
+    # the AI set up in .env, the single-prompt control) or demo (canned cases for trying the workflow: not a simulation).
+    scenario_provider: str = "mirofish"
+    scenario_auto: bool = False             # run it after every 1- or 5-session study (Research settings can switch it)
+    mirofish_url: str = ""                  # e.g. http://127.0.0.1:5001: loopback only
+    mirofish_max_rounds: int = 10           # the simulation's round cap
+    mirofish_run_minutes: float = 45.0      # the most one run may take, every stage included
+    mirofish_concurrency: int = 1           # runs at once
+    mirofish_http_timeout: float = 300.0    # one request (the ontology step waits on the server's language model)
+    scenario_control: bool = False          # 4.5: also run the single-prompt AI control on the same packet
+    scenario_budget: float = 0.0            # the budget mixes are sized to; 0: the Trading Desk policy's trial capital
+    scenario_max_loss: float = 0.0          # the loss limit a setup must stay inside; 0: the policy's daily loss stop
+    # 4.4: what a setup must clear to be shown as an opportunity
+    opportunity_min_net_pct: float = 1.0    # modeled net upside after costs, percent of the capital it ties up
+    opportunity_max_spread_pct: float = 10.0  # an option leg's quoted spread, percent of its midpoint
+    scenario_notify: bool = False           # send qualified setups through the notification channels (in-app always)
 
     # 3.0 Trading Desk (phase 5): where its notifications go, who runs its jobs, and phone approvals.
     notify_email: bool = True               # desk notifications by email too, when SMTP is set up
@@ -265,6 +296,19 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         live_mover_sweep_minutes=max(_float("LIVE_MOVER_SWEEP_MINUTES", 5.0), 0.0),
         robinhood_execution=_flag("ROBINHOOD_EXECUTION"),
         model_events=_flag("MODEL_EVENTS"),
+        scenario_provider=_choice("SCENARIO_PROVIDER", "mirofish", ("mirofish", "ai", "demo")),
+        scenario_auto=_flag("SCENARIO_AUTO"),
+        mirofish_url=_loopback_url(os.getenv("MIROFISH_URL")),
+        mirofish_max_rounds=min(max(_int("MIROFISH_MAX_ROUNDS", 10), 1), 200),
+        mirofish_run_minutes=min(max(_float("MIROFISH_RUN_MINUTES", 45.0), 2.0), 24 * 60.0),
+        mirofish_concurrency=min(max(_int("MIROFISH_CONCURRENCY", 1), 1), 4),
+        mirofish_http_timeout=min(max(_float("MIROFISH_HTTP_TIMEOUT", 300.0), 5.0), 1800.0),
+        scenario_control=_flag("SCENARIO_CONTROL"),
+        scenario_budget=max(_float("SCENARIO_BUDGET", 0.0), 0.0),
+        scenario_max_loss=max(_float("SCENARIO_MAX_LOSS", 0.0), 0.0),
+        opportunity_min_net_pct=max(_float("OPPORTUNITY_MIN_NET_PCT", 1.0), 0.0),
+        opportunity_max_spread_pct=max(_float("OPPORTUNITY_MAX_SPREAD_PCT", 10.0), 0.1),
+        scenario_notify=_flag("SCENARIO_NOTIFY"),
         robinhood_execution_account=_clean_token(os.getenv("ROBINHOOD_EXECUTION_ACCOUNT")),
         live_max_order=_float("LIVE_MAX_ORDER", 100.0),
         autopilot_live=_flag("AUTOPILOT_LIVE"),

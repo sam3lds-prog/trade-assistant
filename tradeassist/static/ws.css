@@ -319,6 +319,21 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 
 /* 4.1 Catalyst Scenarios, in the study's Forecast section */
 .ws-catalyst { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 6px; }
+/* 4.3 the one-click pipeline: its four stages, the findings and the valuation */
+.ws-pipeline { margin: 6px 0 10px; }
+.ws-pipeline h4 { margin: 0 0 6px; }
+.ws-stages { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0 0 6px; padding: 0; counter-reset: stage; }
+.ws-stage { flex: 1 1 110px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font-size: 12px; background: var(--panel); }
+.ws-stage::before { counter-increment: stage; content: counter(stage) ". "; color: var(--muted); }
+.ws-stage.done { border-color: var(--pos, #2f9e44); }
+.ws-stage.running, .ws-stage.queued { border-color: var(--accent, #3b82f6); }
+.ws-stage.failed { border-color: var(--neg, #d9480f); }
+.ws-stage.attention { border-color: var(--warn, #f59f00); }
+.ws-stage-detail { margin-top: 2px; overflow-wrap: anywhere; }
+.ws-findings .ws-conclusion { margin: 6px 0; }
+.ws-case-list li { margin: 4px 0; }
+.ws-valuation h5, .ws-findings h5 { margin: 8px 0 4px; font-size: 13px; }
+.ws-scen-settings { align-items: center; }
 .ws-catalyst textarea { width: 100%; box-sizing: border-box; font: inherit; }
 .ws-catalyst .ws-cat-json, .ws-cat-report { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .ws-cat-report { white-space: pre-wrap; max-height: 220px; overflow: auto; background: var(--sunk); padding: 6px; border-radius: 4px; }

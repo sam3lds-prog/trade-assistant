@@ -115,3 +115,33 @@ def catalyst_scenarios(cur: sqlite3.Cursor) -> None:
         result_json       TEXT NOT NULL,
         UNIQUE (run_id, version)
     )""")
+
+
+@migration(25, "4.3 one-click Research: a study's request key and pipeline, an applied version's origin, and valuations")
+def one_click_pipeline(cur: sqlite3.Cursor) -> None:
+    """A study started by Run study remembers the click it came from (`request_key`, so a browser retry of the same
+    click finds the same study) and its scenario pipeline's intent and stages (`pipeline_json`). A scenario version says
+    whether a person applied it or the pipeline did (`origin`). A provider run keeps its whole report (`report_text`), apart from its parsed cases. A valuation prices one version's cases for the study's
+    fixed candidate strategies from one frozen quote snapshot."""
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(studies)").fetchall()}
+    if "request_key" not in columns:
+        cur.execute("ALTER TABLE studies ADD COLUMN request_key TEXT")
+    if "pipeline_json" not in columns:
+        cur.execute("ALTER TABLE studies ADD COLUMN pipeline_json TEXT")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_studies_request_key ON studies (request_key) WHERE request_key IS NOT NULL")
+    vcols = {row[1] for row in cur.execute("PRAGMA table_info(scenario_versions)").fetchall()}
+    rcols = {row[1] for row in cur.execute("PRAGMA table_info(scenario_runs)").fetchall()}
+    if "report_text" not in rcols:
+        cur.execute("ALTER TABLE scenario_runs ADD COLUMN report_text TEXT")
+    if "origin" not in vcols:
+        cur.execute("ALTER TABLE scenario_versions ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'")
+    cur.execute("""CREATE TABLE IF NOT EXISTS scenario_valuations (
+        id              TEXT PRIMARY KEY,
+        version_id      TEXT NOT NULL REFERENCES scenario_versions (id),
+        study_id        TEXT NOT NULL REFERENCES studies (id),
+        created_at      TEXT NOT NULL,
+        status          TEXT NOT NULL CHECK (status IN ('complete', 'partial', 'failed')),
+        snapshot_json   TEXT NOT NULL,
+        result_json     TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_valuations_version ON scenario_valuations (version_id, created_at)")

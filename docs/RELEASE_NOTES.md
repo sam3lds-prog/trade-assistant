@@ -20,6 +20,50 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.3.0 — One-click Research pipeline
+
+The second of four steps of the one-click Research plan ([ONE_CLICK_RESEARCH.md](ONE_CLICK_RESEARCH.md)). **No trading
+permission is added or changed; nothing is sent to a broker.**
+
+- **Run study, then the scenario provider, with no manual step.** With *Run scenarios after the study* ticked (Research
+  → Study settings; on by default when `SCENARIO_AUTO=1` or the setting is on), a 1- or 5-session study is saved as
+  before and then continues in the background: **Evidence and strategies → MiroFish → Price paths and valuation →
+  Findings**, shown as four stages at the top of the Summary. The quantitative study is readable while the provider
+  runs; a refresh, another stock or a restart does not lose it. Other horizons keep the study flow as it was.
+- **The click is remembered.** Each Run study carries a request key: a browser retry of the same click finds the same
+  study instead of starting another. The continuation is keyed by study, provider and configuration, so it runs once.
+- **The packet is frozen automatically** with `create_seed()`: a verified earnings date inside the horizon if there is
+  one, else the most recent sourced headline, else a clearly named hypothetical current-setup case; plus a few words
+  on what the compared strategies depend on (never contracts, quantities, the budget or the account).
+- **MiroFish, self-hosted, through its pinned routes** (upstream 7657031): ontology, graph build, simulation create,
+  prepare, start, run status, report. Each id the server acknowledges is saved before the next step is queued, so a
+  restart resumes from it. Polling backs off; a server error or a dropped connection is retried a few times; a write
+  whose answer never came is reconciled (the project by its name, the simulation by its project, the run by its
+  status) and otherwise stops at **Needs attention**, never starting another paid run. `MIROFISH_RUN_MINUTES` caps a
+  run (the server is asked to stop it), `MIROFISH_CONCURRENCY` runs go at once, and Cancel stops the simulation;
+  anything that arrives after Cancel is not applied. `MIROFISH_URL` must be a loopback address.
+- **Price paths are attached automatically.** The report is normalized to the 4.1 case schema and checked whole
+  against the frozen packet (a result for another packet is refused); the full report and the parsed cases are kept
+  apart. The provider supplies conditions, directions and timing; **every size comes from a deterministic rule**: the
+  options-implied move for an earnings release, the comparable situations' tail (with at least 20 independent cases),
+  the options-implied standard deviation to the horizon, or a factor's own measured volatility (with the sign that
+  moves the stock the driver's way). A driver that cites nothing stays a hypothesis. One version is saved with origin
+  `auto` and drawn on the linked chart; an edit under Advanced is another version (`manual`). A size credited to a rule
+  that is not the rule's own is refused.
+- **The same strategies, revalued.** The study's candidates (their exact legs) are priced under every case from one
+  quote snapshot (one chain per expiration, each leg's bid, ask, implied volatility and Greeks' age), on the same price
+  grid within each case, net of round-trip costs, with the contract's own most-it-can-lose and capital beside the
+  model. Mixes (cash; each structure alone at the budget; the What-If allocator's split for each case) are ranked by
+  their worst case across the cases; no probability-weighted result is shown. A new quote changes what the legs cost,
+  never where a case says the stock ends. **Value again** takes a fresh snapshot.
+- Retry makes a new attempt; Cancel stops it; recovery after a restart queues what a stopped process left behind.
+- Research settings: `GET/POST /v3/scenarios/settings` (provider and the automatic switch), `POST /v3/scenarios/check`;
+  per study: `/v3/studies/{id}/pipeline` with `start`, `cancel`, `retry`, `revalue`. Migration 25 adds the request key,
+  the pipeline record, a version's origin, the run's report text and `scenario_valuations`.
+- New settings (`.env`): `SCENARIO_PROVIDER` (mirofish, ai or demo), `SCENARIO_AUTO`, `MIROFISH_URL`,
+  `MIROFISH_MAX_ROUNDS`, `MIROFISH_RUN_MINUTES`, `MIROFISH_CONCURRENCY`, `MIROFISH_HTTP_TIMEOUT`, `SCENARIO_BUDGET`,
+  `SCENARIO_MAX_LOSS`.
+
 ## 4.2.0 — Tradier and forecast readiness
 
 The first of four steps of the one-click Research plan ([ONE_CLICK_RESEARCH.md](ONE_CLICK_RESEARCH.md)). **No trading

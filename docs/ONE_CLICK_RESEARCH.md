@@ -65,3 +65,70 @@ hours). Run study never queues one: a study made while one is pending says so an
 
 The V4 replay (Model Lab) is separate: `python run.py --replay dataset build`, check it, run the development replay and
 inspect its report before any holdout or deployment. Its shadow forecasts do not feed Research's calibration.
+
+## 2. The one-click pipeline (4.3)
+
+### Set it up once
+
+```dotenv
+SCENARIO_PROVIDER=mirofish          # or ai (one AI call: the control), or demo (canned cases, demo data only)
+SCENARIO_AUTO=1                     # run it after every 1- or 5-session study (also a switch in Research)
+MIROFISH_URL=http://127.0.0.1:5001  # your own MiroFish server; must be this computer
+MIROFISH_MAX_ROUNDS=10              # the simulation's round cap
+MIROFISH_RUN_MINUTES=45             # the most one run may take, every stage included
+MIROFISH_CONCURRENCY=1              # runs at once
+MIROFISH_HTTP_TIMEOUT=300           # one request (the ontology step waits on the server's model)
+SCENARIO_BUDGET=0                   # mixes are sized to this; 0: the Trading Desk policy's trial capital
+SCENARIO_MAX_LOSS=0                 # the loss limit a setup must stay inside; 0: the policy's daily loss stop
+```
+
+MiroFish is run from its own repository at the pinned commit
+[7657031](https://github.com/666ghj/MiroFish/tree/7657031ac01184afe2cb220f5ee3545573b5e843) with its own `.env` (its
+language model and Zep keys stay there) and `FLASK_HOST=127.0.0.1`, so it listens on this computer only. Trade
+Assistant sends it only the shareable packet: no credentials, holdings, orders or budgets. The hosted MiroFish
+dashboard's API is not used.
+
+In Research → the study's **Study settings**, *Run scenarios after the study* (and *On by default*) and the provider
+can be changed without editing `.env`; the provider's readiness is shown beside them.
+
+### What happens on Run study
+
+| Stage | What runs | Where |
+| --- | --- | --- |
+| Evidence and strategies | The study as before: evidence, forecast, candidate strategies with their exact legs | The study's own thread |
+| MiroFish (or the provider) | The packet frozen; the provider's stages, one bounded step at a time | Research's `scenarios` worker |
+| Price paths and valuation | Cases checked against the packet, sized by the app's rules, version saved; the candidates priced under each case from one snapshot | Research's `scenarios` worker |
+| Findings | A short conclusion, the cases with their triggers and invalidations, the mixes | Saved on the study |
+
+The panel at the top of the study's Summary follows the stages, the provider's progress (its project and simulation
+ids as they arrive) and the elapsed time, with Cancel while it runs and Retry after a failure. The cases are drawn on
+the linked chart from their saved prices as soon as the version exists.
+
+### What the numbers are
+
+- **The provider does not size anything.** It proposes conditions, directions, timing and reasons, citing the packet's
+  sources. The app sizes the stock's own move with the options-implied move for an earnings release, else the
+  comparable situations' tail (at least 20 independent cases), else one options-implied standard deviation to the
+  horizon; and a cited market, sector or macro driver with one standard deviation of that factor's own move over the
+  horizon. A driver that cites nothing stays a hypothesis, listed with the case.
+- **The cases have no probabilities.** The mixes are ranked by their worst case across the cases, and each case's
+  P&L is shown on its own.
+- **The valuation is of the study's own candidates**, with the legs they were chosen with, priced from one quote
+  snapshot taken when the cases arrive. The cases' prices are the version's saved ones: a later quote changes what the
+  legs cost, never where the case says the stock ends.
+
+### When something goes wrong
+
+| Shown | Meaning | What to do |
+| --- | --- | --- |
+| *MIROFISH_URL is not set* / *did not answer* | The provider is not reachable | Start MiroFish, then Retry |
+| *Needs attention* after a timeout | A write's answer never came and its result was not found on the server | Check MiroFish's project list, then Retry (a new run) |
+| *Needs attention: no cases in the template* | The report had no JSON cases and no AI is set up to convert it | Set `ANTHROPIC_API_KEY`, or paste the cases under Advanced |
+| *Stopped: it took longer than MIROFISH_RUN_MINUTES* | The run's time cap | Raise the cap or lower `MIROFISH_MAX_ROUNDS` |
+| *not this study's packet* | The provider answered for another packet | Retry; nothing was applied |
+
+### Try it on demo data
+
+`DATA_MODE=demo`, then in Research's Study settings choose **Demo provider** and tick *On by default*, and click Run
+the study. The demo provider returns canned cases built from the packet (labelled *Demo provider: nothing was
+simulated*), and the rest of the pipeline is the real one.

@@ -427,7 +427,9 @@ EventTime = Literal["before_open", "during_session", "after_close", "unknown"]
 DriverType = Literal["issuer_event", "market", "sector", "macro", "positioning", "sentiment", "other"]
 DriverTiming = Literal["before_event", "first_session_after_release", "spread_over_horizon", "by_horizon", "unknown"]
 MoveDirection = Literal["up", "down", "flat"]
-AssumptionSource = Literal["options_implied_move", "provider", "user_stress"]
+# 4.3: the deterministic rules the one-click pipeline sizes a case with (scenarios.rule_value): the analogs' tail, the
+# options-implied standard deviation to the horizon, and a factor's own measured volatility over the horizon.
+AssumptionSource = Literal["options_implied_move", "provider", "user_stress", "analog_tail", "implied_sensitivity", "factor_volatility"]
 
 
 class CatalystSpec(Strict):
@@ -505,6 +507,7 @@ class ScenarioSeed(Strict):
     sources: list[ScenarioSource]
     missing: list[str] = Field(default_factory=list)
     question: str
+    strategy_context: list[str] = Field(default_factory=list)          # 4.3: what the compared strategies depend on, in words
 
 
 class ScenarioDriver(Strict):

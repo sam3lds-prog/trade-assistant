@@ -59,6 +59,117 @@
       rd.method_note ? el("p", { class: "small muted", text: rd.method_note }) : "");
   }
 
+
+  /* ---------- 4.3 the one-click pipeline: Run study → evidence and strategies → the provider → paths and valuation → findings ----------
+     The study is shown as soon as it is saved; the provider runs in the background (Research's own worker), and this
+     panel follows it: its four stages, the provider's progress (MiroFish's project and simulation ids as they arrive),
+     Cancel and Retry, then the findings, the cases drawn on the linked chart from their saved prices, and the study's
+     own candidate strategies valued under every case from one quote snapshot. No case has a probability. */
+  const STAGE_TONE = { done: "pass", running: "info", queued: "info", pending: "", failed: "fail", attention: "warn", canceled: "info", skipped: "info" };
+  const STAGE_WORDS = { done: "done", running: "running", queued: "queued", pending: "waiting", failed: "failed", attention: "needs attention", canceled: "canceled", skipped: "skipped" };
+  function stageStrip(p) {
+    return el("ol", { class: "ws-stages", "aria-label": "Progress" }, p.stages.map(x => el("li", { class: `ws-stage ${x.state || "pending"}`, "data-stage": x.key, title: x.detail || "" },
+      el("span", { class: "ws-stage-label", text: x.label }), " ", STAGE_TONE[x.state] ? statusTag(STAGE_TONE[x.state], STAGE_WORDS[x.state] || x.state) : el("span", { class: "muted small", text: STAGE_WORDS[x.state] || x.state || "waiting" }),
+      x.detail && !["pending", "done"].includes(x.state) ? el("div", { class: "small muted ws-stage-detail", text: x.detail }) : "")));
+  }
+  function drawCatalyst(w, st, v) {
+    const fc = st.forecast;
+    w.set({ scenario: { kind: "forecast", study: st.id, symbol: st.symbol, horizon: v.horizon_sessions, calibrated: v.base.calibrated,
+      base: { path_pct: v.base.return_pct, low_pct: v.base.low_pct, high_pct: v.base.high_pct }, anchor: v.anchor, sessions: v.sessions,
+      alternatives: fc ? fc.alternatives.map(a => ({ key: a.key, label: a.label, path_pct: a.path_pct })) : [],
+      catalyst: { run_id: v.run_id, version_id: v.id, version: v.version, origin: v.origin,
+        cases: v.cases.filter(c => c.visible && c.quantified).map(c => ({ key: c.key, label: c.label, price: c.price, trigger: c.trigger })) } } });
+  }
+  function valuationBlock(v) {
+    if (!v) return "";
+    const keys = (v.structures[0] && Object.keys(v.structures[0].by_case)) || ["central", "bullish", "bearish"];
+    const caseLabel = k => k.replace(/^./, x => x.toUpperCase());
+    const fresh = v.freshness || {};
+    const tags = [fresh.demo ? statusTag("warn", "Demo data") : "", fresh.delayed && !fresh.demo ? statusTag("warn", "Delayed quotes") : "",
+      fresh.stale ? statusTag("warn", "Stale quote") : ""].filter(Boolean);
+    const kids = [el("h5", { text: `The study's strategies under each case (to ${v.target_date})` }),
+      tags.length ? el("p", { class: "small" }, ...tags.flatMap(t => [t, " "])) : "",
+      v.structures.length ? table([
+        { label: "Strategy", cell: x => el("span", {}, el("strong", { text: x.label }), x.flags.length ? el("span", { class: "muted", title: x.flags.join("; "), text: " ⚑" }) : "") },
+        ...keys.map(k => ({ label: caseLabel(k), num: true, cell: x => el("span", { class: x.by_case[k].expected_pnl >= 0 ? "pos-text" : "neg-text", text: money(x.by_case[k].expected_pnl, 0) }) })),
+        { label: "Worst case", num: true, cell: x => money(x.worst_case, 0) },
+        { label: "Most it can lose", num: true, cell: x => (x.unlimited_loss ? "no limit" : isNum(x.max_loss) ? money(x.max_loss, 0) : "") },
+        { label: "Capital", num: true, cell: x => (isNum(x.capital) ? money(x.capital, 0) : "") }], v.structures) : WS.empty("No strategy could be valued."),
+      (v.mixes || []).length ? el("div", {}, el("h5", { text: `Budgeted mixes (budget ${money(v.limits.budget, 0)}, from ${v.limits.budget_basis}), best worst case first` }), table([
+        { label: "Mix", cell: m => el("span", {}, el("strong", { text: m.label }), m.key === v.best_mix ? " ✓" : "") },
+        ...keys.map(k => ({ label: caseLabel(k), num: true, cell: m => money(m.by_case[k].expected_pnl, 0) })),
+        { label: "Worst case", num: true, cell: m => money(m.worst_case, 0) },
+        { label: "Most it can lose", num: true, cell: m => money(m.max_loss, 0) },
+        { label: `Within ${money(v.limits.loss_limit, 0)}`, cell: m => (m.within_loss_limit ? "yes" : "no") },
+        { label: "Capital", num: true, cell: m => money(m.capital, 0) }], v.mixes)) : "",
+      ...(v.failed || []).map(f => el("p", { class: "small" }, statusTag("warn", f.label || f.key), ` not valued: ${f.error}`)),
+      ...(v.problems || []).map(x => el("p", { class: "small" }, statusTag("warn", "Snapshot"), ` ${x}`)),
+      el("p", { class: "small muted", text: `${v.note} Quotes as of ${new Date(v.snapshot_at).toLocaleString()}; ${v.iv_assumption}.` })];
+    return el("div", { class: "ws-valuation", "data-status": v.status }, ...kids);
+  }
+  function findingsBlock(p) {
+    const f = p.findings;
+    if (!f) return "";
+    return el("div", { class: "ws-findings" }, el("p", { class: "ws-conclusion" }, el("strong", { text: "Findings: " }), f.conclusion),
+      el("ul", { class: "plain small ws-case-list" }, f.cases.map(c => el("li", { "data-case": c.key },
+        el("span", { class: "ws-swatch", style: `background: ${CASE_COLORS[c.key]}` }), " ", el("strong", { text: `${c.label} ${pctText(c.return_pct)} (${money(c.price)})` }),
+        c.quantified ? "" : el("span", { class: "muted", text: " (the base path: no quantified assumption)" }),
+        el("div", {}, el("span", { class: "muted", text: "If " }), c.trigger, el("span", { class: "muted", text: ". Invalidated if " }), c.invalidation, ".")))),
+      (p.sizing_notes || []).length ? el("ul", { class: "plain small muted" }, p.sizing_notes.map(x => el("li", { text: x }))) : "");
+  }
+  function pipelinePanel(w, s, alive) {
+    const st = s.study;
+    const box = el("section", { class: "ws-pipeline panel", "aria-label": "Scenarios", "data-study": st.id });
+    let timer = null, drawn = false, busy = false;
+    const note = el("div", { class: "small", "aria-live": "polite" });
+    async function load() {
+      if (!alive()) return;
+      try { const r = await w.api(`/v3/studies/${enc(st.id)}/pipeline`); if (alive() && r.pipeline) paint(r.pipeline); }
+      catch (e) { if (e !== WS.GONE && alive()) { note.textContent = e.message; timer = setTimeout(load, 5000); } }
+    }
+    async function act(path, btn, words) {
+      if (busy) return;
+      busy = true; btn.disabled = true; note.replaceChildren(loading(words));
+      try { const r = await w.api(`/v3/studies/${enc(st.id)}/pipeline/${path}`, {}); note.replaceChildren(); if (alive()) paint(r.pipeline); }
+      catch (e) { if (e !== WS.GONE) note.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); btn.disabled = false; }
+      busy = false;
+    }
+    async function drawAuto(id) {
+      try { const v = await w.api(`/v3/scenario-versions/${enc(id)}`); if (!alive()) return; drawCatalyst(w, st, v);
+        if (!WS.find(w, "chart")) WS.toast("Link a stock chart to this widget (the same colour) to see the scenarios on it."); }
+      catch (e) { if (e !== WS.GONE) note.textContent = e.message; }
+    }
+    function paint(p) {
+      clearTimeout(timer);
+      if (!alive()) return;
+      box.dataset.status = p.status;
+      const kids = [el("h4", {}, "Scenarios ", el("span", { class: "muted small", text: `${p.provider_label}${p.attempt > 1 ? `, attempt ${p.attempt}` : ""}` })), stageStrip(p)];
+      if (p.findings) kids.push(findingsBlock(p));
+      if (p.demo) kids.push(el("p", { class: "small" }, statusTag("warn", "Demo provider"), " Canned cases built from the packet, for trying the workflow: nothing was simulated."));
+      if (p.catalyst) kids.push(el("p", { class: "small muted", text: `Catalyst: ${p.catalyst.title} (${p.catalyst_basis}).` }));
+      const r = p.run;
+      if (r && p.status === "running") {
+        const ids = Object.entries(r.remote || {}).map(([k, x]) => `${k.replace(/_id$/, "")} ${x}`).join(", ");
+        kids.push(el("p", { class: "small muted", text: `${r.status === "queued" ? "Waiting to start" : `${r.stage || "starting"}: ${r.detail || ""}`}${isNum(r.elapsed_seconds) ? ` · ${Math.round(r.elapsed_seconds)} s` : ""}${ids ? ` · ${ids}` : ""}. The quantitative study above is complete; this continues if you refresh or switch stocks.` }));
+      }
+      if (p.error) kids.push(el("p", { class: "small", role: "alert" }, statusTag(p.status === "canceled" ? "info" : p.status === "needs_attention" ? "warn" : "fail",
+        p.status === "canceled" ? "Canceled" : p.status === "needs_attention" ? "Needs attention" : "Did not finish"), ` ${p.error}`));
+      const row = el("div", { class: "ws-row" });
+      if (p.can_cancel) { const b = el("button", { class: "ws-btn", type: "button" }, "Cancel"); b.addEventListener("click", () => act("cancel", b, "Canceling…")); row.append(b); }
+      if (p.can_retry) { const b = el("button", { class: "ws-btn primary", type: "button" }, "Retry"); b.addEventListener("click", () => act("retry", b, "Starting again…")); row.append(b); }
+      if (p.version_id) { const b = el("button", { class: "ws-btn", type: "button" }, "Draw on the linked chart"); b.addEventListener("click", () => drawAuto(p.version_id)); row.append(b); }
+      if (p.status === "complete" && p.version_id) { const b = el("button", { class: "ws-btn", type: "button", title: "One fresh quote snapshot, the same strategies" }, "Value again"); b.addEventListener("click", () => act("revalue", b, "Valuing the strategies again…")); row.append(b); }
+      if (row.children.length) kids.push(row);
+      kids.push(note);
+      if (p.valuation) kids.push(valuationBlock(p.valuation));
+      box.replaceChildren(...kids);
+      if (p.status === "running") timer = setTimeout(load, 1500);
+      else if (p.version_id && !drawn) { drawn = true; drawAuto(p.version_id); }
+    }
+    paint(s.pipeline);
+    return box;
+  }
+
   WS.register("study", { title: "Research study", category: "Research", size: { w: 5, h: 10 }, minW: 3, create(w) {
     const horizon = el("select", { "aria-label": "Horizon" }, [1, 3, 5, 10, 20].map(h => el("option", { value: String(h), selected: h === (w.config.horizon || 5) }, `${h} trading day${h === 1 ? "" : "s"}`)));
     const thesis = el("select", { "aria-label": "Kind of trade" }, THESES.map(([k, t]) => el("option", { value: k, selected: k === (w.config.thesis || "swing") }, t)));
@@ -67,10 +178,42 @@
     const run = el("button", { class: "ws-btn primary", type: "button" }, "Run the study");
     const status = el("div", { class: "small muted", "aria-live": "polite" });
     const out = el("div");
+    // 4.3: run the scenario provider after a 1- or 5-session study (Research setting: the provider and Run automatically).
+    const scen = el("input", { type: "checkbox", "aria-label": "Run scenarios" });
+    const provider = el("select", { "aria-label": "Scenario provider" }, [["mirofish", "MiroFish (self-hosted)"], ["ai", "Single AI call"], ["demo", "Demo provider"]].map(([k, t]) => el("option", { value: k }, t)));
+    const autoBox = el("input", { type: "checkbox", "aria-label": "Run scenarios automatically" });
+    const provNote = el("span", { class: "small muted" });
+    const scenRow = el("div", { class: "ws-row ws-scen-settings" }, el("label", { class: "check" }, scen, " Run scenarios after the study"),
+      field("Provider", provider), el("label", { class: "check" }, autoBox, " On by default"), provNote);
     const form = el("details", { class: "ws-more", open: true }, el("summary", { text: "Study settings" }),
       el("div", { class: "ws-row" }, field("Horizon", horizon), field("Kind of trade", thesis)),
-      el("div", { class: "ws-row" }, field("Direction", dir), field("Peers", peers)));
+      el("div", { class: "ws-row" }, field("Direction", dir), field("Peers", peers)), scenRow);
     w.body.append(form, el("div", { class: "ws-row" }, run, status), out);
+    let scenSettings = null, pendingKey = null;
+    const scenFits = () => [1, 5].includes(Number(horizon.value)) && scenSettings && scenSettings.enabled;
+    const paintScen = () => {
+      scenRow.hidden = !(scenSettings && scenSettings.enabled);
+      scen.disabled = !scenFits();
+      if (!scenFits()) scen.checked = false;
+      const rd = scenSettings && scenSettings.readiness;
+      provNote.replaceChildren(!scenSettings ? "" : !scenFits() ? "Scenarios run on 1- or 5-session studies." : rd ? statusTag(rd.ok ? "pass" : "warn", rd.ok ? "Ready" : "Not ready") : "", rd && !rd.ok && scenFits() ? ` ${rd.detail}` : "");
+    };
+    async function loadScen() {
+      try {
+        scenSettings = await w.api("/v3/scenarios/settings");
+        provider.value = scenSettings.provider; autoBox.checked = !!scenSettings.auto; scen.checked = !!scenSettings.auto;
+      } catch (e) { if (e === WS.GONE) return; scenSettings = null; }
+      paintScen();
+    }
+    async function saveScen(body) {
+      try { scenSettings = await w.api("/v3/scenarios/settings", body); provider.value = scenSettings.provider; autoBox.checked = !!scenSettings.auto; }
+      catch (e) { if (e !== WS.GONE) provNote.replaceChildren(el("span", { class: "error", text: e.message })); }
+      paintScen();
+    }
+    provider.addEventListener("change", () => saveScen({ provider: provider.value }));
+    autoBox.addEventListener("change", () => { scen.checked = autoBox.checked && scenFits(); saveScen({ auto: autoBox.checked }); });
+    horizon.addEventListener("change", () => { if (scenSettings) scen.checked = !!scenSettings.auto && scenFits(); paintScen(); });
+    if (catalystOn()) loadScen(); else scenRow.hidden = true;
     // A study opens on its Summary; refreshing the same study keeps the section being read.
     let polling = null, shown = null, current = null, section = "summary", rendered = null;
     run.addEventListener("click", start);
@@ -81,17 +224,26 @@
       w.config.horizon = Number(horizon.value); w.config.thesis = thesis.value; w.config.peers = peers.value; w.save();
       run.disabled = true;
       status.textContent = `Studying ${c.symbol}…`;
+      // One key per click, kept when the request did not get an answer: a retry of the same click finds the same study.
+      const key = pendingKey || (window.crypto && crypto.randomUUID ? crypto.randomUUID() : `k${Date.now()}${Math.random().toString(16).slice(2)}`);
+      pendingKey = key;
       try {
         const r = await w.api("/v3/studies", { symbol: c.symbol, horizon_days: Number(horizon.value), thesis: thesis.value,
           direction: dir.value() || c.direction || null, peers_add: peers.value.split(",").map(s => s.trim()).filter(Boolean),
-          opportunity_id: c.opportunity && c.opportunity.id ? c.opportunity.id : null });
+          opportunity_id: c.opportunity && c.opportunity.id ? c.opportunity.id : null, request_key: key,
+          scenarios: scenFits() ? scen.checked : null });
+        pendingKey = null;
+        w.set({ study: r.id, _self: true });
         poll(r.id);
-      } catch (e) { if (e !== WS.GONE) { status.textContent = e.message; run.disabled = false; } }
+      } catch (e) { if (e !== WS.GONE) { if (!/Cannot reach/.test(e.message)) pendingKey = null; status.textContent = e.message; run.disabled = false; } }
     }
     function poll(id) {
       clearTimeout(polling);
       w.api(`/v3/studies/${enc(id)}`).then(s => {
-        if (s.status === "running") { polling = setTimeout(() => poll(id), 800); return; }
+        if (s.status === "running") {
+          if (s.pipeline) out.replaceChildren(el("section", { class: "ws-pipeline panel", "aria-label": "Scenarios" }, el("h4", { text: `Studying ${s.symbol}` }), stageStrip(s.pipeline)));
+          polling = setTimeout(() => poll(id), 800); return;
+        }
         run.disabled = false;
         if (s.status === "failed") { failed(s); return; }
         status.textContent = "";
@@ -151,6 +303,7 @@
 
       // Summary: the forecast in one line with what its range is, the best strategies and their routes, and counts.
       const sum = t.panels.summary;
+      if (s.pipeline) sum.append(pipelinePanel(w, s, () => current === s && !w.disposed));
       if (fc) {
         const last = fc.base.path_pct.length - 1;
         sum.append(el("div", { class: "panel" }, el("p", {}, readinessTag(fc), " ", el("strong", { text: `Base ${pctText(fc.base.path_pct[last])} by day ${h}` })),
@@ -192,7 +345,9 @@
             el("ul", { class: "plain small" }, fc.alternatives.map(a => el("li", {}, el("strong", { text: `${a.label}: ${pctText(a.path_pct[a.path_pct.length - 1])}. ` }), a.assumption)))) : "",
           el("h4", { text: "What would prove it wrong" }), el("ul", { class: "plain small" }, fc.invalidators.map(x => el("li", { text: x }))), actionsFor(st, s.frame));
         // 4.1: one event's Central, Bullish and Bearish reactions, reviewed and drawn beside the base.
-        if (catalystOn()) fcp.append(catalystSection(w, s, () => current === s && !w.disposed));
+        // 4.3: with the one-click pipeline the manual tools are under Advanced (to try other assumptions, or retry by hand).
+        if (catalystOn()) fcp.append(s.pipeline ? el("details", { class: "ws-more ws-advanced" }, el("summary", { text: "Advanced: manual scenario tools (other assumptions, another provider's cases)" }),
+          catalystSection(w, s, () => current === s && !w.disposed)) : catalystSection(w, s, () => current === s && !w.disposed));
       } else fcp.append(WS.empty("No forecast could be made: see Evidence for what is missing."));
 
       // Strategies: every candidate, its risk in separate terms, its estimated fillability and its route now.
