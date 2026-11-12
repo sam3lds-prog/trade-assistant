@@ -48,7 +48,8 @@ permission is added or changed.**
   survive a page refresh and an app restart (an interrupted one is taken up again), show their progress, a failure
   shows Retry, and a refresh that finds too little history is kept beside the last usable calibration, never over it.
   Once real market data is connected (live, sandbox or Robinhood), the 1- and 5-session calibrations are queued in the
-  background when missing, older than a week or made with the 3.0 method. Running a study never queues one.
+  background (three minutes after start, so the first pages are not slowed) when missing, older than a week or made
+  with the 3.0 method. Running a study never queues one.
 - Finished studies keep the forecast they were made with; a new calibration applies to the next study.
 
 ## 4.1.0 — Catalyst Scenarios (manual pilot)
