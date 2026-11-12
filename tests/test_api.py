@@ -38,6 +38,9 @@ V3_WRITES = {
     # fixed strategies again. Models and records; no orders.
     "/v3/scenarios/settings", "/v3/scenarios/check", "/v3/studies/{study_id}/pipeline/start", "/v3/studies/{study_id}/pipeline/cancel",
     "/v3/studies/{study_id}/pipeline/retry", "/v3/studies/{study_id}/pipeline/revalue",
+    # 4.4: record a scenario case's trigger as observed (with its independent source; the strategies are valued again
+    # and decided again) and mark a scenario notice seen. Records only; no orders.
+    "/v3/studies/{study_id}/decision/trigger", "/v3/scenarios/notices/{decision_id}/seen",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.

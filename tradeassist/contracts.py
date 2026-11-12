@@ -35,7 +35,8 @@ CONTRACT_VERSION = "3.0"
 
 Direction = Literal["LONG", "SHORT"]
 Horizon = Literal["intraday", "swing", "event"]
-OpportunityKind = Literal["reversal", "breakout", "earnings", "news", "pullback", "gap", "momentum", "fade", "other"]
+# 4.4: "scenario", a study's scenario decision (a projected case payoff, never a historical edge)
+OpportunityKind = Literal["reversal", "breakout", "earnings", "news", "pullback", "gap", "momentum", "fade", "scenario", "other"]
 Source = Literal["morning", "ideas", "scanner", "reversal", "live", "earnings", "manual", "study"]
 Thesis = Literal["intraday_bounce", "swing", "earnings_reaction", "reversal", "investment"]
 AccountKind = Literal["paper", "live", "shadow"]

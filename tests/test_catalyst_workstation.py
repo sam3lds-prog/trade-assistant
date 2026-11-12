@@ -130,6 +130,14 @@ def test_one_click_run_study_draws_the_cases_and_values_the_strategies(tmp_path)
         text = panel.inner_text()
         assert "Demo provider" in text and "nothing was simulated" in text and "Findings:" in text and "None has a probability" in text
         assert panel.locator(".ws-valuation table").count() >= 1 and "Cash" in panel.locator(".ws-valuation").inner_text()
+        # 4.4: the decision, above the findings: here (the trial policy's $25 loss limit) No setup, with its reason.
+        card = panel.locator(".ws-decision")
+        assert card.count() == 1 and card.get_attribute("data-status") in ("qualified", "watch", "no_setup")
+        assert "Demo example" in card.inner_text()
+        if card.get_attribute("data-status") == "no_setup":
+            assert "Why not:" in card.inner_text()
+        else:
+            assert "Invalidated if" in card.inner_text()
         # The saved version is drawn without an Apply click: dashed cases beside the solid base, at the stored prices.
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:case:bullish'] && l['forecast:case:bearish']; }})()", timeout=20000)
         lines = page.evaluate(LINES)
@@ -151,4 +159,41 @@ def test_one_click_run_study_draws_the_cases_and_values_the_strategies(tmp_path)
         page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-pipeline[data-status='complete']", timeout=30000)
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:case:bearish']; }})()", timeout=20000)
         assert _points(page.evaluate(LINES), "forecast:case:bearish") == before
+    assert errors == []
+
+
+def _demo_provider_wide_limits(svc):
+    _demo_provider(svc)
+    from dataclasses import replace
+    svc.settings = replace(svc.settings, scenario_budget=5000.0, scenario_max_loss=1000.0)
+
+
+def test_a_watch_decision_is_noticed_and_opens_its_study(tmp_path):
+    """4.4: with room in the loss limit the demo study's cases make a Watch for trigger: a card with what, when, why and
+    what invalidates it; a notice at the top of the workstation that opens the study; and Discover's scenario filter."""
+    with demo_page(tmp_path, prepare=_demo_provider_wide_limits) as (page, errors):
+        open_research(page)
+        study = widget(page, "study")
+        study.locator(".ws-scen-settings input[aria-label='Run scenarios']").wait_for(timeout=15000)
+        study.locator("button:text-is('Run the study')").click()
+        page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-decision[data-status='watch']", timeout=90000)
+        card = study.locator(".ws-decision")
+        text = card.inner_text()
+        for words in ("Watch for trigger", "What", "When", "Why", "Invalidated if", "Only if"):
+            assert words in text, words
+        assert card.locator("button:text-is('Draft it')").count() == 1
+        page.wait_for_selector("#ws-scen-notice [data-decision]", timeout=70000)
+        assert "Watch for trigger" in page.locator("#ws-scen-notice").inner_text()
+        page.locator("#ws-scen-notice button:text-is('Dismiss')").first.click()
+        page.wait_for_selector("#ws-scen-notice", state="detached", timeout=10000)
+        # Discover: the scenario observation, labelled, and never eligible for the autopilot.
+        page.evaluate("WS.goWorkspace('discover')")
+        feed = widget(page, "feed")
+        feed.locator("select[aria-label='Setup']").wait_for(timeout=30000)
+        feed.locator("select[aria-label='Setup']").select_option("scenario")
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='feed'] tbody tr", timeout=20000)
+        feed.locator("tbody tr").first.click()
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-opp .ws-decision", timeout=20000)
+        detail = feed.locator(".ws-opp").inner_text()
+        assert "not a historical edge" in detail and "Not eligible: scenario evidence only" in detail
     assert errors == []

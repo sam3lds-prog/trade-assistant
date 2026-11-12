@@ -666,7 +666,7 @@ class Pipeline:
         st = self.settings()
         cfg = self.config_for(st["provider"])
         p = self._update(study_id, attempt=attempt, provider=st["provider"], config=cfg, config_hash=C.digest(cfg)[:16], status="running",
-                         stage="provider", error=None, run_id=None, version_id=None, valuation_id=None, findings=None,
+                         stage="provider", error=None, run_id=None, version_id=None, valuation_id=None, findings=None, decision=None,
                          stages={"provider": {"state": "queued", "detail": "retrying"}, "paths": {"state": "pending", "detail": ""},
                                  "findings": {"state": "pending", "detail": ""}}) or {}
         self._enqueue(START, {"study_id": study_id}, self._start_key(study_id, p))
@@ -738,6 +738,9 @@ class Pipeline:
         return {"queued": queued}
 
     # --- the view ------------------------------------------------------------------------------------------------
+    def _decision(self, study_id: str, p: dict[str, Any]) -> dict[str, Any] | None:
+        return _decision_of(self.svc, study_id, p)
+
     def view(self, study_id: str) -> dict[str, Any] | None:
         p = self.load(study_id)
         if p is None:
@@ -766,11 +769,22 @@ class Pipeline:
         status = p.get("status") or "running"
         return {"status": status, "stage": p.get("stage"), "provider": prov, "provider_label": stage_label("provider", prov),
                 "attempt": p.get("attempt", 1), "stages": stages, "run": run, "seed_id": p.get("seed_id"), "version_id": p.get("version_id"),
-                "valuation": val, "findings": p.get("findings"), "decision": p.get("decision"), "error": p.get("error"),
+                "valuation": val, "findings": p.get("findings"), "decision": self._decision(study_id, p), "error": p.get("error"),
                 "catalyst": p.get("catalyst_used"), "catalyst_basis": p.get("catalyst_basis"), "sizing_notes": p.get("sizing_notes") or [],
                 "can_cancel": status == "running", "can_retry": status in ("failed", "needs_attention", "canceled")
                 or (status == "complete" and (p.get("stages") or {}).get("paths", {}).get("state") == "failed"),
                 "updated_at": p.get("updated_at"), "demo": prov == "demo"}
+
+
+def _decision_of(svc: Any, study_id: str, p: dict[str, Any]) -> dict[str, Any] | None:
+    op = getattr(svc, "opportunities", None)
+    if op is None or not p.get("decision"):
+        return None
+    try:
+        return op.latest(study_id)
+    except Exception:  # noqa: BLE001 - the view is still readable without its decision
+        log.exception("Could not read the decision of %s", study_id)
+        return None
 
 
 def _f(x: Any) -> float | None:

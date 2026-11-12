@@ -117,6 +117,94 @@
         el("div", {}, el("span", { class: "muted", text: "If " }), c.trigger, el("span", { class: "muted", text: ". Invalidated if " }), c.invalidation, ".")))),
       (p.sizing_notes || []).length ? el("ul", { class: "plain small muted" }, p.sizing_notes.map(x => el("li", { text: x }))) : "");
   }
+
+  /* ---------- 4.4 the decision: Qualified setup, Watch for trigger, or No setup ----------
+     Above the fold in the Scenarios panel: what to consider, when it becomes relevant, why it cleared the checks and
+     what invalidates it; or, with no setup, the most material check that failed. A Watch's trigger can be recorded
+     as observed with an independent source, which values the same strategies again and decides again. Draft hands
+     the setup to the Trading Desk with its scenario recorded; nothing is proposed or sent from here. */
+  const DECISION_TONE = { qualified: "pass", watch: "info", no_setup: "warn" };
+  function decisionCard(w, st, p, repaint) {
+    const d = p.decision;
+    if (!d) return "";
+    const s = d.setup, a = d.answers;
+    const note = el("div", { class: "small", "aria-live": "polite" });
+    const kids = [el("h4", {}, statusTag(DECISION_TONE[d.status] || "", d.label), " ", s && d.status !== "no_setup" ? el("span", { text: s.label }) : "",
+      d.example ? el("span", {}, " ", statusTag("warn", d.example_words || "Example")) : "")];
+    if (a) kids.push(el("dl", { class: "ws-answers" }, el("dt", { text: "What" }), el("dd", { text: a.what }), el("dt", { text: "When" }), el("dd", { text: a.when }),
+      el("dt", { text: "Why" }), el("dd", { text: a.why }), el("dt", { text: "Invalidated if" }), el("dd", { text: a.invalidates })));
+    if (d.status === "no_setup") {
+      kids.push(el("p", { class: "small" }, el("strong", { text: "Why not: " }), d.reason ? d.reason.text.replace(/^./, x => x.toUpperCase()) + "." : ""));
+      if (s) kids.push(el("p", { class: "small muted", text: `Closest: ${s.label} under the ${s.case_label} case, modeled net ${money(s.net_pnl, 0)} (${s.gross_pnl >= s.net_pnl ? `${money(s.gross_pnl, 0)} before ${money(s.costs, 0)} of costs` : ""}); failed ${s.fails.map(f => f.code.replace(/_/g, " ")).join(", ")}.` }));
+    }
+    if ((d.reasons || []).length) kids.push(el("details", { class: "ws-more" }, el("summary", { text: "Checks that stopped setups" }),
+      el("ul", { class: "plain small" }, d.reasons.map(r => el("li", { text: `${r.text} (${r.setups})` })))));
+    const others = d.status === "qualified" ? (d.watch || []) : d.status === "watch" ? (d.watch || []).slice(1) : [];
+    if (others.length) kids.push(el("p", { class: "small muted", text: `Also watched: ${others.map(x => `${x.label} if the ${x.case_label} case's trigger happens (net ${money(x.net_pnl, 0)})`).join("; ")}.` }));
+    const row = el("div", { class: "ws-row" });
+    if (s && d.status !== "no_setup") {
+      const single = s.kind === "single";
+      const b = el("button", { class: "ws-btn primary", type: "button", disabled: !single, title: single ? "Hand it to the Trading Desk with its scenario recorded" : "A split: draft each part from Strategies" }, "Draft it");
+      b.addEventListener("click", async () => {
+        b.disabled = true; note.replaceChildren(loading("Drafting…"));
+        try {
+          const dr = await w.api("/v3/drafts", { study_id: st.id, strategy: s.structures[0], scenario: { version_id: d.version_id, case: s.case, valuation_id: d.valuation_id, decision_id: d.id } });
+          w.set({ draft: dr, _self: true });
+          note.replaceChildren(el("p", {}, `Drafted: ${dr.execution.label}. `, ...dr.notes.slice(0, 2).map(x => el("span", { class: "muted", text: `${x} ` }))),
+            el("button", { class: "ws-btn", type: "button", onclick: () => WS.goWorkspace("desk") }, "Open the Trading Desk"));
+        } catch (e) { if (e !== WS.GONE) note.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); }
+        b.disabled = false;
+      });
+      row.append(b);
+    }
+    if (d.status === "watch" && s && s.case) {
+      const title = el("input", { type: "text", "aria-label": "Trigger source", placeholder: "What shows it happened, e.g. the company's release", maxlength: "200" });
+      const when = el("input", { type: "datetime-local", "aria-label": "Trigger published" });
+      const url = el("input", { type: "url", "aria-label": "Trigger address", placeholder: "https://…", maxlength: "500" });
+      const go = el("button", { class: "ws-btn", type: "button" }, "Record it");
+      go.addEventListener("click", async () => {
+        go.disabled = true; note.replaceChildren(loading("Valuing the strategies again from a fresh quote…"));
+        try {
+          const r = await w.api(`/v3/studies/${enc(st.id)}/decision/trigger`, { case: s.case, title: title.value.trim(), published_at: when.value, url: url.value.trim() || null });
+          note.replaceChildren(); repaint(r.pipeline);
+        } catch (e) { if (e !== WS.GONE) note.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); }
+        go.disabled = false;
+      });
+      kids.push(el("details", { class: "ws-more ws-trigger" }, el("summary", { text: `The trigger happened? Record it with its source` }),
+        el("p", { class: "small muted", text: `${s.trigger} A source published after the study (${new Date(st.created_at).toLocaleString()}) that shows it; the setup is then checked again on a fresh quote.` }),
+        el("div", { class: "ws-row" }, field("Source", title), field("Published", when), field("Address", url), go)));
+    }
+    if (row.children.length) kids.push(row);
+    kids.push(note, el("p", { class: "small muted", text: d.note }));
+    return el("section", { class: `ws-decision ${d.status}`, "data-status": d.status, "aria-label": d.label }, ...kids);
+  }
+
+  // 4.4: a persistent notice for new Qualified and Watch decisions, until it is opened or dismissed.
+  (() => {
+    let timer = null;
+    async function refresh() {
+      let list = [];
+      try { list = (await api("/v3/scenarios/notices")).notices || []; } catch (e) { return; }
+      let bar = document.getElementById("ws-scen-notice");
+      if (!list.length) { if (bar) bar.remove(); return; }
+      if (!bar) { bar = el("div", { class: "ws-notice ws-scen-notice", id: "ws-scen-notice", role: "region", "aria-label": "Scenario opportunities" }); document.getElementById("ws-status").after(bar); }
+      const seen = async n => { try { await api(`/v3/scenarios/notices/${enc(n.id)}/seen`, {}); } catch (e) { /* refreshed below */ } refresh(); };
+      bar.replaceChildren(...list.slice(0, 3).map(n => el("div", { class: "ws-row", "data-decision": n.id },
+        el("span", {}, statusTag(DECISION_TONE[n.status] || "", n.label), " ", el("strong", { text: n.symbol }), ` ${n.setup || ""}. ${n.when || ""}${n.example ? " (example)" : ""}`),
+        el("button", { class: "ws-btn primary ws-btn-mini", type: "button", onclick: () => { WS.set("blue", { symbol: n.symbol, study: n.study_id }); WS.goWorkspace("research"); seen(n); } }, "Open"),
+        el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: () => seen(n) }, "Dismiss"))),
+        list.length > 3 ? el("span", { class: "small muted", text: `and ${list.length - 3} more` }) : "");
+    }
+    const start = () => {
+      if (!document.getElementById("ws-status") || typeof WS.onEvent !== "function") { timer = setTimeout(start, 500); return; }
+      refresh();
+      WS.onEvent("scenario.decision", refresh);
+      setInterval(refresh, 60000);
+    };
+    timer = setTimeout(start, 800);
+    void timer;
+  })();
+
   function pipelinePanel(w, s, alive) {
     const st = s.study;
     const box = el("section", { class: "ws-pipeline panel", "aria-label": "Scenarios", "data-study": st.id });
@@ -144,6 +232,7 @@
       if (!alive()) return;
       box.dataset.status = p.status;
       const kids = [el("h4", {}, "Scenarios ", el("span", { class: "muted small", text: `${p.provider_label}${p.attempt > 1 ? `, attempt ${p.attempt}` : ""}` })), stageStrip(p)];
+      if (p.decision) kids.push(decisionCard(w, st, p, paint));
       if (p.findings) kids.push(findingsBlock(p));
       if (p.demo) kids.push(el("p", { class: "small" }, statusTag("warn", "Demo provider"), " Canned cases built from the packet, for trying the workflow: nothing was simulated."));
       if (p.catalyst) kids.push(el("p", { class: "small muted", text: `Catalyst: ${p.catalyst.title} (${p.catalyst_basis}).` }));
