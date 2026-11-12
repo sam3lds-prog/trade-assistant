@@ -26,6 +26,9 @@ def main() -> None:
                         help="Build the morning plan and print it instead of emailing (a dry run), then exit")
     parser.add_argument("--daemon", action="store_true",
                         help="Run the trading daemon: the Trading Desk's jobs, notifications and phone approvals (setup_daemon.sh keeps it running)")
+    parser.add_argument("--scenario-check", nargs="?", const="SPY", metavar="SYMBOL",
+                        help="4.5 smoke check, read-only: Tradier data (a quote, daily bars, a chain, the clock) and the scenario "
+                             "provider's readiness (MiroFish's address and health), then exit")
     parser.add_argument("--replay", nargs=argparse.REMAINDER, metavar="COMMAND",
                         help="4.0 replays: 'dataset build', 'dataset list', 'run', 'resume RUN', 'runs', 'report RUN' "
                              "(python run.py --replay --help for more)")
@@ -50,6 +53,8 @@ def main() -> None:
     if args.robinhood_check:
         robinhood_check(settings, args.robinhood_check.upper())
         return
+    if args.scenario_check:
+        raise SystemExit(scenario_check(settings, args.scenario_check.upper()))
     if args.morning_email or args.morning_print:
         raise SystemExit(morning_email(settings, send=args.morning_email))
     if args.snapshot:
@@ -64,6 +69,38 @@ def main() -> None:
         return
     # Localhost only: this app holds a brokerage data token and should not be reachable from the network.
     uvicorn.run(create_app(settings), host="127.0.0.1", port=args.port, log_level="info")
+
+
+def scenario_check(settings, symbol: str) -> int:
+    """The one-click Research smoke check: read-only requests to Tradier and the scenario provider's /health. Prints
+    what worked and what to fix; never prints a token. Exit code 0 when both are ready."""
+    from tradeassist.service import TradeAssistant
+    from tradeassist.tradier_check import check_tradier
+    from tradeassist.v3.scenario_providers import PINNED_UPSTREAM, provider_for
+    svc = TradeAssistant(settings)
+    print(f"Data mode: {settings.data_mode} ({svc.market.info.label}; {'real time' if svc.market.info.realtime else 'delayed or made up'})")
+    t = check_tradier(svc, symbol)
+    print(f"Tradier: {'OK' if t['ok'] else 'NOT READY'}: {t['message']}")
+    for c in t.get("checks") or []:
+        print(f"  {'ok ' if c['ok'] else 'FAIL'} {c['label']}: {c['text'] if c['ok'] else (c.get('error') or c['text'])}")
+    print(f"Scenario provider: {settings.scenario_provider} (automatic runs {'on' if settings.scenario_auto else 'off'} in .env; "
+          "Research settings can change both)")
+    try:
+        prov = provider_for(svc, settings.scenario_provider)
+        r = prov.ready()
+    except ValueError as exc:
+        r = {"ok": False, "detail": str(exc)}
+    print(f"  {'OK' if r['ok'] else 'NOT READY'}: {r['detail']}")
+    if settings.scenario_provider == "mirofish":
+        print(f"  MIROFISH_URL {settings.mirofish_url or '(not set)'}; pinned upstream {PINNED_UPSTREAM[:7]}; "
+              f"{settings.mirofish_max_rounds} rounds, {settings.mirofish_run_minutes:g} minutes, {settings.mirofish_concurrency} at once")
+    if settings.scenario_control:
+        print(f"  Single-prompt control: {'AI set up' if settings.anthropic_api_key else 'ANTHROPIC_API_KEY is not set: the control will fail'}")
+    budget = settings.scenario_budget or "the Trading Desk policy's trial capital"
+    loss = settings.scenario_max_loss or "the Trading Desk policy's daily loss stop"
+    print(f"Opportunity checks: budget {budget}; loss limit {loss}; minimum net {settings.opportunity_min_net_pct:g}%; "
+          f"widest spread {settings.opportunity_max_spread_pct:g}%; notifications {'on' if settings.scenario_notify else 'off'}")
+    return 0 if (t["ok"] or settings.data_mode == "demo") and r["ok"] else 1
 
 
 def morning_email(settings, send: bool) -> int:

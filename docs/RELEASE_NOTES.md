@@ -40,6 +40,9 @@ permission is added or changed.**
   (provider against the base, no change and the control); the observed conditional cases; how Qualified setups' stocks
   moved. Below 30 paired observations it says so; it never gives the provider weight in the base.
 - The study's Scenarios panel lists what was frozen for it, and each forecast's outcome once graded.
+- **`python run.py --scenario-check [SYMBOL]`**: a read-only smoke check of Tradier data (quote, bars, chain, clock)
+  and the scenario provider (MiroFish's address and `/health`), with the opportunity limits in force; it never prints
+  a token.
 - New setting (`.env`): `SCENARIO_CONTROL` (default 0).
 
 ## 4.4.0 — Opportunities from scenarios

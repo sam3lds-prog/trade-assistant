@@ -175,3 +175,13 @@ def test_forecasts_whose_target_passed_are_graded_soon_after_start(tmp_path):
     svc.db.close()
     svc2.db.close()
     _ = timezone
+
+
+def test_the_smoke_check_reports_what_is_ready(tmp_path, capsys):
+    import run
+    s = Settings(data_mode="demo", db_path=tmp_path / "t.db", scenario_provider="demo")
+    assert run.scenario_check(s, "SPY") == 0
+    out = capsys.readouterr().out
+    assert "Scenario provider: demo" in out and "OK:" in out
+    s = Settings(data_mode="demo", db_path=tmp_path / "t2.db", scenario_provider="mirofish")
+    assert run.scenario_check(s, "SPY") == 1 and "MIROFISH_URL is not set" in capsys.readouterr().out
