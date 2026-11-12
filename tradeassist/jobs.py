@@ -27,6 +27,16 @@ from .optionmath import NY
 log = logging.getLogger(__name__)
 
 
+class Deferred(Exception):
+    """Raised by a handler whose work cannot run now (4.2: a data source's request quota is used up): the job goes
+    back on the queue for `until` without counting an attempt."""
+
+    def __init__(self, until: datetime, reason: str = ""):
+        super().__init__(reason or f"deferred until {until.isoformat(timespec='seconds')}")
+        self.until = until
+        self.reason = reason
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -88,6 +98,29 @@ class Jobs:
         job["payload"] = json.loads(job.pop("payload_json") or "{}")
         job.update(attempts=job["attempts"] + 1, status="running", worker=worker)
         return job
+
+    def extend(self, job_id: int, worker: str, lease_seconds: float) -> bool:
+        """Lengthen a running job's lease (4.2): a long job (a calibration) says it is alive, so no other worker
+        takes it over while it works."""
+        with self.db.tx() as cur:
+            cur.execute("UPDATE jobs SET lease_until = ? WHERE id = ? AND status = 'running' AND worker = ?",
+                        (_iso(_now() + timedelta(seconds=lease_seconds)), job_id, worker))
+            return bool(cur.rowcount)
+
+    def defer(self, job_id: int, until: datetime, reason: str) -> None:
+        """Back on the queue for later, the attempt not counted (4.2)."""
+        with self.db.tx() as cur:
+            cur.execute("UPDATE jobs SET status = 'queued', due_at = ?, lease_until = NULL, worker = NULL, attempts = MAX(0, attempts - 1), "
+                        "error = ? WHERE id = ?", (_iso(until), reason[:500], job_id))
+
+    def state(self, dedupe_key: str) -> dict[str, Any] | None:
+        r = self.db.one("SELECT id, kind, status, due_at, created_at, started_at, finished_at, attempts, max_attempts, error, result_json "
+                        "FROM jobs WHERE dedupe_key = ?", (dedupe_key,))
+        if r is None:
+            return None
+        out = dict(r)
+        out["result"] = json.loads(out.pop("result_json") or "null")
+        return out
 
     def finish(self, job_id: int, result: Any = None) -> None:
         with self.db.tx() as cur:
@@ -182,7 +215,7 @@ class Worker:
 
     def __init__(self, db: Any, handlers: dict[str, Callable[[dict[str, Any]], Any]], schedules: list[Schedule] | None = None, *,
                  component: str = "app-worker", info: Callable[[], dict[str, Any]] | None = None,
-                 defer_to: str | None = None):
+                 defer_to: str | None = None, lease_seconds: float = 120.0):
         self.db = db
         self.jobs = Jobs(db)
         self.handlers = handlers
@@ -195,22 +228,35 @@ class Worker:
         self._thread: threading.Thread | None = None
         self._beat = 0.0
         self.last_error: str | None = None
+        self.lease_seconds = lease_seconds
+        self.current: dict[str, Any] | None = None
 
     def deferring(self) -> bool:
         return bool(self.defer_to and alive(self.db, self.defer_to))
 
+    def touch(self, lease_seconds: float | None = None) -> bool:
+        """Lengthen the lease of the job this worker is running (a long handler calls it as it progresses)."""
+        job = self.current
+        return bool(job) and self.jobs.extend(job["id"], self.name, lease_seconds or self.lease_seconds)
+
     def run_once(self) -> dict[str, Any] | None:
-        job = self.jobs.claim(self.name, list(self.handlers))
+        job = self.jobs.claim(self.name, list(self.handlers), lease_seconds=self.lease_seconds)
         if job is None:
             return None
         fn = self.handlers[job["kind"]]
+        self.current = job
         try:
             result = fn(job["payload"])
+        except Deferred as d:                         # not a failure: its moment has not come (a quota resets later)
+            self.jobs.defer(job["id"], d.until, f"deferred: {d.reason or 'later'}")
+            return {"id": job["id"], "kind": job["kind"], "status": "deferred", "until": _iso(d.until)}
         except Exception as exc:  # noqa: BLE001 - a failed job is recorded and retried, never lost
             self.last_error = f"{job['kind']}: {exc.__class__.__name__}: {str(exc)[:200]}"
             log.exception("Job %s (%s) failed", job["id"], job["kind"])
             state = self.jobs.fail(job["id"], f"{exc.__class__.__name__}: {exc}")
             return {"id": job["id"], "kind": job["kind"], "status": state, "error": str(exc)[:200]}
+        finally:
+            self.current = None
         self.jobs.finish(job["id"], result)
         return {"id": job["id"], "kind": job["kind"], "status": "done", "result": result}
 
@@ -280,4 +326,4 @@ class Worker:
             self._thread.join(timeout)
 
 
-__all__ = ["Jobs", "Schedule", "Worker", "schedule_tick", "heartbeat", "last_heartbeat", "alive"]
+__all__ = ["Jobs", "Schedule", "Worker", "Deferred", "schedule_tick", "heartbeat", "last_heartbeat", "alive"]

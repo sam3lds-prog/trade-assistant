@@ -258,15 +258,16 @@ def test_a_study_gathers_the_evidence_forecasts_compares_and_is_saved(client):
 def test_a_calibration_is_learned_from_history_and_then_used_by_studies(client):
     c, svc = client
     job = c.post("/v3/forecast/calibrate", json={"horizon_days": 5, "symbols": ["AAPL", "MSFT", "KO"], "years": 3}).json()
-    assert job["state"] == "running"
-    assert c.post("/v3/forecast/calibrate", json={"horizon_days": 5}).status_code == 400         # one at a time
+    assert job["state"] in ("queued", "running") and job["job_id"]                                 # 4.2: a durable job
+    assert c.post("/v3/forecast/calibrate", json={"horizon_days": 5}).status_code == 400         # one at a time per horizon
     end = time.time() + 120
     while time.time() < end:
         d = c.get("/v3/forecast/calibration?horizon_days=5").json()
-        if d["job"]["state"] != "running":
+        if d["job"]["state"] not in ("queued", "running"):
             break
         time.sleep(0.5)
-    assert d["job"]["state"] == "done" and d["calibration"]["rows"] > 100
+    assert d["job"]["state"] == "done" and d["calibration"]["rows"] > 100 and d["calibration"]["method"] == F.CALIBRATION_METHOD
+    assert d["readiness"]["state"] == "ready" and d["readiness"]["directional"]["status"] in ("edge", "no_edge", "not_held", "insufficient")
     assert d["contract"]["status"] in ("calibrated", "not_calibrated", "insufficient_data") and d["calibration"]["symbols"] == ["AAPL", "MSFT", "KO"]
     s = wait_for(c, c.post("/v3/studies", json={"symbol": "AAPL", "horizon_days": 5}).json()["id"])
     assert s["study"]["forecast"]["calibration"]["status"] == d["contract"]["status"]

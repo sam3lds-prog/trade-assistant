@@ -31,6 +31,8 @@ V3_WRITES = {
     # 4.1: Catalyst Scenarios. Freeze a study's evidence into a packet, save a provider's cases (a manual import, checked
     # against the packet) and save reviewed assumptions with the paths they give. Models and records; no orders.
     "/v3/studies/{study_id}/scenario-seeds", "/v3/studies/{study_id}/scenario-runs", "/v3/scenario-runs/{run_id}/versions",
+    # 4.2: Check Tradier data: four read-only market-data requests (quote, history, a chain, the clock); writes nothing.
+    "/v3/data/tradier-check",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.

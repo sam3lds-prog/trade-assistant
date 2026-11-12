@@ -16,6 +16,16 @@ class DataError(RuntimeError):
     """A market-data request failed in a way the user should see."""
 
 
+class QuotaExceeded(DataError):
+    """4.2: the data source refused a request because its request quota is used up (Tradier answers HTTP 400 with a
+    "Quota Violation" body). `retry_at` is when it resets (epoch seconds): background work waits for it instead of
+    failing, and interactive requests fail at once with the reason."""
+
+    def __init__(self, message: str, retry_at: float = 0.0):
+        super().__init__(message)
+        self.retry_at = float(retry_at or 0.0)
+
+
 @dataclass(frozen=True)
 class ProviderInfo:
     mode: str            # live | sandbox | demo

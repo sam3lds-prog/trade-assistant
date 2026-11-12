@@ -111,12 +111,12 @@
       limits: "A theoretical history is a model, not what the contract traded at; thinly traded contracts may have gaps.",
       next: "Read only. A linked stock chart's crosshair marks the same day here." },
     forecastrecord: {
-      purpose: "How well the forecast model has done on history at each horizon: its calibration.",
-      data: "A walk-forward test over the watchlist's stocks: the model is fitted on the earlier 70% of dates and judged on the later 30% it never saw.",
-      use: "Choose a horizon and Run the calibration (it takes a while; progress is shown). Studies at that horizon use the result.",
-      read: "Inside the band: how often outcomes fell inside the 80% band (close to 80% is calibrated). Median's miss against 'assuming no move': below it means the model adds something. Direction right: when it leaned, how often it was right. By regime: the same, split by the market's state.",
-      limits: "Past coverage does not guarantee future coverage. With too few test cases it says so rather than calling the model calibrated. A calibration interrupted by a restart must be run again.",
-      next: "A new calibration applies to studies run after it; open studies keep the one they were made with." },
+      purpose: "How well the forecast model has done on history at each horizon, in two separate parts: directional evidence (did a direction beat assuming no move?) and range validation (did the band hold about 80% of outcomes?). Also checks the Tradier data the app uses.",
+      data: "A walk-forward test over the watchlist's stocks (4.2): fitted on the earliest 60% of dates, the direction chosen on the next 20%, and every figure reported from the last 20% it never saw; outcomes that overlap the next period are purged. Check Tradier data makes four read-only requests: a quote, two weeks of daily bars, an option chain and the market clock.",
+      use: "Choose a horizon and Run the calibration: it runs in the background and survives a refresh (the 1- and 5-day ones are also kept fresh in the background once real market data is connected). A failed one shows Retry. Check Tradier data after putting a token in .env.",
+      read: "No reliable directional edge · range shown: the base path is flat because no direction beat assuming no move, and the range is still validated and shown; that is an honest result, not an error. Range coverage below target: the band was too narrow on the holdout. Insufficient history: too few cases or dates to judge (the stocks that could not be used are listed). The sample line says how many forecasts, over which dates, and when it was last checked.",
+      limits: "Past coverage does not guarantee future coverage. A refresh that finds too little history is kept beside the last usable calibration, never over it. A calibration waiting for a data quota to reset carries on by itself. A quote's age says whether the data is real time; Greeks from Tradier refresh about hourly and are dated separately.",
+      next: "A new calibration applies to studies run after it; finished studies keep the one they were made with." },
     lab_runs: {
       purpose: "Starts, stops and resumes replays: history walked one trading session at a time, each forecast frozen when it is made and graded once its window closes.",
       data: "data/replay.db: the frozen datasets (about eleven years of daily bars for the 100 large caps and the market funds) and every replay's record.",

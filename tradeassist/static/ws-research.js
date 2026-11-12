@@ -33,6 +33,32 @@
       : `Model-implied 10th–90th percentile range: ${pctText(lo, 1)} to ${pctText(hi, 1)} by day ${h}${prices}. Historical coverage has not yet been validated.`;
   }
 
+  // 4.2: whether the forecast is ready, in two parts said separately: directional evidence (did a direction beat
+  // "no move" on dates it was not chosen on?) and range validation (did the band hold about 80% on the holdout?).
+  const READY_TONE = { edge: "pass", validated: "pass", no_edge: "info", not_held: "info", below_target: "warn", above_target: "warn",
+    pending: "warn", insufficient: "warn" };
+  function readinessTag(fc) {
+    const rd = fc && fc.readiness;
+    if (!rd || !rd.label) { const cal = CAL_WORDS[fc.calibration.status] || ["warn", fc.calibration.status]; return statusTag(cal[0], cal[1]); }
+    const d = rd.directional || {}, r = rd.range || {};
+    const tone = d.status === "edge" && r.status === "validated" ? "pass" : r.status === "validated" ? "info" : "warn";
+    return el("span", { class: "ws-readiness-tag", title: rd.text || "" }, statusTag(tone, rd.label));
+  }
+  function readinessBlock(rd) {
+    if (!rd || !rd.directional) return "";
+    const d = rd.directional, r = rd.range, sm = rd.sample || {};
+    const span = sm.first_date && sm.last_date ? ` from ${sm.first_date} to ${sm.last_date}` : "";
+    const sample = isNum(sm.cases) && sm.cases ? `${sm.cases} holdout forecasts${span}` + (isNum(sm.train_cases) ? ` (fitted on ${sm.train_cases}, chosen on ${sm.validation_cases}, ${sm.purged_cases || 0} overlapping purged)` : "")
+      + (sm.symbols ? `, ${sm.symbols} stocks` : "") + (sm.checked_at ? `; last checked ${new Date(sm.checked_at).toLocaleString()}` : "") + (sm.data_source ? ` on ${sm.data_source}` : "") + "." : "";
+    const err = isNum(d.mae_pct) && isNum(d.no_change_mae_pct) ? ` Average miss ${d.mae_pct.toFixed(2)} points against ${d.no_change_mae_pct.toFixed(2)} for no change.` : "";
+    const cov = isNum(r.coverage) ? ` Observed coverage ${Math.round(100 * r.coverage)}% (target 80%).` : "";
+    return el("div", { class: "ws-readiness", "data-reason": rd.reason || "" },
+      el("p", { class: "small" }, el("strong", { text: "Directional evidence: " }), statusTag(READY_TONE[d.status] || "warn", d.label), ` ${d.text || ""}${err}`),
+      el("p", { class: "small" }, el("strong", { text: "Range validation: " }), statusTag(READY_TONE[r.status] || "warn", r.label), ` ${r.text || ""}${cov}`),
+      sample ? el("p", { class: "small muted", text: sample }) : "",
+      rd.method_note ? el("p", { class: "small muted", text: rd.method_note }) : "");
+  }
+
   WS.register("study", { title: "Research study", category: "Research", size: { w: 5, h: 10 }, minW: 3, create(w) {
     const horizon = el("select", { "aria-label": "Horizon" }, [1, 3, 5, 10, 20].map(h => el("option", { value: String(h), selected: h === (w.config.horizon || 5) }, `${h} trading day${h === 1 ? "" : "s"}`)));
     const thesis = el("select", { "aria-label": "Kind of trade" }, THESES.map(([k, t]) => el("option", { value: k, selected: k === (w.config.thesis || "swing") }, t)));
@@ -127,7 +153,7 @@
       const sum = t.panels.summary;
       if (fc) {
         const last = fc.base.path_pct.length - 1;
-        sum.append(el("div", { class: "panel" }, el("p", {}, statusTag(cal[0], cal[1]), " ", el("strong", { text: `Base ${pctText(fc.base.path_pct[last])} by day ${h}` })),
+        sum.append(el("div", { class: "panel" }, el("p", {}, readinessTag(fc), " ", el("strong", { text: `Base ${pctText(fc.base.path_pct[last])} by day ${h}` })),
           el("p", { class: "small", text: rangeWords(fc, h, v.last) })));
       }
       const top = [...(sg.candidates || [])].sort((a, b) => (b.risk_adjusted || -1e9) - (a.risk_adjusted || -1e9)).slice(0, 3);
@@ -158,7 +184,8 @@
       // Forecast: the record behind it, how it is made, the paths to test against, and what would prove it wrong.
       const fcp = t.panels.forecast;
       if (fc) {
-        fcp.append(el("p", {}, statusTag(cal[0], cal[1]), " ", el("span", { class: "small", text: fc.calibration.text })),
+        fcp.append(el("p", {}, readinessTag(fc), " ", el("span", { class: "small", text: fc.calibration.text })),
+          readinessBlock(fc.readiness),
           el("p", { class: "small", text: rangeWords(fc, h, v.last) }),
           el("ul", { class: "plain small" }, fc.explanation.map(x => el("li", { text: x }))),
           fc.alternatives.length ? el("div", {}, el("h4", { text: "Other paths to test against (assumptions, not predictions)" }),
@@ -671,38 +698,65 @@
   WS.register("forecastrecord", { title: "Forecast record", category: "Research", size: { w: 6, h: 9 }, symbolBadge: false, create(w) {
     const horizon = el("select", { "aria-label": "Horizon" }, [1, 3, 5, 10, 20].map(h => el("option", { value: String(h), selected: h === (w.config.horizon || 5) }, `${h} day${h === 1 ? "" : "s"}`)));
     const go = el("button", { class: "ws-btn", type: "button" }, "Run the calibration");
+    const check = el("button", { class: "ws-btn", type: "button", title: "Read-only: a quote, two weeks of daily bars, an option chain and the market clock" }, "Check Tradier data");
+    const checkOut = el("div", { class: "ws-datacheck", "aria-live": "polite" });
     const out = el("div");
     let timer = null;
-    w.body.append(el("div", { class: "ws-row" }, field("Horizon", horizon), go), out);
+    w.body.append(el("div", { class: "ws-row" }, field("Horizon", horizon), go, check), checkOut, out);
     horizon.addEventListener("change", () => { w.config.horizon = Number(horizon.value); w.save(); load(); });
-    go.addEventListener("click", async () => {
+    const runIt = async () => {
       try { await api("/v3/forecast/calibrate", { horizon_days: Number(horizon.value) }); load(); }
       catch (e) { out.prepend(el("p", { class: "error", text: e.message })); }
+    };
+    go.addEventListener("click", runIt);
+    // 4.2: Check Tradier data, read-only, each request reported on its own.
+    check.addEventListener("click", async () => {
+      check.disabled = true; checkOut.replaceChildren(loading("Checking Tradier…"));
+      try {
+        const r = await w.api("/v3/data/tradier-check", { symbol: w.ctx().symbol || "SPY" });
+        checkOut.replaceChildren(el("div", { class: "panel" },
+          el("p", {}, statusTag(r.ok ? "pass" : r.configured ? "warn" : "info", r.ok ? "Tradier data works" : r.configured ? "Tradier data: some checks failed" : "Tradier is not set up"),
+            ` ${r.configured ? `${r.provider}: ${r.status} ` : ""}${r.message}`),
+          r.checks && r.checks.length ? el("ul", { class: "plain small" }, r.checks.map(c => el("li", {}, statusTag(c.ok ? "pass" : "fail", c.label), ` ${c.ok ? c.text : c.error || c.text}`))) : "",
+          r.rate && isNum(r.rate.available) ? el("p", { class: "small muted", text: `Requests left in this minute's allowance: ${r.rate.available}.` }) : "",
+          el("p", { class: "small muted", text: r.note || "" })));
+      } catch (e) { if (e !== WS.GONE) checkOut.replaceChildren(el("p", { class: "error", text: e.message })); }
+      check.disabled = false;
     });
     async function load() {
       clearTimeout(timer);
       if (w.disposed) return;
       try {
         const d = await w.api(`/v3/forecast/calibration?horizon_days=${enc(horizon.value)}`);
-        const c = d.contract, cal = d.calibration, job = d.job;
+        const c = d.contract, cal = d.calibration, job = d.job, rd = d.readiness;
         const word = CAL_WORDS[c.status] || ["warn", c.status];
-        const kids = [el("p", {}, statusTag(word[0], word[1]), " ", c.text)];
-        if (job && job.state === "running") {
-          kids.unshift(loading(`Testing forecasts on history: ${job.done} of ${job.total || "?"} stocks${job.current ? ` (${job.current})` : ""}…`));
+        const kids = [el("p", {}, rd && rd.label ? statusTag(rd.state === "ready" ? (rd.range && rd.range.status === "validated" ? "pass" : "warn") : "warn", rd.label) : statusTag(word[0], word[1]), " ", c.text)];
+        if (rd) kids.push(readinessBlock(rd));
+        if (job && (job.state === "running" || job.state === "queued" || job.state === "deferred")) {
+          const words = job.state === "running" ? `Testing forecasts on history: ${job.done || 0} of ${job.total || "?"} stocks${job.current ? ` (${job.current})` : ""}…`
+            : job.state === "deferred" ? `Waiting for the data source's quota to reset (${job.until ? new Date(job.until).toLocaleTimeString() : "soon"}); it then carries on.`
+              : `Queued${job.reason === "warm" ? " (kept fresh in the background)" : ""}${job.note ? `: ${job.note}` : ""}…`;
+          kids.unshift(loading(words));
           timer = setTimeout(load, 1500);
-        } else if (job && job.state === "failed") kids.unshift(el("p", { class: "error", text: `The calibration failed: ${job.error}` }));
+        } else if (job && job.state === "failed") {
+          kids.unshift(el("div", { class: "ws-row" }, el("p", { class: "error", text: `The calibration failed: ${job.error}` }),
+            el("button", { class: "ws-btn", type: "button", onclick: runIt }, "Retry")));
+        }
         if (cal) {
           kids.push(el("div", { class: "metrics" },
-            metric(isNum(cal.coverage) ? `${Math.round(100 * cal.coverage)}%` : "n/a", "of outcomes inside the 80% band"),
+            metric(isNum(cal.coverage) ? `${Math.round(100 * cal.coverage)}%` : "n/a", "of holdout outcomes inside the band"),
             metric(isNum(cal.mae_pct) ? `${cal.mae_pct.toFixed(2)} pts` : "n/a", "median's average miss"),
-            metric(isNum(cal.baseline_mae_pct) ? `${cal.baseline_mae_pct.toFixed(2)} pts` : "n/a", "assuming no move"),
+            metric(isNum(cal.flat_mae_pct || cal.baseline_mae_pct) ? `${(cal.flat_mae_pct || cal.baseline_mae_pct).toFixed(2)} pts` : "n/a", "assuming no move"),
             metric(isNum(cal.directional_accuracy) ? `${Math.round(100 * cal.directional_accuracy)}%` : "n/a", "direction right when it leaned")));
           const regimes = Object.entries(cal.by_regime || {});
           if (regimes.length) kids.push(el("h4", { text: "By the market's regime" }), table([
             { label: "Regime", cell: r => r[0] }, { label: "Cases", num: true, cell: r => String(r[1].cases) },
             { label: "Inside the band", num: true, cell: r => (isNum(r[1].coverage) ? `${Math.round(100 * r[1].coverage)}%` : "n/a") },
             { label: "Average miss", num: true, cell: r => (isNum(r[1].mae_pct) ? r[1].mae_pct.toFixed(2) : "n/a") }], regimes));
-          kids.push(el("p", { class: "small muted", text: `Weights: ${Object.entries(cal.weights).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", ")}. ${cal.symbols ? `${cal.symbols.length} stocks, ` : ""}${cal.years || ""} years, run ${cal.run_at ? new Date(cal.run_at).toLocaleString() : ""} on ${cal.data_source || ""}.` }));
+          if ((cal.failed || []).length) kids.push(el("details", { class: "ws-more" }, el("summary", { text: `Stocks that could not be used (${cal.failed.length})` }),
+            el("ul", { class: "plain small" }, cal.failed.map(f => el("li", { text: `${f.symbol}: ${f.reason}` })))));
+          if (cal.last_attempt) kids.push(el("p", { class: "small muted", text: `The last refresh (${cal.last_attempt.run_at ? new Date(cal.last_attempt.run_at).toLocaleString() : ""}) found too little history and was kept beside this calibration, not over it: ${cal.last_attempt.text || ""}` }));
+          kids.push(el("p", { class: "small muted", text: `Weights: ${Object.entries(cal.weights).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", ")}. ${cal.symbols ? `${cal.symbols.length} stocks, ` : ""}${cal.years || ""} years${cal.cutoff ? ` to ${cal.cutoff}` : ""}, run ${cal.run_at ? new Date(cal.run_at).toLocaleString() : ""} on ${cal.data_source || ""}; method ${cal.method || "cal-3.0"}.` }));
         }
         out.replaceChildren(...kids);
       } catch (e) { if (e !== WS.GONE) out.replaceChildren(el("p", { class: "error", text: e.message })); }

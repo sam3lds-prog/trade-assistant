@@ -19,7 +19,7 @@ from .events import emit, redact
 from .freshness import SourceHealth, observe, quote_completeness, quote_time, session_state
 from .indicators import enrich
 from .optionmath import NY
-from .providers.base import BAR_COLUMNS, DataError, MarketData, display_symbol
+from .providers.base import BAR_COLUMNS, DataError, MarketData, QuotaExceeded, display_symbol
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +112,8 @@ class Market:
                             f"are paused for {left:.0f} more seconds (last error: {self.health.last_error})")
         try:
             out = fn()
+        except QuotaExceeded:
+            raise                       # 4.2: a used-up quota is not a failing source: it resets on its own, so no pause
         except DataError as exc:
             self.health.failure(what, str(exc))
             emit("provider_failure", logging.WARNING, source=self.info.label, request=what, error=exc,

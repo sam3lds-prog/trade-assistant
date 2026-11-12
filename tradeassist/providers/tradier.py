@@ -17,13 +17,16 @@ import pandas as pd
 import requests
 
 from ..optionmath import NY
-from .base import (DataError, ProviderInfo, api_symbol, as_list, bars_frame, dicts, display_symbol,
+from .base import (DataError, ProviderInfo, QuotaExceeded, api_symbol, as_list, bars_frame, dicts, display_symbol,
                    normalize_contract, normalize_quote, num)
 
 log = logging.getLogger(__name__)
 
 LIVE_URL = "https://api.tradier.com/v1"
 SANDBOX_URL = "https://sandbox.tradier.com/v1"
+QUOTA_WORDS = "quota violation"
+QUOTA_DEFAULT_SECONDS = 60.0      # without a reset header: Tradier's allowances are per minute
+QUOTA_MAX_SECONDS = 3600.0
 
 
 class TradierData:
@@ -40,6 +43,7 @@ class TradierData:
         self._rate_available: int | None = None
         self._rate_expiry: float = 0.0
         self._paused_until: float = 0.0
+        self.quota_reset_at: float | None = None
         if sandbox:
             self.info = ProviderInfo(
                 mode="sandbox", label="Tradier sandbox", realtime=False, has_greeks=False,
@@ -61,6 +65,11 @@ class TradierData:
                     self._paused_until = max(self._paused_until, self._rate_expiry)
                 self._rate_available = None
             delay = self._paused_until - time.time()
+            quota = getattr(self, "quota_reset_at", None)
+        if delay > 65 and quota and quota > time.time():
+            # 4.2: a used-up quota that resets later than a short wait: refused here, without asking Tradier again.
+            raise QuotaExceeded(f"Tradier's request quota is used up; it resets at "
+                                f"{datetime.fromtimestamp(quota, NY).strftime('%H:%M:%S')} New York time.", retry_at=quota)
         if 0 < delay <= 65:
             log.info("Tradier rate limit reached, waiting %.1fs", delay)
             time.sleep(delay)
@@ -79,6 +88,27 @@ class TradierData:
                 self._rate_expiry = expiry_f
         except (TypeError, ValueError):
             pass
+
+    @staticmethod
+    def _quota_reset(headers: Any) -> float:
+        """When a used-up quota resets: X-Ratelimit-Expiry (seconds or milliseconds), else a minute from now."""
+        now = time.time()
+        try:
+            expiry = float(headers.get("X-Ratelimit-Expiry"))
+            if expiry > 1e11:
+                expiry /= 1000.0
+            if now < expiry <= now + QUOTA_MAX_SECONDS:
+                return expiry
+        except (TypeError, ValueError):
+            pass
+        return now + QUOTA_DEFAULT_SECONDS
+
+    def rate_state(self) -> dict[str, Any]:
+        """The allowance as Tradier last reported it, and any pause (for the data check)."""
+        with self._lock:
+            return {"available": self._rate_available, "resets_at": self._rate_expiry or None,
+                    "paused_until": self._paused_until if self._paused_until > time.time() else None,
+                    "quota_reset_at": getattr(self, "quota_reset_at", None)}
 
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
@@ -101,6 +131,15 @@ class TradierData:
             if resp.status_code in (401, 403):
                 raise DataError("Tradier rejected the API token. Check the token in .env and that it "
                                 "matches the environment (live or sandbox).")
+            if resp.status_code == 400 and QUOTA_WORDS in (resp.text or "").lower():
+                # 4.2: the quota is used up. No blind retry: every request until the reset would be refused too, so
+                # requests pause until then, and background work is deferred to the reset (jobs.Deferred).
+                reset = self._quota_reset(resp.headers)
+                with self._lock:
+                    self._paused_until = max(self._paused_until, reset)
+                    self.quota_reset_at = reset
+                raise QuotaExceeded(f"Tradier's request quota is used up (Quota Violation); it resets at "
+                                    f"{datetime.fromtimestamp(reset, NY).strftime('%H:%M:%S')} New York time.", retry_at=reset)
             if resp.status_code == 429 or resp.status_code >= 500:
                 last_error = f"HTTP {resp.status_code}"
                 time.sleep(1.0 * (attempt + 1))

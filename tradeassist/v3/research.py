@@ -21,12 +21,14 @@ names the one it retries.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import socket
 import threading
+import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -42,13 +44,22 @@ from ..marketdays import add_trading_days
 from ..optionmath import NY
 from ..peers import peers_for
 from ..premium import history as premium_history
-from ..providers.base import DataError
+from ..providers.base import DataError, QuotaExceeded
 from ..service import RequestError
+
+log = logging.getLogger(__name__)
 
 ENGINE_VERSION = "study-3.0"
 HORIZONS = (1, 3, 5, 10, 20)
 THESES = ("intraday_bounce", "swing", "earnings_reaction", "reversal", "investment")
 CAL_KEY = "forecast:calibration:{mode}:{h}"
+CAL_JOB_STATE = "forecast:calibration-job:{mode}:{h}"     # 4.2: the latest calibration job's state, for the screens
+CAL_JOB = "research.calibrate"
+WARM_HORIZONS = (1, 5)                                      # the horizons Catalyst Scenarios and the one-click study use
+WARM_AFTER_DAYS = 7                                         # a calibration older than this is refreshed in the background
+WARM_DELAY = 180.0                                          # seconds after start before a warm-up calibration may run
+REAL_MODES = ("live", "sandbox", "robinhood")
+MIN_HISTORY_BARS = 300                                      # a stock with fewer daily bars cannot be walked forward
 MAX_RUNNING = 3
 BEAT_SECONDS = 5.0             # a running study's heartbeat
 ORPHAN_SECONDS = 180.0         # a study whose heartbeat is older than this, in a process that is not checkable, is orphaned
@@ -87,6 +98,11 @@ class CalibrateIn(BaseModel):
     years: float = Field(default=4.0, ge=2.0, le=8.0)
 
 
+class TradierCheckIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    symbol: str = Field(default="SPY", min_length=1, max_length=12, pattern=r"^[A-Za-z.\-]+$")
+
+
 class ChallengeIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider: str = "auto"
@@ -109,7 +125,6 @@ class Research:
         self.svc = svc
         self._lock = threading.Lock()
         self._running: dict[str, threading.Thread] = {}
-        self._calibrating: dict[str, Any] | None = None
         self.host = socket.gethostname()
         self.worker = f"{self.host}:{os.getpid()}"
         self._beat: threading.Thread | None = None
@@ -302,9 +317,12 @@ class Research:
                 beta = float(j.iloc[:, 0].cov(j.iloc[:, 1]) / j.iloc[:, 1].var())
                 market_sigma = float(j.iloc[-20:, 1].std() * math.sqrt(h))
         # The forecast (with the analogs inside it).
-        cal = svc.db.cache_get(CAL_KEY.format(mode=svc.market.info.mode, h=h))
+        cal = self.usable_calibration(h)
         fc = F.forecast(target, pool, h, calibration=cal, implied_sigma=implied, event=event, beta=beta, market_sigma=market_sigma,
                         last_price=last)
+        # 4.2: directional evidence and range validation, said separately, with the sample behind them. The study keeps
+        # what was true when it ran; a calibration finished later is used by the next study.
+        fc["readiness"] = F.readiness(cal, h, self._job_view(h))
         found = fc.pop("analog_search", None) or {"analogs": [], "summary": {}, "notes": []}
         hs = (found.get("summary") or {}).get("by_horizon", {}).get(str(h))
         if hs:
@@ -385,7 +403,7 @@ class Research:
             missing.append(f"Strategies: {exc}")
         # The record.
         if fc["calibration"]["status"] != "calibrated":
-            missing.append("A validated forecast: " + fc["calibration"]["text"])
+            missing.append(f"A validated forecast: {fc['readiness']['label']}. " + fc["calibration"]["text"])
         evidence = C.EvidenceSnapshot(as_of=as_of, items=[C.EvidenceItem(**it) for it in items], missing=missing,
                                       provenance=C.Provenance(data_source=svc.market.info.label, as_of=as_of,
                                                               engines={"study": ENGINE_VERSION, "forecast": F.MODEL_VERSION,
@@ -395,7 +413,8 @@ class Research:
         forecast_contract = C.ForecastVersion(
             model_version=fc["model_version"], horizon_days=h, base=C.ScenarioPath(**fc["base"]),
             alternatives=[C.ScenarioPath(**a) for a in fc["alternatives"]], components=fc["components"], weights=fc["weights"],
-            calibration=C.Calibration(**fc["calibration"]), explanation=fc["explanation"], invalidators=fc["invalidators"])
+            calibration=C.Calibration(**fc["calibration"]), explanation=fc["explanation"], invalidators=fc["invalidators"],
+            readiness=fc["readiness"])
         cands = []
         for c in strategies.get("candidates") or []:
             cands.append(C.StrategyCandidate(key=c["key"], label=c["label"], instrument=c["instrument"], legs=c["legs"], cost=c["cost"],
@@ -543,64 +562,202 @@ class Research:
         return {"study_id": study_id, "provider": provider, "model": model, **clean,
                 "note": "Written by a language model from the study's evidence; it can be wrong, and it gives no numbers."}
 
-    # --- calibration ---------------------------------------------------------------
+    # --- calibration (4.2: a durable background job per mode and horizon) -----------------------------------------
+    def usable_calibration(self, horizon: int, mode: str | None = None) -> dict[str, Any] | None:
+        """This mode's calibration for the horizon, if it was made for the current forecast model."""
+        cal = self.svc.db.cache_get(CAL_KEY.format(mode=mode or self.svc.market.info.mode, h=horizon))
+        if not cal or cal.get("horizon_days") != horizon or cal.get("model_version", F.MODEL_VERSION) != F.MODEL_VERSION:
+            return None
+        return cal
+
+    def _set_job(self, horizon: int, mode: str, **values: Any) -> dict[str, Any]:
+        key = CAL_JOB_STATE.format(mode=mode, h=horizon)
+        state = {**(self.svc.db.cache_get(key) or {}), **values, "horizon_days": horizon, "mode": mode, "updated_at": C.utc_now()}
+        self.svc.db.cache_put(key, state)
+        return state
+
+    def _job_view(self, horizon: int, mode: str | None = None) -> dict[str, Any] | None:
+        """The latest calibration job for the horizon, reconciled with the queue: a job whose worker stopped is shown as
+        interrupted (it is taken up again when its lease runs out) rather than running forever."""
+        mode = mode or self.svc.market.info.mode
+        state = self.svc.db.cache_get(CAL_JOB_STATE.format(mode=mode, h=horizon))
+        if not state:
+            return None
+        jid = state.get("job_id")
+        row = self.svc.db.one("SELECT status, error, attempts, due_at FROM jobs WHERE id = ?", (jid,)) if jid else None
+        out = dict(state)
+        if row is not None:
+            if row["status"] == "queued" and state.get("state") == "running":
+                out.update(state="queued", note="Interrupted (the app stopped while it ran); it runs again shortly.")
+            elif row["status"] == "queued" and state.get("state") == "deferred":
+                out["until"] = row["due_at"]
+            elif row["status"] == "failed" and state.get("state") in ("queued", "running"):
+                out.update(state="failed", error=row["error"] or "the job failed")
+        return out
+
     def calibration(self, horizon: int) -> dict[str, Any]:
         cal = self.svc.db.cache_get(CAL_KEY.format(mode=self.svc.market.info.mode, h=horizon))
-        job = self._calibrating
+        job = self._job_view(horizon)
         return {"horizon_days": horizon, "calibration": cal, "contract": F.calibration_contract(cal, horizon),
-                "job": {k: v for k, v in (job or {}).items() if k != "thread"} or None}
+                "readiness": F.readiness(self.usable_calibration(horizon), horizon, job), "job": job}
 
     def calibrate_now(self, horizon: int, symbols: list[str] | None = None, years: float = 4.0, progress=None) -> dict[str, Any]:
+        """Walk the forecast forward on history and fit it (forecast.fit). Every stock that cannot be used is listed with
+        why; a used-up data quota stops the whole run (it is deferred, not half done). A result that cannot replace a
+        usable calibration (too little history this time) is kept beside it as the last attempt, never over it."""
         svc = self.svc
-        names = [svc._symbol(s) for s in (symbols or list(svc.settings.watchlist)[:20])]
+        mode = svc.market.info.mode
+        requested = [svc._symbol(s) for s in (symbols or list(svc.settings.watchlist)[:20])]
+        failed: list[dict[str, str]] = []
         try:
             spy = svc.market.bars("SPY", years, complete=True)
-        except DataError:
+        except QuotaExceeded:
+            raise
+        except DataError as exc:
             spy = None
+            failed.append({"symbol": "SPY", "reason": f"the market's history: {str(exc)[:160]}"})
         prepared: dict[str, A.Series] = {}
-        for s in dict.fromkeys(names):
+        cutoff = None
+        for n, s in enumerate(dict.fromkeys(requested), 1):
+            if progress:
+                progress(n - 1, len(requested), s)
             try:
-                prepared[s] = A.prepare(s, svc.market.bars(s, years, complete=True), spy, own=True)
-            except DataError:
+                bars = svc.market.bars(s, years, complete=True)
+            except QuotaExceeded:
+                raise
+            except DataError as exc:
+                failed.append({"symbol": s, "reason": str(exc)[:200]})
                 continue
+            if bars is None or len(bars) < MIN_HISTORY_BARS:
+                failed.append({"symbol": s, "reason": f"only {0 if bars is None else len(bars)} daily bars (at least {MIN_HISTORY_BARS} are needed)"})
+                continue
+            last = str(pd.Timestamp(bars["date"].iloc[-1]).date())
+            cutoff = max(cutoff or last, last)
+            prepared[s] = A.prepare(s, bars, spy, own=True)
         from ..sectors import TICKER_FUND
         peers = {s: [p for p in prepared if p != s and TICKER_FUND.get(p) and TICKER_FUND.get(p) == TICKER_FUND.get(s)][:3] for s in prepared}
-        rows = F.walk_forward(prepared, peers, horizon, progress=progress)
-        cal = F.fit(rows, horizon)
-        cal.update({"symbols": list(prepared), "years": years, "data_source": svc.market.info.label,
-                    "run_at": C.utc_now(), "rows": int(len(rows))})
-        svc.db.cache_put(CAL_KEY.format(mode=svc.market.info.mode, h=horizon), cal)
+        rows = F.walk_forward(prepared, peers, horizon, progress=progress) if prepared else pd.DataFrame()
+        cal = F.fit(rows, horizon) if len(rows) else {**F.fit(pd.DataFrame({"date": [], "realized": [], "sigma": [], "symbol": []}), horizon),
+                                                       "reason": "no_history", "text": "No stock's history could be used: see the failed list."}
+        cal.update({"symbols": list(prepared), "requested": requested, "failed": failed, "years": years, "data_source": svc.market.info.label,
+                    "mode": mode, "cutoff": cutoff, "run_at": C.utc_now(), "rows": int(len(rows))})
+        key = CAL_KEY.format(mode=mode, h=horizon)
+        prev = svc.db.cache_get(key)
+        keep_prev = (cal["status"] == "insufficient_data" and prev and prev.get("model_version", F.MODEL_VERSION) == F.MODEL_VERSION
+                     and prev.get("status") != "insufficient_data")
+        if keep_prev:
+            prev["last_attempt"] = {k: cal.get(k) for k in ("status", "reason", "text", "run_at", "rows", "failed", "symbols")}
+            svc.db.cache_put(key, prev)
+            cal = {**cal, "kept_previous": True}
+        else:
+            svc.db.cache_put(key, cal)
         svc.bus.publish("study.calibrated", None, horizon_days=horizon, status=cal["status"])
         return cal
+
+    def _active(self, horizon: int, mode: str) -> bool:
+        st = self._job_view(horizon, mode)
+        if not st or st.get("state") not in ("queued", "running", "deferred"):
+            return False
+        row = self.svc.db.one("SELECT status FROM jobs WHERE id = ?", (st.get("job_id"),)) if st.get("job_id") else None
+        return bool(row and row["status"] in ("queued", "running"))
+
+    def queue_calibration(self, horizon: int, *, symbols: list[str] | None = None, years: float = 4.0, reason: str = "requested",
+                          dedupe: str | None = None, delay_seconds: float = 0.0) -> dict[str, Any] | None:
+        from .workers import workers_for
+        mode = self.svc.market.info.mode
+        if self._active(horizon, mode):
+            return None
+        key = dedupe or f"{CAL_JOB}:{mode}:{horizon}:{reason}:{C.new_id('cal')}"
+        jid = workers_for(self.svc).enqueue("calibration", CAL_JOB, {"horizon_days": horizon, "symbols": symbols, "years": years, "mode": mode,
+                                                                    "reason": reason}, dedupe_key=key, max_attempts=2,
+                                                 due_at=(datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)) if delay_seconds else None)
+        if jid is None:
+            return None
+        return self._set_job(horizon, mode, state="queued", job_id=jid, reason=reason, queued_at=C.utc_now(), started_at=None,
+                             finished_at=None, error=None, done=0, total=0, current=None)
 
     def calibrate(self, req: CalibrateIn) -> dict[str, Any]:
         if req.horizon_days not in HORIZONS:
             raise RequestError(f"horizon_days must be one of {', '.join(map(str, HORIZONS))}")
-        with self._lock:
-            if self._calibrating and self._calibrating["thread"].is_alive():
-                raise RequestError("A calibration is already running")
-            state: dict[str, Any] = {"horizon_days": req.horizon_days, "state": "running", "done": 0, "total": 0, "current": None,
-                                     "started_at": C.utc_now(), "error": None}
+        state = self.queue_calibration(req.horizon_days, symbols=req.symbols, years=req.years)
+        if state is None:
+            raise RequestError("A calibration for this horizon is already queued or running")
+        return self._job_view(req.horizon_days) or state
 
-            def progress(done: int, total: int, current: str) -> None:
-                state.update(done=done, total=total, current=current)
+    def run_calibration(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """The `research.calibrate` job (the calibration worker runs it)."""
+        from ..jobs import Deferred
+        from .workers import workers_for
+        h, mode = int(payload["horizon_days"]), str(payload.get("mode") or self.svc.market.info.mode)
+        if mode != self.svc.market.info.mode:
+            self._set_job(h, mode, state="skipped", finished_at=C.utc_now(), error="the data source changed before it ran")
+            return {"skipped": "the data source changed"}
+        worker = workers_for(self.svc).workers.get("calibration")
+        self._set_job(h, mode, state="running", started_at=C.utc_now(), error=None, until=None)
+        last = [0.0]
 
-            def work() -> None:
+        def progress(done: int, total: int, current: str) -> None:
+            if time.time() - last[0] < 1.0:
+                return
+            last[0] = time.time()
+            self._set_job(h, mode, state="running", done=done, total=total, current=current)
+            if worker is not None:
+                worker.touch()
+        try:
+            cal = self.calibrate_now(h, payload.get("symbols"), float(payload.get("years") or 4.0), progress)
+        except QuotaExceeded as exc:
+            until = datetime.fromtimestamp(exc.retry_at or time.time() + 60, timezone.utc)
+            self._set_job(h, mode, state="deferred", until=until.isoformat(timespec="seconds"), error=str(exc)[:300])
+            raise Deferred(until, "the data source's request quota is used up") from exc
+        except Exception as exc:  # noqa: BLE001 - recorded on the job, shown with a retry
+            from ..events import redact
+            self._set_job(h, mode, state="failed", finished_at=C.utc_now(), error=redact(f"{exc.__class__.__name__}: {exc}")[:300])
+            log.exception("Calibration of %s sessions failed", h)
+            return {"failed": str(exc)[:200]}
+        self._set_job(h, mode, state="done", finished_at=C.utc_now(), status=cal["status"], kept_previous=bool(cal.get("kept_previous")))
+        return {"status": cal["status"], "rows": cal.get("rows"), "kept_previous": bool(cal.get("kept_previous"))}
+
+    def warm(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Queue the 1- and 5-session calibrations that are missing, out of date (older than a week) or made with an
+        older method, once real market data is connected (the `research.warm` job, every six hours, and at start).
+        Once per day per horizon at most; never per study or per stock. At start they wait WARM_DELAY seconds, so
+        the app's first pages are not slowed by years of history being read."""
+        delay = float((payload or {}).get("delay_seconds") or 0.0)
+        mode = self.svc.market.info.mode
+        if mode not in REAL_MODES:
+            return {"skipped": f"{mode} data: calibrations are warmed only on real market data"}
+        queued = []
+        today = datetime.now(NY).date().isoformat()
+        for h in WARM_HORIZONS:
+            cal = self.svc.db.cache_get(CAL_KEY.format(mode=mode, h=h))
+            due = not cal or cal.get("model_version", F.MODEL_VERSION) != F.MODEL_VERSION or (cal.get("method") or "cal-3.0") != F.CALIBRATION_METHOD
+            if cal and not due:
                 try:
-                    self.calibrate_now(req.horizon_days, req.symbols, req.years, progress)
-                    state["state"] = "done"
-                except Exception as exc:  # noqa: BLE001
-                    state.update(state="failed", error=str(exc)[:300])
-            t = threading.Thread(target=work, name="forecast-calibration", daemon=True)
-            state["thread"] = t
-            self._calibrating = state
-            t.start()
-        return {k: v for k, v in state.items() if k != "thread"}
+                    age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(cal.get("run_at"))).total_seconds() / 86400
+                except (ValueError, TypeError):
+                    age = WARM_AFTER_DAYS + 1
+                due = age > WARM_AFTER_DAYS
+            if due and self.queue_calibration(h, reason="warm", dedupe=f"{CAL_JOB}:{mode}:{h}:warm:{today}",
+                                                  delay_seconds=delay) is not None:
+                queued.append(h)
+        return {"queued": queued, "mode": mode}
 
 
 def install(svc: Any) -> None:
     from ..api_v3 import register
+    from ..jobs import Schedule
+    from .workers import workers_for
     svc.research3 = Research(svc)
+    rw = workers_for(svc)
+    rw.add("calibration", CAL_JOB, svc.research3.run_calibration)
+    rw.add("calibration", "research.warm", svc.research3.warm)
+    rw.schedule("calibration", Schedule("research.warm", 6 * 3600, 3600))
+    try:
+        if svc.market.info.mode in REAL_MODES:
+            svc.research3.warm({"delay_seconds": WARM_DELAY})   # real data connected: the 1- and 5-session calibrations are queued if due
+        rw.resume()
+    except Exception:  # noqa: BLE001 - never block start
+        log.exception("Research could not queue its background work")
 
     def routes(router: APIRouter, svc: Any) -> None:
         r = svc.research3
@@ -639,6 +796,11 @@ def install(svc: Any) -> None:
         @router.post("/forecast/calibrate")
         def calibrate(body: CalibrateIn) -> dict[str, Any]:
             return r.calibrate(body)
+
+        @router.post("/data/tradier-check")
+        def tradier_check(body: TradierCheckIn) -> dict[str, Any]:
+            from ..tradier_check import check_tradier
+            return check_tradier(svc, body.symbol)
 
         @router.get("/options/history")
         def option_history(option_symbol: str, days: int = Query(90, ge=5, le=730)) -> dict[str, Any]:
