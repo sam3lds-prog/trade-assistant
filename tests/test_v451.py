@@ -284,7 +284,8 @@ class Crash(BaseException):
 @pytest.fixture(scope="module")
 def app(tmp_path_factory):
     path = tmp_path_factory.mktemp("v451") / "t.db"
-    s = Settings(data_mode="demo", db_path=path, desk_worker="off", scenario_provider="demo", scenario_auto=False, scenario_control=False)
+    s = Settings(data_mode="demo", db_path=path, desk_worker="off", scenario_provider="demo", scenario_auto=False, scenario_control=False,
+                 mirofish_cost_per_run_usd=0.05)
     svc = TradeAssistant(s, provider=DemoData(), db=Database(path))
     c = TestClient(create_app(s, svc))
     ids = [_wait(c, c.post("/v3/studies", json={"symbol": sym, "horizon_days": 5, "scenarios": False}).json()["id"])["id"]

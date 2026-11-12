@@ -55,3 +55,46 @@ def verified_triggers(cur: sqlite3.Cursor) -> None:
     else:
         log.warning("Run %s has more than one automatic scenario version: the one-per-run index is not created", dup[0])
     cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_decisions_valuation ON scenario_decisions (study_id, valuation_id)")
+
+
+@migration(29, "4.5.2 simulation usage: one ledger row per provider run, with its estimate, its measured or entered cost and its ids")
+def scenario_usage(cur: sqlite3.Cursor) -> None:
+    """What each scenario run cost, or may have cost: its profile, model, MiroFish ids, agents and rounds, times and
+    status, the estimate made before it started (a range, with its basis), the cost measured (an AI call's tokens at
+    the prices you set) or entered by you from your provider's bill, and how sure that is (`measured`,
+    `user_entered`, `estimate`, `unknown`). Interrupted and failed runs are kept: a run that reached a paid stage
+    has a cost even when it produced nothing. An unknown cost is NULL, never 0."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS scenario_usage (
+        run_id           TEXT PRIMARY KEY,
+        study_id         TEXT NOT NULL,
+        provider         TEXT NOT NULL,
+        role             TEXT NOT NULL DEFAULT 'provider',
+        profile          TEXT,
+        model            TEXT,
+        project_id       TEXT,
+        simulation_id    TEXT,
+        agents           INTEGER,
+        rounds           INTEGER,
+        total_rounds     INTEGER,
+        created_at       TEXT NOT NULL,
+        started_at       TEXT,
+        ended_at         TEXT,
+        status           TEXT NOT NULL,
+        stage_reached    TEXT,
+        day              TEXT NOT NULL,
+        month            TEXT NOT NULL,
+        est_low_usd      REAL,
+        est_high_usd     REAL,
+        est_basis        TEXT,
+        measured_usd     REAL,
+        cost_confidence  TEXT NOT NULL DEFAULT 'unknown',
+        input_tokens     INTEGER,
+        output_tokens    INTEGER,
+        retries          INTEGER NOT NULL DEFAULT 0,
+        stopped_early    INTEGER NOT NULL DEFAULT 0,
+        approval_json    TEXT NOT NULL DEFAULT '{}',
+        note             TEXT,
+        updated_at       TEXT NOT NULL
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_usage_day ON scenario_usage (provider, day)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scenario_usage_month ON scenario_usage (provider, month)")

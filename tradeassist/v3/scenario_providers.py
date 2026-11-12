@@ -55,6 +55,7 @@ class Step:
     detail: str = ""
     model: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
+    approval: dict[str, Any] | None = None       # 4.5.2: paused for your approval (more agents than the profile allows)
 
 
 class Transient(Exception):
@@ -69,8 +70,17 @@ class Failed(Exception):
     """The server answered that the request failed."""
 
 
+def _never_connected(exc: Exception) -> bool:
+    text = f"{exc!r} {exc}"
+    return any(w in text for w in ("NewConnectionError", "Connection refused", "Failed to establish", "Name or service not known",
+                                   "nodename nor servname", "No route to host"))
+
+
 def backoff(polls: int, first: float = 5.0, most: float = 30.0) -> float:
     return float(min(most, first * (1.5 ** max(0, polls))))
+
+
+WRITES = ("ontology", "sim_create", "start")      # 4.5.2: writes the server does not make safe to repeat
 
 
 class MiroFish:
@@ -78,36 +88,76 @@ class MiroFish:
     label = "MiroFish"
 
     def __init__(self, url: str, *, session: Any = None, timeout: float = 300.0, max_rounds: int = 10, poll_first: float = 5.0,
-                 poll_most: float = 30.0):
+                 poll_most: float = 30.0, max_agents: int | None = None, platform: str = "parallel", parallel_profiles: int = 5,
+                 profile: str | None = None):
         self.url = url.rstrip("/")
         self.http = session or requests.Session()
         self.timeout = float(timeout)
         self.max_rounds = int(max_rounds)
         self.poll_first, self.poll_most = poll_first, poll_most
+        self.max_agents = int(max_agents) if max_agents else None
+        self.platform = platform if platform in ("parallel", "reddit", "twitter") else "parallel"
+        self.parallel_profiles = max(1, int(parallel_profiles))
+        self.profile = profile
 
     def config(self) -> dict[str, Any]:
-        return {"provider": self.name, "url": self.url, "max_rounds": self.max_rounds, "upstream": PINNED_UPSTREAM}
+        out = {"provider": self.name, "url": self.url, "max_rounds": self.max_rounds, "upstream": PINNED_UPSTREAM}
+        if self.profile:                       # 4.5.2 (a 4.5.0 run's configuration had none, so its key is unchanged)
+            out.update(profile=self.profile, max_agents=self.max_agents, platform=self.platform, parallel_profiles=self.parallel_profiles)
+        return out
 
     def ready(self) -> dict[str, Any]:
+        """Level A, connection: the server answers /health as MiroFish's backend does. Free (no model call)."""
         if not self.url:
-            return {"ok": False, "detail": "MIROFISH_URL is not set: point it at your self-hosted MiroFish server (http://127.0.0.1:5001)."}
+            return {"ok": False, "config_error": True, "detail": "MIROFISH_URL is not set: point it at your self-hosted MiroFish server (http://127.0.0.1:5001).",
+                    "action": "Set MIROFISH_URL=http://127.0.0.1:5001 in .env and restart."}
         try:
             r = self.http.get(f"{self.url}/health", timeout=5)
         except requests.RequestException as exc:
             return {"ok": False, "detail": f"MiroFish at {self.url} did not answer ({exc.__class__.__name__}). Start its backend."}
         if r.status_code >= 300:
             return {"ok": False, "detail": f"MiroFish at {self.url} answered HTTP {r.status_code} to /health."}
-        return {"ok": True, "detail": f"MiroFish at {self.url} is up."}
+        try:
+            body = r.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and body.get("service") and "mirofish" not in str(body.get("service")).lower():
+            return {"ok": False, "config_error": True, "detail": f"Something answered at {self.url}, but it is {body.get('service')!r}, not MiroFish.",
+                    "action": "Point MIROFISH_URL at MiroFish's backend (its default port is 5001)."}
+        return {"ok": True, "detail": f"MiroFish at {self.url} is up.", "service": (body or {}).get("service") if isinstance(body, dict) else None}
+
+    def levels(self) -> dict[str, Any]:
+        """Level A (connection) and level B (dependencies the server lets the app see, all free): its project and
+        simulation lists answer in its own format, which also shows its storage works. Its language model and Zep keys:
+        MiroFish's backend refuses to start without both, so a server that answers has them set; whether they work is
+        shown only by a functional test (level C, `--scenario-smoke`, which costs model calls)."""
+        a = self.ready()
+        if not a.get("ok"):
+            return {"A": a}
+        problems = []
+        for path in ("/api/graph/project/list", "/api/simulation/list"):
+            try:
+                self._req("GET", path, write=False, params={"limit": 1}, timeout=10)
+            except (Transient, Failed, Ambiguous) as exc:
+                problems.append(f"{path}: {exc}")
+        b = ({"ok": True, "detail": "Its project and simulation lists answer in MiroFish's format; its model and Zep keys are set (it does not "
+                                    "start without them)."}
+             if not problems else {"ok": False, "detail": "MiroFish answers /health but not its API: " + "; ".join(problems)[:400]})
+        return {"A": a, "B": b}
 
     # --- transport ------------------------------------------------------------------------------------------------
     def _req(self, method: str, path: str, *, write: bool, timeout: float | None = None, **kw: Any) -> dict[str, Any]:
         try:
             r = self.http.request(method, f"{self.url}{path}", timeout=timeout or self.timeout, **kw)
         except requests.Timeout as exc:
-            if write:
+            if write and not isinstance(exc, requests.ConnectTimeout):
                 raise Ambiguous(f"{method} {path} timed out: it may have run on the server") from exc
             raise Transient(f"{method} {path} timed out") from exc
         except requests.RequestException as exc:
+            # 4.5.2: a write may have run unless it provably never reached the server (no connection was made): a
+            # broken connection, a reply cut off mid-body or one that could not be decoded are all ambiguous.
+            if write and not (isinstance(exc, requests.ConnectionError) and _never_connected(exc)):
+                raise Ambiguous(f"{method} {path} did not complete ({exc.__class__.__name__}): it may have run on the server") from exc
             raise Transient(f"MiroFish did not answer {method} {path} ({exc.__class__.__name__})") from exc
         try:
             body = r.json()
@@ -131,12 +181,20 @@ class MiroFish:
 
     @staticmethod
     def _go(state: dict[str, Any], stage: str, **ids: Any) -> dict[str, Any]:
-        return {**state, **ids, "stage": stage, "polls": 0, "transient": 0}
+        return {**{k: v for k, v in state.items() if k != "sending"}, **ids, "stage": stage, "polls": 0, "transient": 0}
 
     # --- the stages -----------------------------------------------------------------------------------------------
     def advance(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
         stage = state.get("stage") or "ontology"
         try:
+            if stage in WRITES:
+                # 4.5.2: a write that may cost is recorded as being sent before it is sent. Finding that mark again means
+                # the process stopped mid-request: it may have run on the server, so it is reconciled, never sent again.
+                if state.get("sending") == stage:
+                    raise Ambiguous(f"the {stage} request was being sent when the app stopped: it may have run on the server")
+                checkpoint = ctx.get("checkpoint")
+                if callable(checkpoint):
+                    checkpoint({**state, "sending": stage})
             step = getattr(self, f"_{stage}")(ctx, state)
         except Transient as exc:
             tries = int(state.get("transient") or 0) + 1
@@ -145,8 +203,8 @@ class MiroFish:
                             stage=stage)
             return Step({**state, "transient": tries}, next_in=backoff(tries, 10.0, 120.0), stage=stage, detail=f"retrying: {exc}")
         except Ambiguous as exc:
-            return Step({**state, "stage": f"{stage}_reconcile", "reconcile_tries": 0, "ambiguous": str(exc)}, next_in=10.0, stage=stage,
-                        detail=str(exc))
+            return Step({**{k: v for k, v in state.items() if k != "sending"}, "stage": f"{stage}_reconcile", "reconcile_tries": 0, "ambiguous": str(exc)},
+                        next_in=10.0, stage=stage, detail=str(exc))
         except Failed as exc:
             return Step(state, failed=str(exc), stage=stage)
         return step
@@ -195,7 +253,26 @@ class MiroFish:
             return self._poll(state, "graph", f"building the graph ({task.get('progress') or 0}%)")
         proj = self._req("GET", f"/api/graph/project/{state['project_id']}", write=False, timeout=30)
         gid = proj.get("graph_id") or (task.get("result") or {}).get("graph_id") or state.get("graph_id")
-        return Step(self._go(state, "sim_create", graph_id=gid), next_in=0.0, stage="graph", detail="graph built")
+        return Step(self._go(state, "agents_check", graph_id=gid), next_in=0.0, stage="graph", detail="graph built")
+
+    def _agents_check(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
+        """4.5.2: MiroFish makes one agent per filtered graph entity and has no cap of its own. The count is read (free)
+        before any agent is prepared; over the profile's cap, the run waits for your approval instead."""
+        n = None
+        if state.get("graph_id"):
+            data = self._req("GET", f"/api/simulation/entities/{state['graph_id']}", write=False, params={"enrich": "false"}, timeout=60)
+            n = data.get("filtered_count")
+            n = int(n) if isinstance(n, (int, float)) else (len(data.get("entities") or []) if isinstance(data.get("entities"), list) else None)
+        if n is None and self.max_agents and not state.get("agents_unknown_approved"):
+            return Step({**state, "agents": None}, approval={"code": "agents_unknown", "agents": None, "cap": self.max_agents,
+                                                             "reason": "the server did not report how many agents its graph will make"},
+                        stage="agents", detail="agent count not reported; waiting for your approval")
+        if n is not None and self.max_agents and n > self.max_agents and int(state.get("agents_approved") or 0) < n:
+            return Step({**state, "agents": n}, approval={"code": "agents_over_cap", "agents": n, "cap": self.max_agents,
+                                                          "reason": f"the graph has {n} agents, more than the profile's {self.max_agents}"},
+                        stage="agents", detail=f"{n} agents: more than {self.max_agents}; waiting for your approval")
+        return Step(self._go(state, "sim_create", agents=n), next_in=0.0, stage="agents",
+                    detail=f"{n} agents to prepare" if n is not None else "agent count not reported")
 
     def _sim_create(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
         body = {"project_id": state["project_id"]}
@@ -224,7 +301,8 @@ class MiroFish:
     def _prepare(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
         # Preparing again is safe: the server detects a finished preparation and returns it.
         try:
-            data = self._req("POST", "/api/simulation/prepare", write=True, json={"simulation_id": state["simulation_id"]}, timeout=60)
+            data = self._req("POST", "/api/simulation/prepare", write=True, json={"simulation_id": state["simulation_id"],
+                                                                                   "parallel_profile_count": self.parallel_profiles}, timeout=60)
         except Ambiguous:
             return Step(self._go(state, "prepare_wait"), next_in=15.0, stage="agents", detail="the prepare request timed out; checking")
         if data.get("already_prepared") or data.get("status") == "ready":
@@ -239,14 +317,21 @@ class MiroFish:
         data = self._req("POST", "/api/simulation/prepare/status", write=False, json=body, timeout=30)
         st = data.get("status")
         if data.get("already_prepared") or st in ("completed", "ready"):
-            return Step(self._go(state, "start"), next_in=0.0, stage="agents", detail="agents ready")
+            try:                                   # the agents actually prepared, for the usage record
+                sim = self._req("GET", f"/api/simulation/{state['simulation_id']}", write=False, timeout=30)
+                made = sim.get("profiles_count") or sim.get("entities_count")
+            except (Transient, Failed):
+                made = None
+            return Step(self._go(state, "start", agents=made or state.get("agents")), next_in=0.0, stage="agents",
+                        detail=f"{made} agents ready" if made else "agents ready")
         if st == "failed":
             raise Failed(f"preparing the agents failed: {data.get('error') or data.get('message') or 'no reason given'}")
         return self._poll(state, "agents", f"preparing the agents ({data.get('progress') or 0}%)")
 
     def _start(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
         self._req("POST", "/api/simulation/start", write=True, timeout=60,
-                  json={"simulation_id": state["simulation_id"], "max_rounds": self.max_rounds, "enable_graph_memory_update": False})
+                  json={"simulation_id": state["simulation_id"], "max_rounds": self.max_rounds, "enable_graph_memory_update": False,
+                        "platform": self.platform})
         return Step(self._go(state, "run_wait", started=True), next_in=self.poll_first, stage="simulation", detail="simulation started")
 
     def _start_reconcile(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
@@ -381,11 +466,14 @@ class Demo:
         return Step({**state, "stage": "done", "at": time.time()}, report=report, cases=cases, stage="report", detail="canned cases")
 
 
-def provider_for(svc: Any, name: str | None = None, session: Any = None) -> Any:
+def provider_for(svc: Any, name: str | None = None, session: Any = None, profile: str | None = None) -> Any:
     s = svc.settings
     name = name or s.scenario_provider
     if name == "mirofish":
-        return MiroFish(s.mirofish_url, session=session, timeout=s.mirofish_http_timeout, max_rounds=s.mirofish_max_rounds)
+        from .simulation import profile as profile_of
+        p = profile_of(s, profile or getattr(s, "scenario_default_profile", "quick"))
+        return MiroFish(s.mirofish_url, session=session, timeout=s.mirofish_http_timeout, max_rounds=p["rounds"], max_agents=p["agents"],
+                        platform=p["platform"], parallel_profiles=p["parallel_profiles"], profile=p["key"])
     if name == "ai":
         return SingleAI(svc)
     if name == "demo":

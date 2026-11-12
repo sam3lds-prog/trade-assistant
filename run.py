@@ -27,8 +27,16 @@ def main() -> None:
     parser.add_argument("--daemon", action="store_true",
                         help="Run the trading daemon: the Trading Desk's jobs, notifications and phone approvals (setup_daemon.sh keeps it running)")
     parser.add_argument("--scenario-check", nargs="?", const="SPY", metavar="SYMBOL",
-                        help="4.5 smoke check, read-only: Tradier data (a quote, daily bars, a chain, the clock) and the scenario "
-                             "provider's readiness (MiroFish's address and health), then exit")
+                        help="read-only readiness check, nothing paid: Tradier data (a quote, daily bars, a chain, the clock), "
+                             "MiroFish's connection and API (levels A and B), the settings, the circuit breaker, the spending "
+                             "left, and whether a real end-to-end run has been checked; then exit")
+    parser.add_argument("--scenario-smoke", nargs="?", const="SPY", metavar="SYMBOL",
+                        help="4.5.2 functional test (level C), PAID: one real, bounded study through MiroFish end to end "
+                             "(evidence, graph, agents, simulation, report, cases, paths, valuation, decision, usage record), "
+                             "checked again after reopening the database. Asks before spending unless --yes")
+    parser.add_argument("--profile", choices=("quick", "standard", "deep"), default="quick",
+                        help="the simulation profile for --scenario-smoke (default quick)")
+    parser.add_argument("--yes", action="store_true", help="with --scenario-smoke: do not ask before spending")
     parser.add_argument("--replay", nargs=argparse.REMAINDER, metavar="COMMAND",
                         help="4.0 replays: 'dataset build', 'dataset list', 'run', 'resume RUN', 'runs', 'report RUN' "
                              "(python run.py --replay --help for more)")
@@ -55,6 +63,8 @@ def main() -> None:
         return
     if args.scenario_check:
         raise SystemExit(scenario_check(settings, args.scenario_check.upper()))
+    if args.scenario_smoke:
+        raise SystemExit(scenario_smoke(settings, args.scenario_smoke.upper(), args.profile, args.yes))
     if args.morning_email or args.morning_print:
         raise SystemExit(morning_email(settings, send=args.morning_email))
     if args.snapshot:
@@ -72,10 +82,12 @@ def main() -> None:
 
 
 def scenario_check(settings, symbol: str) -> int:
-    """The one-click Research smoke check: read-only requests to Tradier and the scenario provider's /health. Prints
-    what worked and what to fix; never prints a token. Exit code 0 when both are ready."""
+    """The one-click Research readiness check, read-only and free: Tradier, then MiroFish at levels A (connection) and
+    B (its API and storage), the settings, the circuit breaker, the spending left and the last functional test. Never
+    prints a token and never starts a simulation. Exit code 0 when Tradier and the provider are ready."""
     from tradeassist.service import TradeAssistant
     from tradeassist.tradier_check import check_tradier
+    from tradeassist.v3 import simulation as G
     from tradeassist.v3.scenario_providers import PINNED_UPSTREAM, provider_for
     svc = TradeAssistant(settings)
     print(f"Data mode: {settings.data_mode} ({svc.market.info.label}; {'real time' if svc.market.info.realtime else 'delayed or made up'})")
@@ -83,24 +95,163 @@ def scenario_check(settings, symbol: str) -> int:
     print(f"Tradier: {'OK' if t['ok'] else 'NOT READY'}: {t['message']}")
     for c in t.get("checks") or []:
         print(f"  {'ok ' if c['ok'] else 'FAIL'} {c['label']}: {c['text'] if c['ok'] else (c.get('error') or c['text'])}")
+    prof = G.profile(settings, settings.scenario_default_profile)
     print(f"Scenario provider: {settings.scenario_provider} (automatic runs {'on' if settings.scenario_auto else 'off'} in .env; "
           "Research settings can change both)")
     try:
-        prov = provider_for(svc, settings.scenario_provider)
-        r = prov.ready()
+        prov = provider_for(svc, settings.scenario_provider, profile=prof["key"])
+        r = G.readiness(svc, prov, getattr(prov, "name", settings.scenario_provider), prof["key"])
     except ValueError as exc:
-        r = {"ok": False, "detail": str(exc)}
-    print(f"  {'OK' if r['ok'] else 'NOT READY'}: {r['detail']}")
+        r = {"ok": False, "detail": str(exc), "state_label": "Configuration error", "levels": {}}
+    print(f"  {'OK' if r['ok'] else 'NOT READY'}: {r.get('state_label') or ('Ready' if r['ok'] else 'Not ready')}: {r['detail']}")
+    if r.get("action"):
+        print(f"  What to do: {r['action']}")
     if settings.scenario_provider == "mirofish":
-        print(f"  MIROFISH_URL {settings.mirofish_url or '(not set)'}; pinned upstream {PINNED_UPSTREAM[:7]}; "
-              f"{settings.mirofish_max_rounds} rounds, {settings.mirofish_run_minutes:g} minutes, {settings.mirofish_concurrency} at once")
+        lv = r.get("levels") or {}
+        for key, words in (("A", "connection"), ("B", "API and storage")):
+            x = lv.get(key)
+            print(f"  Level {key}, {words}: " + ("not checked (level A failed)" if x is None else f"{'ok' if x.get('ok') else 'FAIL'}: {x.get('detail')}"))
+        fn = r.get("functional") or {}
+        print(f"  Level C, functional: {fn.get('words') or ('passed' if fn.get('ok') else 'failed')}"
+              + (f" ({fn.get('at')})" if fn.get("at") else ""))
+        print(f"  MIROFISH_URL {settings.mirofish_url or '(not set)'}; pinned upstream {PINNED_UPSTREAM[:7]}; {settings.mirofish_concurrency} at once")
+        for p in G.profiles(settings):
+            print(f"  Profile {p['label']}{' (default)' if p['key'] == prof['key'] else ''}: {p['words']}"
+                  + ("; always asks first" if p["always_ask"] else ""))
+        c = r.get("circuit") or {}
+        print(f"  Circuit breaker: {c.get('state', 'closed')}, {c.get('failures', 0)} failure(s) in a row of {c.get('threshold')}"
+              + (f"; last: {c.get('last_error')}" if c.get("last_error") else ""))
+        b = r.get("budgets") or {}
+        est = r.get("estimate") or {}
+        print(f"  Next {prof['label']} run: {est.get('words')}; {r.get('admission', {}).get('reason', '')}")
+        print(f"  Spending today: {G.money(b.get('today', {}).get('high_usd'))} at most (limit {G.money(b.get('daily_limit'))}); "
+              f"this month: {G.money(b.get('month', {}).get('high_usd'))} at most (limit {G.money(b.get('monthly_limit'))}); "
+              f"automatic approval up to {G.money(b.get('auto_approval_usd'))}")
     if settings.scenario_control:
         print(f"  Single-prompt control: {'AI set up' if settings.anthropic_api_key else 'ANTHROPIC_API_KEY is not set: the control will fail'}")
     budget = settings.scenario_budget or "the Trading Desk policy's trial capital"
     loss = settings.scenario_max_loss or "the Trading Desk policy's daily loss stop"
     print(f"Opportunity checks: budget {budget}; loss limit {loss}; minimum net {settings.opportunity_min_net_pct:g}%; "
-          f"widest spread {settings.opportunity_max_spread_pct:g}%; notifications {'on' if settings.scenario_notify else 'off'}")
+          f"widest spread {settings.opportunity_max_spread_pct:g}%; minimum open interest {settings.opportunity_min_open_interest:g}; "
+          f"notifications {'on' if settings.scenario_notify else 'off'}")
     return 0 if (t["ok"] or settings.data_mode == "demo") and r["ok"] else 1
+
+
+def scenario_smoke(settings, symbol: str, profile: str, yes: bool, *, wait_seconds: float | None = None, ask=input) -> int:
+    """Level C, the functional test, which costs model calls: one real, bounded study of SYMBOL through the self-hosted
+    MiroFish end to end, then the database reopened and the result read back. Every stage is reported; the outcome
+    is saved and shown by --scenario-check and in Research. Exit code 0 only when every stage passed."""
+    import time
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from tradeassist.service import TradeAssistant
+    from tradeassist.tradier_check import check_tradier
+    from tradeassist.v3 import install as install_v3
+    from tradeassist.v3 import simulation as G
+    from tradeassist.v3.research import StudyIn
+    from tradeassist.v3.workers import workers_for
+    if settings.scenario_provider != "mirofish" and not settings.mirofish_url:
+        print("The functional test is for MiroFish: set MIROFISH_URL (and SCENARIO_PROVIDER=mirofish).")
+        return 2
+    run_settings = replace(settings, desk_worker="off", scenario_provider="mirofish", scenario_default_profile=profile)
+    svc = TradeAssistant(run_settings)
+    install_v3(svc)
+    stages: list[dict[str, object]] = []
+    started = time.time()
+
+    def stage(name: str, ok: bool, words: str) -> bool:
+        stages.append({"stage": name, "ok": ok, "words": words})
+        print(f"  {'ok ' if ok else 'FAIL'} {name}: {words}")
+        return ok
+
+    def done(ok: bool, study_id: str | None = None, run_id: str | None = None) -> int:
+        rec = {"ok": ok, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "symbol": symbol, "profile": profile,
+               "study_id": study_id, "run_id": run_id, "seconds": round(time.time() - started, 1), "stages": stages,
+               "words": (f"Passed {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC: {symbol}, {profile}, every stage" if ok else
+                         f"Failed {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC at {next((s['stage'] for s in stages if not s['ok']), '?')}")}
+        svc.db.cache_put(G.SMOKE_KEY, rec)
+        print(f"Functional test {'PASSED' if ok else 'FAILED'} in {rec['seconds']:.0f} s.")
+        return 0 if ok else 1
+
+    print(f"Functional test (level C): {symbol}, {profile} profile. This sends a real study to MiroFish and costs model calls.")
+    if settings.data_mode == "demo":
+        stage("market data", False, "DATA_MODE=demo: the functional test needs real Tradier data (DATA_MODE=live or sandbox)")
+        return done(False)
+    t = check_tradier(svc, symbol)
+    if not stage("Tradier", bool(t["ok"]), t["message"]):
+        return done(False)
+    prov = svc.pipeline.provider("mirofish", profile)
+    r = G.readiness(svc, prov, "mirofish", profile)
+    if not stage("MiroFish readiness", bool(r["ok"]), f"{r['state_label']}: {r['detail']}"):
+        return done(False)
+    est = r["estimate"]
+    print(f"  Estimated cost: {est['words']}. {r['admission']['reason']}.")
+    if r["admission"]["decision"] == "refused":
+        stage("spending", False, r["admission"]["reason"])
+        return done(False)
+    if not yes and str(ask("Spend this on a real run? Type yes to go on: ")).strip().lower() != "yes":
+        print("Not run.")
+        return 3
+    from tradeassist.v3.pipeline import SETTINGS_KEY
+    before = svc.db.cache_get(SETTINGS_KEY)              # the test's profile is used for this study only, then put back
+    svc.pipeline.save_settings(None, None, profile)
+    try:
+        st = svc.research3.start(StudyIn(symbol=symbol, horizon_days=1, scenarios=True, request_key=f"smoke-{int(started)}"))
+    finally:
+        svc.db.cache_put(SETTINGS_KEY, before or {})
+    study_id = st["id"]
+    end = time.time() + (wait_seconds if wait_seconds is not None else 20 * 60)
+    while time.time() < end:                                    # the quantitative study, in its own thread
+        s = svc.db.one("SELECT status FROM studies WHERE id = ?", (study_id,))
+        if s and s["status"] != "running":
+            break
+        time.sleep(1.0)
+    if not stage("evidence and strategies", bool(s and s["status"] in ("complete", "partial")), f"study {study_id}: {s['status'] if s else '?'}"):
+        return done(False, study_id)
+    rw = workers_for(svc)
+    limit = G.profile(settings, profile)["minutes"] * 60 + 600 if wait_seconds is None else wait_seconds
+    end, last = time.time() + limit, None
+    approved = False
+    while time.time() < end:
+        rw.drain("scenarios")
+        p = svc.pipeline.view(study_id) or {}
+        run = p.get("run") or {}
+        now = (p.get("status"), run.get("stage"), run.get("detail"))
+        if now != last:
+            print(f"    {p.get('status')}: {run.get('stage') or ''} {run.get('detail') or ''}".rstrip())
+            last = now
+        if p.get("status") == "awaiting_approval" and not approved:
+            print(f"    Approving (you confirmed this test): {(p.get('governance') or {}).get('reason')}")
+            svc.pipeline.approve(study_id)
+            approved = True
+            continue
+        if p.get("status") in ("complete", "failed", "canceled", "needs_attention"):
+            break
+        time.sleep(3.0)
+    p = svc.pipeline.view(study_id) or {}
+    run = p.get("run") or {}
+    if not stage("MiroFish simulation and report", bool(run.get("report_received")),
+                 f"run {run.get('id')}: {run.get('status')}; ids {run.get('remote')}; {run.get('error') or ''}".strip()):
+        return done(False, study_id, run.get("id"))
+    v = p.get("version_id")
+    stage("cases normalized and checked against the packet", bool(v), f"version {v}" if v else (p.get("error") or "no version"))
+    val = p.get("valuation") or {}
+    stage("price paths and strategy revaluation", val.get("status") in ("complete", "partial"),
+          f"valuation {val.get('id')}: {val.get('status')}, {len(val.get('structures') or [])} structures")
+    d = p.get("decision") or {}
+    stage("opportunity decision", bool(d.get("status")), f"{d.get('label')}" if d else "none")
+    u = p.get("usage") or {}
+    stage("usage record", bool(u), f"{u.get('agents')} agents, {u.get('rounds')} rounds; cost {u.get('words')}" if u else "missing")
+    again = TradeAssistant(run_settings)
+    install_v3(again)
+    p2 = again.pipeline.view(study_id) or {}
+    stage("read back after reopening the database", p2.get("version_id") == v and (p2.get("valuation") or {}).get("id") == val.get("id"),
+          f"status {p2.get('status')}, version {p2.get('version_id')}")
+    ok = all(x["ok"] for x in stages)
+    print(f"  Enter what your model provider charged for it, to calibrate the estimates: Research → Study settings → Simulation usage "
+          f"(run {run.get('id')}).")
+    return done(ok, study_id, run.get("id"))
 
 
 def morning_email(settings, send: bool) -> int:

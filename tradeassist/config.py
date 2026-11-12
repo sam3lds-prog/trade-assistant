@@ -48,6 +48,17 @@ def _int(name: str, default: int) -> int:
     return int(_float(name, default))
 
 
+def _money(name: str) -> float | None:
+    """A dollar amount that may be unset (unknown): never read as $0 (4.5.2)."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    value = _float(name, 0.0)
+    if value < 0:
+        raise ValueError(f"{name} must be zero or more, got {raw!r}")
+    return value
+
+
 def _flag(name: str, default: bool = False) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
@@ -177,6 +188,18 @@ class Settings:
     mirofish_concurrency: int = 1           # runs at once
     mirofish_http_timeout: float = 300.0    # one request (the ontology step waits on the server's language model)
     scenario_control: bool = False          # 4.5: also run the single-prompt AI control on the same packet
+    # 4.5.2: simulation profiles, spending and the circuit breaker (v3/simulation.py)
+    scenario_default_profile: str = "quick"  # quick, standard or deep (deep always asks you first)
+    mirofish_max_agents: int = 40           # Standard's cap on agents (graph entities) prepared; Quick half, Deep three times
+    mirofish_cost_per_run_usd: float | None = None   # your estimate of one Standard run; unset: the cost is unknown
+    mirofish_daily_budget_usd: float = 5.0  # simulation spending admitted per New York day (0: no daily limit)
+    mirofish_monthly_budget_usd: float = 50.0
+    mirofish_auto_approval_usd: float = 0.50   # a run estimated at most this starts without asking
+    mirofish_require_approval_on_unknown_cost: bool = True
+    mirofish_circuit_failures: int = 3      # consecutive provider failures that open the circuit
+    mirofish_circuit_cooldown_seconds: float = 300.0
+    scenario_ai_input_usd_per_mtok: float | None = None    # to price the AI calls' measured tokens (control, converter)
+    scenario_ai_output_usd_per_mtok: float | None = None
     scenario_budget: float = 0.0            # the budget mixes are sized to; 0: the Trading Desk policy's trial capital
     scenario_max_loss: float = 0.0          # the loss limit a setup must stay inside; 0: the policy's daily loss stop
     # 4.4: what a setup must clear to be shown as an opportunity
@@ -305,6 +328,17 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         mirofish_concurrency=min(max(_int("MIROFISH_CONCURRENCY", 1), 1), 4),
         mirofish_http_timeout=min(max(_float("MIROFISH_HTTP_TIMEOUT", 300.0), 5.0), 1800.0),
         scenario_control=_flag("SCENARIO_CONTROL"),
+        scenario_default_profile=_choice("SCENARIO_DEFAULT_PROFILE", "quick", ("quick", "standard", "deep")),
+        mirofish_max_agents=min(max(_int("MIROFISH_MAX_AGENTS", 40), 2), 500),
+        mirofish_cost_per_run_usd=_money("MIROFISH_COST_PER_RUN_USD"),
+        mirofish_daily_budget_usd=max(_float("MIROFISH_DAILY_BUDGET_USD", 5.0), 0.0),
+        mirofish_monthly_budget_usd=max(_float("MIROFISH_MONTHLY_BUDGET_USD", 50.0), 0.0),
+        mirofish_auto_approval_usd=max(_float("MIROFISH_AUTO_APPROVAL_USD", 0.50), 0.0),
+        mirofish_require_approval_on_unknown_cost=_flag("MIROFISH_REQUIRE_APPROVAL_ON_UNKNOWN_COST", True),
+        mirofish_circuit_failures=min(max(_int("MIROFISH_CIRCUIT_FAILURES", 3), 1), 20),
+        mirofish_circuit_cooldown_seconds=min(max(_float("MIROFISH_CIRCUIT_COOLDOWN_SECONDS", 300.0), 10.0), 86400.0),
+        scenario_ai_input_usd_per_mtok=_money("SCENARIO_AI_INPUT_USD_PER_MTOK"),
+        scenario_ai_output_usd_per_mtok=_money("SCENARIO_AI_OUTPUT_USD_PER_MTOK"),
         scenario_budget=max(_float("SCENARIO_BUDGET", 0.0), 0.0),
         scenario_max_loss=max(_float("SCENARIO_MAX_LOSS", 0.0), 0.0),
         opportunity_min_net_pct=max(_float("OPPORTUNITY_MIN_NET_PCT", 1.0), 0.0),

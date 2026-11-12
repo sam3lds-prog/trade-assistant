@@ -1720,3 +1720,26 @@ Changed expectations in existing tests, each because 4.5.0 behaved as the plan s
 alone no longer qualifies a setup (`tests/test_opportunity.py` now verifies it from a source, on the next session's
 market-open quotes), and a trigger without a verified status no longer scores its case (`tests/test_forward.py`).
 
+## 4.5.2: MiroFish reliability, self-hosting and cost governance
+
+What the pinned MiroFish (`7657031`) offers was read from its source before anything was built on it: `/health`
+answers `{"status": "ok", "service": "MiroFish Backend"}`; its backend exits at start without `LLM_API_KEY` and
+`ZEP_API_KEY`; `/api/simulation/prepare` makes one agent per filtered graph entity and takes `parallel_profile_count`
+but no agent cap; `/api/simulation/start` takes `max_rounds` and `platform`; `/api/simulation/entities/{graph_id}`
+returns `filtered_count`; nothing reports token usage or cost. Hence the agent check before preparation, and costs
+that stay estimates unless entered.
+
+| Change | Where | Tests |
+| --- | --- | --- |
+| Profiles, estimate, admission, approval, budgets | `v3/simulation.py`, `v3/pipeline.py` (`_govern`, `approve`) | `tests/test_v452.py` |
+| Agent count read before any agent is prepared; profile's rounds, platform and profile concurrency sent | `v3/scenario_providers.py` (`_agents_check`) | `test_the_profile_reaches_mirofish_and_a_large_graph_asks_before_any_agent_is_prepared` |
+| Circuit breaker with a free half-open probe | `v3/simulation.py` (`Circuit`), `v3/pipeline.py` | the circuit tests |
+| Usage ledger (migration 29): estimates by stage, entered and measured costs, never $0 for unknown | `v3/simulation.py` (`Ledger`), `schema_v45.py` | the ledger test |
+| Checkpoint before a costly write; a broken connection after sending is ambiguous | `v3/scenario_providers.py`, `v3/pipeline.py` (`_ctx`) | the mid-request crash test |
+| Levels A and B; states; `--scenario-check` extended; `--scenario-smoke` (paid, opt-in) | `v3/simulation.py`, `run.py` | the readiness and command-line tests |
+| `setup_mirofish.sh` | repository root | run by hand (below) |
+
+Existing tests changed: `tests/test_one_click.py`'s fake MiroFish answers the entities route, its loop allows the
+added stage, and its fixture gives MiroFish runs a small known estimate (unknown costs now wait for approval by
+design).
+

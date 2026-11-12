@@ -20,6 +20,39 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.5.2 — MiroFish reliability, self-hosting and cost governance
+
+The second step of the 4.6 plan. **No trading permission is added or changed.** Approval here is for simulation
+spending only.
+
+- **Self-hosted MiroFish in one script**: `./setup_mirofish.sh install` clones the official repository
+  (github.com/666ghj/MiroFish) at the reviewed commit `7657031`, installs its backend with uv (no Docker, no Node), and
+  writes its own `.env` with `FLASK_HOST=127.0.0.1`; `start`, `stop`, `restart`, `status`, `logs` and `check`. It
+  refuses to start a server that would listen beyond this computer. Its model and Zep keys stay in its own `.env`.
+- **Layered readiness**: level A (the server answers `/health` as MiroFish's backend), level B (its project and
+  simulation lists answer in its own format), both free; level C, a real paid end-to-end run, only when you ask
+  (`python run.py --scenario-smoke SPY`, which asks before spending). Research and `--scenario-check` show one state
+  (Ready, Degraded, Unavailable, Configuration error, Circuit open, Budget exceeded), why, and what to do, plus when
+  the last functional test passed.
+- **Simulation profiles**: Quick (the default: up to 20 agents, 4 rounds, one platform, 20 minutes), Standard
+  (`MIROFISH_MAX_AGENTS`, `MIROFISH_MAX_ROUNDS`, both platforms, `MIROFISH_RUN_MINUTES`) and Deep (three times, always
+  asks first). The pinned MiroFish has no agent-count setting (one agent per graph entity), so the app reads the
+  graph's entity count before any agent is prepared and asks you when it is over the profile's cap.
+- **Spending**: an estimate before each run (from `MIROFISH_COST_PER_RUN_USD` scaled by agents × rounds, or from the
+  actual costs you enter for finished runs), shown as a range with its basis; *unknown* when neither exists, never
+  $0.00. A run starts on its own only within `MIROFISH_AUTO_APPROVAL_USD` and the daily and monthly budgets; otherwise
+  it waits for your approval or is refused. MiroFish reports no usage, so its costs stay estimates (scaled to the
+  stages a failed run reached) until you enter what your provider charged; the AI control's tokens are measured and
+  priced at `SCENARIO_AI_*_USD_PER_MTOK` if you set them. Every run is in the usage ledger (migration 29).
+- **Circuit breaker**: after `MIROFISH_CIRCUIT_FAILURES` provider failures in a row, new runs are not sent for
+  `MIROFISH_CIRCUIT_COOLDOWN_SECONDS`; Research goes on without scenarios and says why; one free probe then decides
+  whether it closes. A cancel never counts; it can be reset by hand; the demo provider is never substituted.
+- **No paying twice for one write**: the ontology, simulation and start requests are marked as being sent before they
+  go; one interrupted mid-request is reconciled with the server on resume, never sent again. A connection that broke
+  after sending, or a reply cut off mid-way, is treated the same way. A run is not admitted until admission has run,
+  so a crash in between cannot send it unapproved; time spent waiting for your approval does not count toward its
+  time cap, and a waiting run does not hold a MiroFish slot. Approval is refused while the circuit is open.
+
 ## 4.5.1 — Trading correctness, safety and recovery
 
 The first of four steps of the 4.6 plan (*MiroFish production hardening, simulation optimization and trading
