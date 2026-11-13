@@ -11,6 +11,16 @@ go to Robinhood only if you switch live execution on in `.env` and choose it in 
 policy (see "Version 3" below). It is not financial advice, and passing every check does not
 make a trade safe. Buying an option always puts the whole premium at risk.
 
+## 4.6: MiroFish production hardening and forward validation
+
+One-click Research (Run study → evidence → a self-hosted MiroFish simulation → price paths → the strategies revalued →
+a decision) is now safe to rely on and to pay for: options are valued at their own session, only verified triggers
+and execution-quality quotes can qualify a setup, a paid report survives any local failure, MiroFish runs have
+profiles, estimates, budgets, approval and a circuit breaker, and the forward scorecard measures, with honest
+intervals, whether MiroFish improves forecasts and strategy outcomes enough to justify its cost. Setting it up on the
+Mac (`./setup_mirofish.sh`), the settings, the checks (`--scenario-check`, the paid `--scenario-smoke`), operations
+and rollback: [docs/ONE_CLICK_RESEARCH.md](docs/ONE_CLICK_RESEARCH.md#8-deployment-and-operations-on-the-mac-46).
+
 ## 4.1: Catalyst Scenarios
 
 A Research study can now carry **Catalyst Scenarios**: one event's Central, Bullish and Bearish reactions. Export the

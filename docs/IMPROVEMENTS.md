@@ -1758,3 +1758,24 @@ Clustering by week handles overlapping windows and market-wide moves; repeated o
 different weeks are not clustered together (a two-way scheme would need far more data than a personal record will
 have), which is said in the scorecard's method note together with the selection of studies run with scenarios.
 
+## 4.6: independent review
+
+A separate reviewer, which had not written the code, read 4.5.1 and 4.5.2 against the guarantees they were meant to
+hold, reproduced what it found with scripts, and reported it. Every finding was fixed with a regression test:
+
+| # | Severity | Finding | Fix | Test |
+| --- | --- | --- | --- | --- |
+| 1 | High | A crash between creating a MiroFish run and admitting it let a resumed step send it without approval | runs are created unadmitted; a step admits first | `test_a_crash_before_admission_cannot_send_the_run_unapproved` |
+| 2 | High | Verification accepted negated, opposite or preview-only sources | a sentence must affirm the trigger; contradiction rejects, speculation stays unverified | `test_a_source_that_negates_contradicts_or_only_previews...` |
+| 3 | High/Med | Waiting for an agent approval counted toward the time cap and held the MiroFish slot | paused time excluded; waiting runs do not count as busy | `test_waiting_for_an_agent_approval_neither_burns...` |
+| 4 | Med-High | A reply cut off after a costly write was re-sent | every incomplete write is ambiguous unless it never connected | `test_a_reply_cut_off_after_a_costly_write...` |
+| 5 | Medium | DNS rebinding could point the trigger fetcher at loopback; 100.64/10 passed | the connection is pinned to the checked address; global addresses only | `test_the_fetch_connects_to_the_address_it_checked...` |
+| 6 | Medium | A canceled attempt could be revalued and decided | Value again, triggers and verification refuse a canceled attempt | `test_a_canceled_attempt_is_not_valued_or_decided_again` |
+| 7 | Medium | "Retry (no new run)" could start a new run | the label comes from the server's own rule | `test_retry_says_honestly_whether_it_reuses_the_report` |
+| 8 | Medium | Retry while a run waited for approval orphaned it | Retry refuses until it is approved or canceled | in the agent-wait test |
+| 9 | Medium | A verified trigger carried over to a later attempt's cases | a verification belongs to its version and source | `test_a_verified_trigger_does_not_carry_over...` |
+| 10 | Medium | Approval ignored an open circuit | approval refuses while it is open | `test_approval_refuses_while_the_circuit_is_open...` |
+| 11 | Med-Low | A crash while publishing lost the Discover entry and notice; a crash before the findings hook was not resumed | resumed decisions republish and renotify idempotently; recovery resumes any unfinished finalization | `test_a_crash_while_publishing_or_right_after_saving...` |
+| 12 | Low | A crash right after saving the valuation made a second one | the version's saved valuation is reused | same test |
+| 13 | Low | Unreported open interest could qualify; an unreported agent count went ahead; the control never started after an approval-gated start; the smoke test changed Research's default profile; a rollback could leave a replaced source "verified" | research quality; approval asked; control started on approval; settings restored; a verification is bound to the source it read | the tests above and `test_unreported_open_interest_is_not_execution_quality` |
+

@@ -1,4 +1,4 @@
-# One-click Research (4.2 to 4.5)
+# One-click Research (4.2 to 4.6)
 
 The plan (*Trade Assistant one-click Research build plan*, 12 November 2026) turns **Run study** into a complete
 decision report: the stock's evidence and candidate strategies, an evidence packet run through a scenario provider
@@ -11,6 +11,10 @@ and an opportunity highlighted only when one clears the configured checks. It is
 | 4.3 | One-click pipeline | Run study → MiroFish → price paths → revaluation, in the background |
 | 4.4 | Opportunities and reporting | Qualified setup, Watch for trigger or No setup; Discover; notices; drafts |
 | 4.5 | Forward evidence | Frozen predictions scored against what happened, base vs no change vs single prompt vs MiroFish |
+| 4.5.1 | Correctness, safety, recovery | Options valued at their own session; data-quality tiers; verified triggers; resumable finishing; full cancel |
+| 4.5.2 | MiroFish operations and cost | Self-hosted setup script; readiness levels; profiles; estimates, approval, budgets, usage ledger; circuit breaker |
+| 4.5.3 | Forecast and strategy validation | Bias, width, skill, breakdowns; week-cluster intervals; costs per study; profiles compared; strategy outcomes |
+| 4.6.0 | Acceptance and release | Scenarios A to H; this guide's deployment and operations section |
 
 Nothing in any step places an order; scenario evidence never qualifies anything for the autopilot.
 
@@ -122,7 +126,7 @@ the linked chart from their saved prices as soon as the version exists.
 | Shown | Meaning | What to do |
 | --- | --- | --- |
 | *MIROFISH_URL is not set* / *did not answer* | The provider is not reachable | Start MiroFish, then Retry |
-| *Needs attention* after a timeout | A write's answer never came and its result was not found on the server | Check MiroFish's project list, then Retry (a new run) |
+| *Needs attention* after a timeout | A write's answer never came and its result was not found on the server | Check MiroFish's project list; *Start a new run anyway* (4.5.1 asks you to confirm, since the first may have cost) |
 | *Needs attention: no cases in the template* | The report had no JSON cases and no AI is set up to convert it | Set `ANTHROPIC_API_KEY`, or paste the cases under Advanced |
 | *Stopped: it took longer than MIROFISH_RUN_MINUTES* | The run's time cap | Raise the cap or lower `MIROFISH_MAX_ROUNDS` |
 | *not this study's packet* | The provider answered for another packet | Retry; nothing was applied |
@@ -147,12 +151,12 @@ After every valuation the study's Scenarios panel opens with a decision card:
 
 | Decision | When | What it shows |
 | --- | --- | --- |
-| **Qualified setup** | Every check passes: without a trigger under the Central case (with a validated directional edge or 30+ independent past cases behind it, and inside the loss limit in every case), or under a case whose trigger was recorded as observed | What, when, why it cleared the checks, what invalidates it; Draft it |
+| **Qualified setup** | Every check passes: without a trigger under the Central case (with a validated directional edge or 30+ independent past cases behind it, and inside the loss limit in every case), or under a case whose trigger was verified from its source (4.5.1) | What, when, why it cleared the checks, what invalidates it; Draft it |
 | **Watch for trigger** | A Bullish (long) or Bearish (short) case's setup passes on payoff, risk, liquidity and eligibility if its trigger happens | The trigger, the strategy, the date it expires, the failure condition; Draft it; record the trigger |
 | **No setup** | Nothing passes | The most material failed check, and how many setups each check stopped |
 
 The checks, in their order of materiality: the valuation worked; the sessions have not passed; the quote is fresh and
-real-time (for a Qualified setup); an unobserved trigger has not expired; every option leg has a two-sided quote within
+real-time (for a Qualified setup; 4.5.1: execution-quality data); an unverified trigger has not expired; every option leg has a two-sided quote within
 the spread limit; the payoff clears the minimum after costs (*cost eroded* when it would have before them); the base is
 supported (no trigger); the modeled worst tenth and the contract's most-it-can-lose are within the loss limit; the loss
 has a limit; it fits the budget; its route is not research-only; its direction is the case's.
@@ -180,7 +184,166 @@ For every 1- or 5-session study run with scenarios, these are frozen before the 
 | Scenario provider | the same rule on the provider's cases | the same |
 
 They are graded on the target session's close from the frozen anchor price. A conditional case is scored only when its
-trigger was recorded as observed. **Research → Forecast record → Forward evidence** shows the scorecard for the chosen
+trigger was verified from its source (4.5.1) and recorded before the target session closed. **Research → Forecast record → Forward evidence** shows the scorecard for the chosen
 horizon: average miss, coverage, direction, time and token use for each variant, the paired comparisons, and a
 verdict. Until there are 30 paired observations of the provider and the base it says there are too few to judge; in
 any case the provider is given no weight in the base by this release.
+
+## 5. Correctness and safety (4.5.1)
+
+- **Each structure is valued at its own session.** Shares at the target session; an option at the target session or
+  at its first leg's expiration if that comes first, against the case's saved price and dispersion **at that session**.
+  Legs of different expirations are closed together at the first one. A leg expiring before the first forecast
+  session, or a case whose prices reach past the option model's range, is listed as *cannot be valued reliably*.
+  A release's volatility collapse applies only at or after its session.
+- **Data quality**: every structure is *execution* (every quote real-time, fresh, two-sided, uncrossed, within the
+  spread limit and the open-interest floor), *research* (valued, but not executable data; it can still be a Watch)
+  or *unavailable* (not valued). Only execution quality qualifies.
+
+```dotenv
+OPPORTUNITY_MIN_OPEN_INTEREST=10   # an option leg with a known open interest below this is research only
+FRESHNESS_OPTION_QUOTE_SECONDS=300 # how old an option's bid and ask may be while the market is open (existing setting)
+```
+
+- **Triggers are evidence for review.** Record a Bullish or Bearish case's trigger with a link: the app reads the
+  page (public addresses only), takes the publication time from the page itself, and verifies it only when that time
+  is after the study's cutoff and inside the trigger's window, the page names the stock, and one of its sentences
+  affirms what you described and the case's trigger (not negated, not the opposite, not a preview). Only *verified*
+  turns a Watch into a Qualified setup, and only for the scenario version it was checked against. Without a link, or when
+  the page cannot be read or gives no time, it stays *unverified*; contradicting pages are *rejected*; a window that
+  ends first makes it *expired*.
+- **Finishing a run is resumable.** If the app stops or a write fails after MiroFish's report arrived, the next start
+  (or Retry) finishes it from the saved report: one version, one valuation, one decision, no new run. A new run after
+  *needs attention* (a paid request whose answer never came) asks you to confirm.
+- **Cancel** stops the provider run, the control beside it, and their queued steps; nothing a canceled attempt sends
+  back is applied, and earlier results stay in the study's attempt history.
+
+## 6. MiroFish operations and spending (4.5.2)
+
+### Profiles
+
+| Profile | Agents (at most) | Rounds | Platforms | Time cap | Starts on its own? |
+| --- | --- | --- | --- | --- | --- |
+| Quick (default) | half of `MIROFISH_MAX_AGENTS`, at most 20 | at most 4 | one (reddit) | at most 20 min | when its estimate allows |
+| Standard | `MIROFISH_MAX_AGENTS` | `MIROFISH_MAX_ROUNDS` | both | `MIROFISH_RUN_MINUTES` | when its estimate allows |
+| Deep | three times Standard | three times | both | twice | never: always asks |
+
+MiroFish makes one agent per entity in the graph it builds and has no agent cap of its own, so the app reads the
+entity count after the graph is built and **before any agent is prepared**; above the profile's cap it asks you.
+Choose the profile in Research → Study settings (*Simulation*), or `SCENARIO_DEFAULT_PROFILE`.
+
+### Spending
+
+```dotenv
+SCENARIO_DEFAULT_PROFILE=quick
+MIROFISH_MAX_AGENTS=40                  # Standard's agent cap
+MIROFISH_COST_PER_RUN_USD=              # your estimate of one Standard run; empty: unknown (asks first)
+MIROFISH_DAILY_BUDGET_USD=5.00          # 0: no daily limit
+MIROFISH_MONTHLY_BUDGET_USD=50.00
+MIROFISH_AUTO_APPROVAL_USD=0.50         # a run whose estimate tops out at or below this starts without asking
+MIROFISH_REQUIRE_APPROVAL_ON_UNKNOWN_COST=1
+MIROFISH_CIRCUIT_FAILURES=3
+MIROFISH_CIRCUIT_COOLDOWN_SECONDS=300
+SCENARIO_AI_INPUT_USD_PER_MTOK=         # optional: prices the AI control's measured tokens
+SCENARIO_AI_OUTPUT_USD_PER_MTOK=
+```
+
+These are starting limits, not measured costs. MiroFish reports **no** token usage, so a run's cost is an estimate
+(a range with its basis: `MIROFISH_COST_PER_RUN_USD` scaled by agents × rounds × platforms, or, once you enter actual
+costs for finished runs, those) until you enter what your model provider charged for it (Research → Study settings →
+Simulation details → *Simulation usage*). An estimate is not a hard cap: the app can refuse to start a run, stop one
+at its time cap, and stop at the agent check, but it cannot meter a run while it goes. A failed run is counted by the
+stages it reached. An unknown cost is shown as unknown, never as $0.00.
+
+| You see | Meaning | What to do |
+| --- | --- | --- |
+| *Waiting for your approval* | Unknown cost, an estimate over the automatic limit, Deep, or more agents than the profile | **Approve the simulation** (spending only; no order) or Cancel |
+| *Budget exceeded* | Today's or this month's spending (at most) plus the estimate is over the limit | Wait, or raise `MIROFISH_*_BUDGET_USD` |
+| *Circuit open* | Several provider failures in a row; new runs paused | Fix MiroFish (`./setup_mirofish.sh logs`), then *Reset the circuit* |
+| *Degraded* | `/health` answers but MiroFish's API does not | Restart MiroFish; check its log |
+| *Configuration error* | `MIROFISH_URL` unset, or something other than MiroFish answers there | Point `MIROFISH_URL` at MiroFish's backend |
+
+## 7. Forward validation (4.5.3)
+
+Research → Forecast record → **Forward evidence** compares the base forecast, no change, the base with the single
+prompt's cases and the base with MiroFish's cases on the same studies: average miss, RMSE, bias, band coverage and
+width, direction, skill against no change, and breakdowns by catalyst, market regime and volatility. Each paired
+comparison has 80% and 95% intervals from a bootstrap of whole calendar weeks and a verdict (*statistically supported
+improvement*, *suggestive improvement*, *no demonstrated improvement*, *worse*, or *insufficient evidence* below 30
+pairs over 8 weeks). Costs per study and each profile's own comparison show whether more simulation pays. Qualified
+setups' strategy outcomes are graded as *historical hypothetical*, *model-only* or *ungradable*, with fills the
+Trading Desk actually recorded shown apart as *observed*. MiroFish gets no weight in the base forecast.
+
+## 8. Deployment and operations on the Mac (4.6)
+
+### Requirements
+
+- Trade Assistant as before (Python 3.11+, its `.venv`), and a Tradier production token for real-time data.
+- For MiroFish: `git`, [uv](https://docs.astral.sh/uv/) (`brew install uv`; it fetches Python 3.12 for MiroFish), a
+  language-model API key (any OpenAI-compatible endpoint), and a [Zep Cloud](https://app.getzep.com/) key (the
+  pinned MiroFish only connects to Zep Cloud). Docker and Node are not needed.
+
+### Install and configure
+
+```bash
+cd ~/projects/trade-assistant
+git rev-parse --short HEAD           # note the version you are on, in case you roll back
+./update.sh                          # pulls the release, installs packages, lists what changed
+./setup_mirofish.sh install          # ~/projects/MiroFish at 7657031; makes its .env with FLASK_HOST=127.0.0.1
+open -e ~/projects/MiroFish/.env     # LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_NAME, ZEP_API_KEY
+./setup_mirofish.sh start            # 127.0.0.1:5001; log in data/logs/mirofish.log
+```
+
+In Trade Assistant's `.env` (its own; MiroFish's keys never go here):
+
+```dotenv
+DATA_MODE=live
+TRADIER_LIVE_TOKEN=...
+SCENARIO_PROVIDER=mirofish
+SCENARIO_AUTO=1
+MIROFISH_URL=http://127.0.0.1:5001
+# and the spending settings above
+```
+
+Restart the app (`.venv/bin/python run.py`). The first start backs the database up to `data/backups/` and applies
+every migration the database is missing (up to 30; 4.5.x's are 28 to 30: columns and tables added, nothing removed).
+
+### Check, then test for real
+
+```bash
+.venv/bin/python run.py --scenario-check SPY      # free: Tradier, MiroFish levels A and B, settings, circuit, spending
+.venv/bin/python run.py --scenario-smoke SPY      # PAID: one Quick study end to end; asks before spending
+```
+
+The functional test reports each stage (Tradier, readiness, evidence and strategies, the MiroFish simulation and
+report, the cases, the valuation, the decision, the usage record, and the result read back after reopening the
+database) and is shown afterwards by `--scenario-check` and in Research. Enter what your provider charged for it so
+the next estimates are based on a real cost.
+
+### Running it day to day
+
+| Task | How |
+| --- | --- |
+| Start / stop / restart MiroFish | `./setup_mirofish.sh start`, `stop`, `restart` |
+| Is it up? | `./setup_mirofish.sh status`, or `check` for the app's view |
+| Logs | `./setup_mirofish.sh logs` (`logs -f` to follow); the app's own log as before |
+| A failed or stuck study | Research → the study's Scenarios panel: the stage, the reason, Retry or Cancel; *Retry (no new run)* finishes a saved report |
+| Interrupted simulation | Restart the app: left-over steps resume from the saved MiroFish ids; an ambiguous write asks you before a new run |
+| Usage | Study settings → Simulation details → *Simulation usage*; `GET /v3/scenarios/usage` |
+| Back up | Stop the app; copy `data/tradeassist.db` (each start also keeps the newest ten copies in `data/backups/`) |
+
+### Roll back
+
+```bash
+# stop the app (Ctrl+C), then go back to the version you noted (333b81a is 4.5.0)
+git checkout <that version>
+.venv/bin/pip install -q -r requirements.txt
+cp data/backups/<the newest copy from before the update> data/tradeassist.db    # optional: the old database exactly
+.venv/bin/python run.py
+# later, to come forward again:  git checkout main && ./update.sh
+```
+
+Migrations 28 to 30 only add columns and tables, so 4.5.0 also runs on the migrated database; it then ignores
+verification statuses (it would again count a recorded trigger as observed), the usage ledger and the outcome
+records. Restoring the backup undoes the migrations entirely. `./setup_mirofish.sh stop` stops MiroFish either way.
+

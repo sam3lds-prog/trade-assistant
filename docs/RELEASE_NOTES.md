@@ -20,6 +20,33 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.6.0 — Acceptance and release of the 4.6 plan
+
+4.5.1 to 4.5.3 together, checked against the plan's acceptance scenarios, with the deployment and operations guide
+([ONE_CLICK_RESEARCH.md, section 8](ONE_CLICK_RESEARCH.md#8-deployment-and-operations-on-the-mac-46)). **No trading
+permission is added or changed; nothing in these releases places an order.**
+
+| Scenario | Checked by | Result |
+| --- | --- | --- |
+| A Successful research | `tests/test_acceptance_46.py::test_a_successful_research_run` (demo data, MiroFish stand-in) | passes |
+| B MiroFish unavailable | `test_b_mirofish_unavailable` | passes |
+| C Cost over the limit | `test_c_a_cost_over_the_automatic_limit_waits_and_the_budget_still_holds` | passes |
+| D Crash after the paid report | `test_d_...` and the six crash points in `tests/test_v451.py` | passes |
+| E Unverified catalyst | `test_e_...`, `tests/test_opportunity.py`, `tests/test_v451.py` | passes |
+| F Option expiring before the horizon | `test_f_...`, `tests/test_v451.py` | passes |
+| G Forecasting evaluation | `test_g_and_h_...`, `tests/test_v453.py` | passes |
+| H No demonstrated benefit | `tests/test_v453.py::test_scenario_h_...` | passes |
+
+**Real-service validation.** The real self-hosted MiroFish backend at the pinned commit was installed with
+`uv sync` and run on loopback with placeholder keys: levels A and B passed against it, and its real failure of a
+model call came back as a clean provider failure. A complete paid run (graph, agents, simulation, report) needs your
+language-model and Zep Cloud keys and was **not** performed: run `python run.py --scenario-smoke SPY` once they are
+in MiroFish's `.env`. Until it passes, Research says *no real end-to-end run has been checked yet*. No real Tradier
+call was made from the build environment.
+
+An independent review of 4.5.1 and 4.5.2 found 13 defects (three High); all were fixed with regression tests before
+release ([IMPROVEMENTS.md](IMPROVEMENTS.md#46-independent-review)).
+
 ## 4.5.3 — Forecast validation and strategy performance
 
 The third step of the 4.6 plan: whether MiroFish improves forecasts and trading decisions, measured, not assumed. **No
