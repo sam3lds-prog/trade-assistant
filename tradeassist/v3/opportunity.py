@@ -399,6 +399,9 @@ class Opportunities:
                             cur.execute("UPDATE scenario_decisions SET opportunity_id = ? WHERE id = ?", (oid, r["id"]))
                     if d.get("changed") and d["status"] in ("qualified", "watch"):
                         self.notify(study_id, d)
+                    outs = getattr(self.svc, "outcomes", None)            # 4.5.3: frozen once (INSERT OR IGNORE)
+                    if outs is not None and d.get("changed") and d["status"] == "qualified":
+                        outs.freeze(study_id, d, valuation, version)
                 except Exception:  # noqa: BLE001 - the decision stands
                     log.exception("Could not finish publishing decision %s", r["id"])
                 return self.latest(study_id) or {}
@@ -429,6 +432,12 @@ class Opportunities:
                 cur.execute("UPDATE scenario_decisions SET opportunity_id = ? WHERE id = ?", (d["opportunity_id"], did))
         if material and d["status"] in ("qualified", "watch"):
             self.notify(study_id, d)
+        outs = getattr(self.svc, "outcomes", None)              # 4.5.3: a new Qualified setup's decision record is frozen
+        if outs is not None and material and d["status"] == "qualified":
+            try:
+                outs.freeze(study_id, d, valuation, version)
+            except Exception:  # noqa: BLE001 - the outcome record never stops the decision
+                log.exception("Could not freeze the outcome record of %s", did)
         self.svc.bus.publish("scenario.decision", study_id, status=d["status"], decision_id=did, changed=material)
         return d
 

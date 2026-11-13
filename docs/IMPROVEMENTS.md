@@ -1743,3 +1743,18 @@ Existing tests changed: `tests/test_one_click.py`'s fake MiroFish answers the en
 added stage, and its fixture gives MiroFish runs a small known estimate (unknown costs now wait for approval by
 design).
 
+## 4.5.3: forecast validation and strategy performance
+
+| Change | Where | Tests |
+| --- | --- | --- |
+| Provenance on each frozen forecast; signed error and width at grading (migration 30) | `v3/forward.py`, `schema_v45.py` | `test_frozen_forecasts_keep_their_provenance` |
+| Accuracy metrics, skill, breakdowns, borrowed-band label | `v3/forward.py` (`accuracy`, `_by`, `_vol_regimes`) | `test_the_scorecard_compares_the_four_approaches...` |
+| Week-cluster bootstrap and verdicts with minimum pairs and weeks | `v3/forward.py` (`cluster_ci`, `verdict_of`) | the three statistics tests |
+| Costs per study, profile comparison, Scenario H conclusion | `v3/forward.py` (`_costs`, `_conclusion`) | `test_scenario_h_more_expensive_and_not_better...` |
+| Frozen Qualified-setup records, graded by category; observed fills apart | `v3/outcomes.py`, `v3/opportunity.py` | the five outcome tests |
+
+The bootstrap draws whole ISO weeks of target dates with a fixed seed (the same data always gives the same interval).
+Clustering by week handles overlapping windows and market-wide moves; repeated observations of one stock in
+different weeks are not clustered together (a two-way scheme would need far more data than a personal record will
+have), which is said in the scorecard's method note together with the selection of studies run with scenarios.
+

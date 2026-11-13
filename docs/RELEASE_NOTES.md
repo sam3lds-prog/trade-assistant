@@ -20,6 +20,34 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.5.3 — Forecast validation and strategy performance
+
+The third step of the 4.6 plan: whether MiroFish improves forecasts and trading decisions, measured, not assumed. **No
+trading permission is added or changed, and the base forecast is unchanged**: MiroFish still has no weight in it.
+
+- **Four approaches on the same studies**: the base forecast, no change, the base with the single-prompt control's
+  cases, and the base with MiroFish's cases, each frozen before its window with its data cutoff, model version,
+  simulation profile, configuration, catalyst kind and market regime (migration 30).
+- **More honest accuracy**: average miss, RMSE, direction, bias (signed error), band coverage and band width, skill
+  against no change, and breakdowns by horizon, catalyst kind, market regime and volatility (the tercile of the base
+  band's width). No change's band is labelled as the base's, borrowed, and a wide band is never read as accuracy.
+- **Confidence that respects correlation**: each paired difference's interval comes from a bootstrap of whole calendar
+  weeks of target dates, so studies sharing a week (overlapping windows, one market move) are not counted as
+  independent. A comparison needs 30 pairs over 8 weeks; then it reads *statistically supported improvement*,
+  *suggestive improvement*, *no demonstrated improvement*, or *worse than the comparison*; otherwise *insufficient
+  evidence*. One smaller average is never called significant.
+- **What it costs and whether depth pays**: each study's provider and control cost from the usage ledger, the extra
+  dollars per study, and the same comparison per simulation profile. If MiroFish costs more than the single prompt and
+  is not better, the scorecard says so and the cheaper runs stay the default (Scenario H).
+- **Strategy outcomes of Qualified setups**: each one's decision record is frozen (legs, bid and ask, entry and exit
+  rules, projected results, data quality) and graded after its exit session in categories that are never added
+  together: **historical hypothetical** (recorded closes and the contract's own traded close, less half the entry
+  spread; an expired option at its intrinsic value), **model-only** (no trade that session: Black-76 at the realized
+  close, labelled theoretical) and **ungradable**; apart from them, **observed** fills the Trading Desk recorded for
+  the study, realized only once closed. Win rate, net P&L, return on risk, average win and loss, drawdown, worst loss,
+  cost against gross payoff, the rate of options that expired worthless, and how often the direction was right while
+  the strategy lost. Below 20 outcomes a category is too small to judge.
+
 ## 4.5.2 — MiroFish reliability, self-hosting and cost governance
 
 The second step of the 4.6 plan. **No trading permission is added or changed.** Approval here is for simulation
