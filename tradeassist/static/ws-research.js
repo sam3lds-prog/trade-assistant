@@ -1103,18 +1103,39 @@
         if (n !== mineAt) return;
         const pct = v => (isNum(v) ? `${Math.round(100 * v)}%` : "n/a"), pts = v => (isNum(v) ? v.toFixed(2) : "n/a");
         const any = d.variants.some(v => v.n || v.frozen || v.late);
+        const signed = v => (isNum(v) ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}` : "n/a");
+        const usd = v => (isNum(v) ? money(v, 2) : "unknown");
+        const VTONE = { supported: "pass", suggestive: "info", none: "", insufficient: "", worse: "fail" };
+        // 4.5.3: the four approaches on the same studies, with intervals that respect correlated observations.
+        const st = d.strategies || {}, cats = st.categories || {};
+        const catRow = (k, c) => el("tr", {}, el("td", { text: c.label }), el("td", { class: "num", text: String(c.n || 0) }),
+          el("td", { class: "num", text: c.n ? pct(c.win_rate) : "" }), el("td", { class: "num", text: c.n ? money(c.net_pnl, 0) : "" }),
+          el("td", { class: "num", text: c.n && isNum(c.return_on_risk) ? pct(c.return_on_risk) : "" }),
+          el("td", { class: "num", text: c.n ? money(c.max_drawdown, 0) : "" }), el("td", { class: "num", text: c.n ? money(c.worst_loss, 0) : "" }),
+          el("td", { text: c.n ? (c.enough ? "" : `fewer than ${st.min_outcomes}: too few to judge`) : "" }));
         fwd.replaceChildren(el("h4", { text: `Forward evidence: scenarios against the base (${horizon.value}-session studies)` }),
-          any ? table([{ label: "Forecast", cell: v => v.label }, { label: "Graded", num: true, cell: v => String(v.n) },
+          any ? table([{ label: "Forecast", cell: v => el("span", { title: v.band_note || "" }, v.label) }, { label: "Graded", num: true, cell: v => String(v.n) },
             { label: "Waiting", num: true, cell: v => String(v.frozen) }, { label: "Late", num: true, cell: v => String(v.late) },
-            { label: "Average miss", num: true, cell: v => pts(v.mae) }, { label: "Inside the band", num: true, cell: v => pct(v.coverage) },
-            { label: "Direction right", num: true, cell: v => pct(v.direction_hits) },
+            { label: "Average miss", num: true, cell: v => pts(v.mae) }, { label: "RMSE", num: true, cell: v => pts(v.rmse) },
+            { label: "Bias", num: true, cell: v => signed(v.bias) }, { label: "Inside the band", num: true, cell: v => pct(v.coverage) },
+            { label: "Band width", num: true, cell: v => pts(v.width) }, { label: "Direction right", num: true, cell: v => pct(v.direction_hits) },
+            { label: "Skill vs no change", num: true, cell: v => (isNum(v.skill_vs_no_change) ? pct(v.skill_vs_no_change) : "") },
             { label: "Time", num: true, cell: v => (isNum(v.latency_median_s) ? `${Math.round(v.latency_median_s)} s` : "") },
             { label: "Tokens", num: true, cell: v => (v.tokens ? v.tokens.toLocaleString() : "") }], d.variants)
             : WS.empty("No scenario study has been frozen yet: run a 1- or 5-session study with scenarios."),
-          ...d.pairs.filter(x => x.n).map(x => el("p", { class: "small", text: x.text })),
-          d.cases.n ? el("p", { class: "small", text: `Conditional cases whose trigger was observed: ${d.cases.n}, average miss ${pts(d.cases.mae)} points, ${pct(d.cases.coverage)} inside their band.` }) : "",
+          ...d.pairs.filter(x => x.n).map(x => el("p", { class: "small", "data-verdict": x.verdict }, statusTag(VTONE[x.verdict] || "", x.verdict_label || x.verdict), " ", x.text)),
+          d.cases.n ? el("p", { class: "small", text: `Conditional cases whose trigger was verified before the outcome: ${d.cases.n}, average miss ${pts(d.cases.mae)} points, ${pct(d.cases.coverage)} inside their band.` }) : "",
           d.setups.n ? el("p", { class: "small", text: `Qualified setups: ${d.setups.n}; the stock went their way ${pct(d.setups.went_its_way)} of the time.` }) : "",
           el("p", { class: "small" }, el("strong", { text: "Verdict: " }), d.verdict),
+          d.costs ? el("p", { class: "small", text: `Cost: ${d.costs.words}.` }) : "",
+          (d.profiles || []).length ? el("p", { class: "small", text: `By simulation profile: ${d.profiles.map(p => `${p.profile} ${p.n} pair(s), miss ${pts(p.mae)}, ${p.vs_base.verdict_label}, ${usd(p.average_cost_usd)} per study`).join("; ")}.` }) : "",
+          cats.historical_hypothetical ? el("details", { class: "ws-more ws-strategy-outcomes" }, el("summary", { text: "Strategy outcomes of Qualified setups" }),
+            el("table", { class: "ws-table small" }, el("thead", {}, el("tr", {}, ...["Category", "Graded", "Won", "Net P&L", "Return on risk", "Max drawdown", "Worst", ""].map(h => el("th", { text: h })))),
+              el("tbody", {}, ...["observed", "historical_hypothetical", "model_only"].filter(k => cats[k]).map(k => catRow(k, cats[k])))),
+            el("p", { class: "small muted", text: `Open: ${(st.counts || {}).open || 0}; ungradable: ${(st.counts || {}).ungradable || 0}. ${st.note}` })) : "",
+          el("details", { class: "ws-more" }, el("summary", { text: "Breakdowns and method" }),
+            ...d.variants.filter(v => v.n).map(v => el("p", { class: "small", text: `${v.label}: by catalyst ${Object.entries(v.by_catalyst || {}).map(([k, x]) => `${k} ${pts(x.mae)} (${x.n})`).join(", ") || "n/a"}; by market regime ${Object.entries(v.by_market_regime || {}).map(([k, x]) => `${k} ${pts(x.mae)} (${x.n})`).join(", ") || "n/a"}; by volatility ${Object.entries(v.by_volatility || {}).map(([k, x]) => `${k} ${pts(x.mae)} (${x.n})`).join(", ") || "n/a"}.` })),
+            el("p", { class: "small muted", text: `${d.method} Late: ${(d.missing || {}).late || 0}; ungradable: ${(d.missing || {}).ungradable || 0}; waiting: ${(d.missing || {}).waiting || 0}.` })),
           el("p", { class: "small muted", text: d.note }));
       } catch (e) { if (e !== WS.GONE && n === mineAt) fwd.replaceChildren(el("p", { class: "error", text: e.message })); }
     }
