@@ -38,13 +38,13 @@ install() {
   if [ -d "$DIR/.git" ]; then
     echo "MiroFish is already at $DIR."
   else
-    echo "Cloning the official MiroFish into $DIR…"
+    echo "Cloning the official MiroFish into ${DIR}..."
     git clone --quiet "$REPO" "$DIR"
   fi
   git -C "$DIR" fetch --quiet origin "$PIN" 2>/dev/null || git -C "$DIR" fetch --quiet origin
   git -C "$DIR" checkout --quiet "$PIN"
   echo "At the reviewed commit ${PIN:0:7} (Trade Assistant is tested against this one; upgrade only after a review)."
-  echo "Installing its backend (uv sync; uv brings Python 3.12 if this Mac lacks it)…"
+  echo "Installing its backend (uv sync; uv brings Python 3.12 if this Mac lacks it)..."
   (cd "$DIR/backend" && uv sync --quiet --python 3.12)
   if [ ! -f "$DIR/.env" ]; then
     # MiroFish's example ends with an optional "boost" model block that must be absent unless used: it is left out.
@@ -64,7 +64,7 @@ start() {
   grep -q '^FLASK_HOST=127.0.0.1' "$DIR/.env" 2>/dev/null || { echo "Refusing to start: $DIR/.env must have FLASK_HOST=127.0.0.1 (this computer only)."; exit 1; }
   grep -Eq '^LLM_API_KEY=.+' "$DIR/.env" && ! grep -q '^LLM_API_KEY=your_api_key_here' "$DIR/.env" \
     || { echo "Set LLM_API_KEY (and LLM_BASE_URL, LLM_MODEL_NAME, ZEP_API_KEY) in $DIR/.env first."; exit 1; }
-  echo "Starting MiroFish's backend on 127.0.0.1:$PORT (log: $LOG)…"
+  echo "Starting MiroFish's backend on 127.0.0.1:$PORT (log: $LOG)..."
   (cd "$DIR/backend" && FLASK_HOST=127.0.0.1 FLASK_PORT="$PORT" nohup uv run python run.py >> "$LOG" 2>&1 & echo $! > "$PIDFILE")
   for _ in $(seq 1 30); do
     if health >/dev/null; then echo "Up: $(health)"; return; fi
