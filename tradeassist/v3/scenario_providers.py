@@ -83,6 +83,35 @@ def backoff(polls: int, first: float = 5.0, most: float = 30.0) -> float:
 WRITES = ("ontology", "sim_create", "start")      # 4.5.2: writes the server does not make safe to repeat
 
 
+def rounds_reaching_active_hours(config: Any, wanted: int) -> int:
+    """Rounds to ask for so that `wanted` rounds fall in hours when some agent is active.
+
+    MiroFish starts at simulated hour 0 and skips rounds with no active agent (agents default to hours 8-22), so
+    a short cap like 4 rounds at 60 minutes each never runs an agent. Skipped rounds make no model calls."""
+    wanted = max(1, int(wanted))
+    if not isinstance(config, dict):
+        return wanted
+    tc = config.get("time_config") or {}
+    try:
+        mpr = max(1, int(tc.get("minutes_per_round") or 60))
+    except (TypeError, ValueError):
+        mpr = 60
+    hours: set[int] = set()
+    for a in config.get("agent_configs") or []:
+        if isinstance(a, dict):
+            ah = a.get("active_hours")
+            hours.update(int(h) for h in (ah if isinstance(ah, list) else range(8, 23)) if isinstance(h, (int, float)))
+    if not hours:
+        hours = set(range(8, 23))
+    active = 0
+    for r in range(0, 24 * 60 // mpr * 2 + wanted * 2):
+        if (r * mpr // 60) % 24 in hours:
+            active += 1
+            if active >= wanted:
+                return r + 1
+    return wanted
+
+
 class MiroFish:
     name = "mirofish"
     label = "MiroFish"
@@ -96,7 +125,9 @@ class MiroFish:
         self.max_rounds = int(max_rounds)
         self.poll_first, self.poll_most = poll_first, poll_most
         self.max_agents = int(max_agents) if max_agents else None
-        self.platform = platform if platform in ("parallel", "reddit", "twitter") else "parallel"
+        # Only MiroFish's parallel runner logs round_end/simulation_end, which its run-status needs to report progress
+        # and completion; the single-platform runners leave run-status at round 0 until the time cap. Always parallel.
+        self.platform = "parallel"
         self.parallel_profiles = max(1, int(parallel_profiles))
         self.profile = profile
 
@@ -329,8 +360,16 @@ class MiroFish:
         return self._poll(state, "agents", f"preparing the agents ({data.get('progress') or 0}%)")
 
     def _start(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
+        rounds = state.get("rounds_sent")
+        if not rounds:
+            try:
+                cfg = self._req("GET", f"/api/simulation/{state['simulation_id']}/config", write=False, timeout=30)
+            except (Transient, Failed):
+                cfg = None
+            rounds = rounds_reaching_active_hours(cfg, self.max_rounds)
+            state = {**state, "rounds_sent": rounds}
         self._req("POST", "/api/simulation/start", write=True, timeout=60,
-                  json={"simulation_id": state["simulation_id"], "max_rounds": self.max_rounds, "enable_graph_memory_update": False,
+                  json={"simulation_id": state["simulation_id"], "max_rounds": rounds, "enable_graph_memory_update": False,
                         "platform": self.platform})
         return Step(self._go(state, "run_wait", started=True), next_in=self.poll_first, stage="simulation", detail="simulation started")
 

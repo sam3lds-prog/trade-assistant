@@ -76,7 +76,7 @@ def _paid(fake):
 def test_profiles_follow_the_settings_and_deep_always_asks():
     s = Settings(data_mode="demo", mirofish_max_rounds=10, mirofish_max_agents=40, mirofish_run_minutes=45)
     q, st, d = (G.profile(s, k) for k in G.PROFILE_KEYS)
-    assert (q["rounds"], q["agents"], q["platform"], q["minutes"]) == (4, 20, "reddit", 20.0)
+    assert (q["rounds"], q["agents"], q["platform"], q["minutes"]) == (4, 20, "parallel", 20.0)
     assert (st["rounds"], st["agents"], st["platform"], st["minutes"]) == (10, 40, "parallel", 45.0)
     assert (d["rounds"], d["agents"], d["minutes"]) == (30, 120, 90.0) and d["always_ask"] and not q["always_ask"]
     assert q["load"] < st["load"] < d["load"]
@@ -175,7 +175,7 @@ def test_the_profile_reaches_mirofish_and_a_large_graph_asks_before_any_agent_is
     assert svc.pipeline.view(sid)["status"] == "complete"
     prep = next(j for u, j in sent if u == "simulation/prepare")
     start = next(j for u, j in sent if u == "simulation/start")
-    assert prep["parallel_profile_count"] == 3 and start["platform"] == "reddit" and start["max_rounds"] == 4
+    assert prep["parallel_profile_count"] == 3 and start["platform"] == "parallel" and start["max_rounds"] == 4
 
 
 def test_a_budget_that_is_used_up_refuses_and_keeps_the_study(app, use):
@@ -501,3 +501,17 @@ def test_an_approval_gated_start_starts_the_control_when_approved(app, use, monk
     assert started == [] and svc.pipeline.view(sid)["status"] == "awaiting_approval"
     c.post(f"/v3/studies/{sid}/pipeline/approve", json={})
     assert started == [sid]
+
+
+def test_rounds_reach_active_hours():
+    from tradeassist.v3.scenario_providers import rounds_reaching_active_hours as f
+    assert f(None, 4) == 4
+    assert f({"time_config": {"minutes_per_round": 60}, "agent_configs": [{}]}, 4) == 12      # hours 8..11
+    assert f({"time_config": {"minutes_per_round": 30}, "agent_configs": [{"active_hours": [0, 1]}]}, 4) == 4
+    assert f({"time_config": {"minutes_per_round": 60}, "agent_configs": [{"active_hours": [20]}]}, 1) == 21
+
+
+def test_quick_profile_uses_parallel_runner():
+    from tradeassist.config import Settings
+    from tradeassist.v3.simulation import profile
+    assert profile(Settings(), "quick")["platform"] == "parallel"
