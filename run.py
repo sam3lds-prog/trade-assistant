@@ -147,7 +147,6 @@ def scenario_smoke(settings, symbol: str, profile: str, yes: bool, *, wait_secon
 
     from tradeassist.service import TradeAssistant
     from tradeassist.tradier_check import check_tradier
-    from tradeassist.v3 import install as install_v3
     from tradeassist.v3 import simulation as G
     from tradeassist.v3.research import StudyIn
     from tradeassist.v3.workers import workers_for
@@ -155,8 +154,9 @@ def scenario_smoke(settings, symbol: str, profile: str, yes: bool, *, wait_secon
         print("The functional test is for MiroFish: set MIROFISH_URL (and SCENARIO_PROVIDER=mirofish).")
         return 2
     run_settings = replace(settings, desk_worker="off", scenario_provider="mirofish", scenario_default_profile=profile)
+    from tradeassist.api import create_app
     svc = TradeAssistant(run_settings)
-    install_v3(svc)
+    create_app(run_settings, svc)                      # wired exactly as the web app wires it (event bus, Research, pipeline)
     stages: list[dict[str, object]] = []
     started = time.time()
 
@@ -244,7 +244,7 @@ def scenario_smoke(settings, symbol: str, profile: str, yes: bool, *, wait_secon
     u = p.get("usage") or {}
     stage("usage record", bool(u), f"{u.get('agents')} agents, {u.get('rounds')} rounds; cost {u.get('words')}" if u else "missing")
     again = TradeAssistant(run_settings)
-    install_v3(again)
+    create_app(run_settings, again)
     p2 = again.pipeline.view(study_id) or {}
     stage("read back after reopening the database", p2.get("version_id") == v and (p2.get("valuation") or {}).get("id") == val.get("id"),
           f"status {p2.get('status')}, version {p2.get('version_id')}")
