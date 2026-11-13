@@ -73,7 +73,24 @@ const CHARTX = (() => {
   // fingers, clamped to the range); the narrowed or widened range around it.
   function pinchOf(touches) {
     const a = touches[0], b = touches[1];
-    return { dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), y: (a.clientY + b.clientY) / 2 };
+    return { dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2,
+             dx: Math.abs(a.clientX - b.clientX), dy: Math.abs(a.clientY - b.clientY) };
+  }
+  // 4.6.1: a two-finger pinch zooms each axis by how far the fingers moved apart along it: spread them sideways for
+  // time, up and down for price, diagonally for both. An axis the fingers barely span (under 40 px) is left alone,
+  // so a sideways pinch does not jitter the price axis.
+  function pinchFactors(prev, now, minSpan = 40) {
+    const f = (a, b) => (a >= minSpan && b >= minSpan ? b / a : 1);
+    return { fx: f(prev.dx, now.dx), fy: f(prev.dy, now.dy) };
+  }
+  // The visible bars narrowed (factor > 1) or widened around the bar at `anchor`, kept between minBars and maxBars wide.
+  function zoomLogical(range, factor, anchor, minBars = 5, maxBars = 5000) {
+    if (!range || !(factor > 0)) return range;
+    const width = range.to - range.from;
+    const w = Math.min(maxBars, Math.max(minBars, width / Math.min(4, Math.max(0.25, factor))));
+    const a = typeof anchor === "number" && isFinite(anchor) ? Math.min(range.to, Math.max(range.from, anchor)) : (range.from + range.to) / 2;
+    const left = width > 0 ? (a - range.from) / width : 0.5;
+    return { from: a - left * w, to: a + (1 - left) * w };
   }
   function zoomCentre(price, range) {
     if (typeof price !== "number" || !isFinite(price)) return (range.min + range.max) / 2;
@@ -86,7 +103,7 @@ const CHARTX = (() => {
     if (max - min < floor) return range;                                 // zoomed in as far as is readable
     return { min, max };
   }
-  return { clampWindow, overlayLines, scenarioRows, pinchOf, zoomCentre, zoomRange };
+  return { clampWindow, overlayLines, scenarioRows, pinchOf, pinchFactors, zoomLogical, zoomCentre, zoomRange };
 })();
 
 // The Analyze screen's live chart: a new analysis disposes the last (v2.js). 3.0: a chart no longer disposes others
@@ -99,10 +116,14 @@ function interactiveChart(symbol) {
     data: null, sim: null, selecting: false, selection: null, userWindow: false, request: 0, minCorr: 0.75, horizon: null, matchesShown: 5,
     view: null,                                // the logical range to show after a draw, when not the range
     lines: {},                                 // 2.13: lines other widgets draw on the chart (the what-if paths), by key
-    vzoom: null };                             // 2.14: the price range shown when zoomed vertically (null = automatic)
+    vzoom: null,                               // 2.14: the price range shown when zoomed vertically (null = automatic)
+    hidden: new Set() };                       // 4.6.1: legend lines switched off, by key
   const listeners = [];                        // 2.13: told when the data or the pattern search changes
   const chartBox = el("div", { class: "lw-chart" });
-  const readout = el("div", { class: "small muted lw-readout", text: "Hover the chart for the bar's figures. Drag to pan, scroll to zoom." });
+  const readout = el("div", { class: "small muted lw-readout", text: "Hover the chart for the bar's figures. Drag to pan, scroll to zoom time, pinch to zoom; drag the price axis to stretch prices." });
+  // 4.6.1: lines drawn with a `legend` label are named here, not on the price axis, so the scenarios do not pile up
+  // labels on the right. Click an entry to hide or show its line.
+  const legendBox = el("div", { class: "lw-legend", role: "list", "aria-label": "Lines on the chart" });
   const info = el("div", { class: "small lw-info" });
   const notes = el("div");
   const err = el("div", { class: "error", role: "alert" });
@@ -293,11 +314,51 @@ function interactiveChart(symbol) {
       const pts = (ln.points || []).filter(p => p && isNum(p.time) && isNum(p.value)).sort((a, b) => a.time - b.time)
         .filter((p, i, arr) => i === 0 || p.time > arr[i - 1].time);
       if (pts.length < 2) continue;
+      const inLegend = !!ln.legend;
       const s = chart.addSeries(lib.LineSeries, zoomed({ color: ln.color, lineWidth: ln.width || 2, lineStyle: ln.style || 0, priceLineVisible: false,
-        lastValueVisible: !!ln.title, crosshairMarkerVisible: false, title: ln.title || "" }));
+        lastValueVisible: !inLegend && !!ln.title, crosshairMarkerVisible: false, title: inLegend ? "" : ln.title || "",
+        visible: !state_.hidden.has(ln.key) }));
       s.setData(pts);
       lineSeries.push(s);
     }
+    drawLegend();
+  }
+  function drawLegend() {
+    const items = Object.values(state_.lines).filter(ln => ln.legend && (ln.points || []).length >= 2);
+    if (!items.length) { legendBox.replaceChildren(); legendBox.hidden = true; return; }
+    if (legendBox.parentNode !== chartBox) chartBox.appendChild(legendBox);
+    legendBox.hidden = false;
+    // Lines that share a `legendShare` (a band's two edges) are one entry, switched together, showing both ends.
+    const entries = [];
+    for (const ln of items) {
+      const share = ln.legendShare || ln.key;
+      const e = entries.find(x => x.share === share);
+      if (e) e.lines.push(ln); else entries.push({ share, lines: [ln], legend: ln.legend, group: ln.legendGroup || "", color: ln.color, style: ln.style });
+    }
+    const groups = [];
+    for (const e of entries) {
+      let row = groups.find(x => x.name === e.group);
+      if (!row) groups.push(row = { name: e.group, items: [] });
+      row.items.push(e);
+    }
+    legendBox.replaceChildren(...groups.map(g => el("div", { class: "lw-legend-group" },
+      g.name ? el("span", { class: "lw-legend-head", text: g.name }) : "",
+      ...g.items.map(en => {
+        const off = en.lines.every(ln => state_.hidden.has(ln.key));
+        const ends = en.lines.map(ln => ln.points[ln.points.length - 1]).map(p => p && p.value).filter(isNum).sort((a, b) => a - b);
+        const value = !ends.length ? "" : ends.length === 1 ? money(ends[0]) : `${money(ends[0])}–${money(ends[ends.length - 1])}`;
+        const b = el("button", { type: "button", role: "listitem", class: `lw-legend-item${off ? " off" : ""}`, "aria-pressed": off ? "false" : "true",
+          title: `${off ? "Show" : "Hide"} ${en.legend}` },
+          el("span", { class: `lw-swatch${en.style ? " dashed" : ""}`, style: `border-color: ${en.color}` }),
+          el("span", { text: en.legend }),
+          value ? el("span", { class: "muted", text: ` ${value}` }) : "");
+        b.addEventListener("click", e => {
+          e.stopPropagation();
+          for (const ln of en.lines) { if (off) state_.hidden.delete(ln.key); else state_.hidden.add(ln.key); }
+          drawLines();
+        });
+        return b;
+      }))));
   }
   // 2.13: draw (or replace) a set of lines by key; `lines` is [{key, points:[{time,value}], color, width, style, title}].
   // Keys that start with `prefix` and are not in the new set are removed. Drawn in place, without a rebuild.
@@ -375,21 +436,53 @@ function interactiveChart(symbol) {
     applyVZoom();
   }
   function paneY(clientY) { return clientY - chartBox.getBoundingClientRect().top; }
-  let pinch = null;                                                       // {dist, y} of the last two-finger move
-  chartBox.addEventListener("touchstart", e => { if (e.touches.length === 2) pinch = CHARTX.pinchOf(e.touches); else pinch = null; }, { passive: true });
+  function paneX(clientX) { return clientX - chartBox.getBoundingClientRect().left; }
+  // 4.6.1: the time axis zoomed by the same gestures, around the bar under the fingers (the library's own pinch
+  // and ctrl+wheel zoom time only, and by a different amount, so they are handled here instead).
+  function zoomTime(factor, x) {
+    if (!chart || !state_.data || !(factor > 0) || factor === 1) return;
+    const ts = chart.timeScale(), vr = ts.getVisibleLogicalRange();
+    if (!vr) return;
+    const anchor = ts.coordinateToLogical(x);
+    const r = CHARTX.zoomLogical({ from: vr.from, to: vr.to }, factor, anchor, 5, Math.max(50, state_.data.bars.length * 2));
+    if (r) ts.setVisibleLogicalRange(r);
+  }
+  function zoomBoth(fx, fy, clientX, clientY) {
+    if (fx !== 1) zoomTime(fx, paneX(clientX));
+    if (fy !== 1) zoomPrice(fy, paneY(clientY));
+  }
+  // Touch screens: two fingers zoom each axis by how they spread (see pinchFactors). Captured before the library
+  // sees it, so the library's time-only pinch does not run as well; one finger still pans as before.
+  let pinch = null;                                                       // the last two-finger position
+  chartBox.addEventListener("touchstart", e => { pinch = e.touches.length === 2 ? CHARTX.pinchOf(e.touches) : null; }, { passive: true, capture: true });
   chartBox.addEventListener("touchmove", e => {
     if (e.touches.length !== 2) return;
+    e.preventDefault(); e.stopPropagation();
     const now = CHARTX.pinchOf(e.touches);
-    if (pinch && pinch.dist > 0 && now.dist > 0) zoomPrice(now.dist / pinch.dist, paneY(now.y));
+    if (pinch) { const f = CHARTX.pinchFactors(pinch, now); zoomBoth(f.fx, f.fy, now.x, now.y); }
     pinch = now;
-  }, { passive: true });
-  chartBox.addEventListener("touchend", () => { pinch = null; }, { passive: true });
+  }, { passive: false, capture: true });
+  chartBox.addEventListener("touchend", e => { pinch = e.touches && e.touches.length === 2 ? CHARTX.pinchOf(e.touches) : null; }, { passive: true, capture: true });
+  // A trackpad pinch in Chrome, Edge and Firefox arrives as a wheel with ctrlKey. It carries how much, not which way,
+  // so it zooms both axes together, like magnifying the picture. A plain wheel still zooms time (the library).
   chartBox.addEventListener("wheel", e => {
-    // A trackpad pinch arrives as a wheel with ctrlKey; the library zooms time on it, this adds the price axis.
     if (!e.ctrlKey || !state_.data) return;
+    e.preventDefault(); e.stopPropagation();
     const dy = e.deltaY * (e.deltaMode === 1 ? 32 : e.deltaMode === 2 ? 120 : 1);   // lines and pages to pixels, as the library does
-    zoomPrice(Math.exp(-dy * 0.005), paneY(e.clientY));
-  }, { passive: true });
+    const f = Math.exp(-dy * 0.01);
+    zoomBoth(f, f, e.clientX, e.clientY);
+  }, { passive: false, capture: true });
+  // Safari on a Mac sends a trackpad pinch as gesture events (scale only): both axes together, as above.
+  let gestureScale = 1;
+  chartBox.addEventListener("gesturestart", e => { e.preventDefault(); gestureScale = 1; }, { passive: false });
+  chartBox.addEventListener("gesturechange", e => {
+    e.preventDefault();
+    if (!state_.data || !(e.scale > 0)) return;
+    const f = e.scale / gestureScale;
+    gestureScale = e.scale;
+    zoomBoth(f, f, e.clientX, e.clientY);
+  }, { passive: false });
+  chartBox.addEventListener("gestureend", e => { e.preventDefault(); gestureScale = 1; }, { passive: false });
   function showProjection(a, b) {
     // Show the window and what the matches did next, projected past the last bar.
     const ahead = state_.sim && state_.sim.matches.length ? (state_.sim.future_times || []).length : 0;

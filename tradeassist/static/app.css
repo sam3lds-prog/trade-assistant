@@ -505,6 +505,19 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .lw-chart.refetching { opacity: 0.6; }
 .lw-selection { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: 0.12; pointer-events: none; z-index: 2; }
 .lw-readout { min-height: 1.4em; margin-top: 6px; }
+/* 4.6.1: the chart's legend for overlay lines (forecast, band, catalyst cases), instead of labels on the price axis */
+.lw-legend { position: absolute; top: 6px; left: 6px; z-index: 3; display: flex; flex-direction: column; gap: 2px; max-width: min(60%, 360px);
+  padding: 4px 6px; border-radius: 6px; background: color-mix(in srgb, var(--bg, #fff) 85%, transparent); border: 1px solid var(--line, #ddd);
+  font-size: 11px; line-height: 1.3; pointer-events: auto; }
+.lw-legend[hidden] { display: none; }
+.lw-legend-group { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
+.lw-legend-head { font-weight: 600; margin-right: 2px; }
+.lw-legend-item { display: inline-flex; align-items: center; gap: 4px; padding: 1px 2px; border: 0; background: transparent; color: inherit;
+  font: inherit; cursor: pointer; border-radius: 4px; }
+.lw-legend-item:hover { background: color-mix(in srgb, var(--line, #ddd) 50%, transparent); }
+.lw-legend-item.off { opacity: 0.45; text-decoration: line-through; }
+.lw-swatch { display: inline-block; width: 16px; height: 0; border-top: 2px solid; }
+.lw-swatch.dashed { border-top-style: dashed; }
 .lw-info { min-height: 1.2em; margin: 4px 0; }
 .lw-find { align-items: center; gap: 10px; margin-top: 8px; }
 .lw-find input[type="range"] { width: 120px; vertical-align: middle; }

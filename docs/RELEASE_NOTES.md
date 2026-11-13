@@ -20,6 +20,25 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.6.1 — MiroFish runs finish; time cap from approval; chart pinch and legend
+
+- **A finished simulation no longer hangs at its last round.** After its last round, MiroFish's runner stays open,
+  waiting for interview commands, so its run status stayed "running" (for example "12 of 12") until the time cap. Once
+  every platform has logged its end, the app now closes the environment (`/api/simulation/close-env`, no model
+  calls). If it is still open after three tries, the app stops it. Either way the run counts as finished, not as
+  stopped early, and goes on to its report.
+- **Every run uses MiroFish's parallel runner.** It is the only runner that reports round progress and completion.
+  The app also asks for enough rounds to reach the hours when the agents are active (MiroFish's clock starts at
+  midnight). Rounds with no active agent are skipped and cost nothing.
+- **The time cap starts when you approve.** Approving a run restarts the clock, so building the graph before the
+  approval and waiting for it do not count. The study shows the clock as "4 min 10 s of its 20 min time cap".
+- **Pinch zoom works on both axes.** On a touch screen, spreading two fingers sideways zooms time, up and down zooms
+  prices, and diagonally zooms both. A trackpad pinch (ctrl+wheel in Chrome, Edge and Firefox; gesture events in
+  Safari) zooms both axes together. Scrolling still zooms time, and dragging the price axis still stretches prices.
+- **The forecast, its band and the catalyst cases are named in a legend** at the chart's top left, grouped as
+  Forecast and Catalyst, each with its end price. Their labels no longer pile up on the price axis. Clicking an
+  entry hides or shows its line.
+
 ## 4.6.0 — Acceptance and release of the 4.6 plan
 
 4.5.1 to 4.5.3 together, checked against the plan's acceptance scenarios, with the deployment and operations guide

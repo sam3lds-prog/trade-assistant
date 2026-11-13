@@ -96,6 +96,24 @@ def _ts(s: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _round1(x: float | None) -> float | None:
+    return None if x is None else round(x, 1)
+
+
+def cap_seconds(ext: dict[str, Any], end: datetime | None = None) -> float | None:
+    """4.6.1: seconds counted against the run's time cap. The clock starts when the run starts, or again when you approve
+    it (whichever is later); time paused waiting for an approval is not counted."""
+    starts = [t for t in (_ts(ext.get("started_at")), _ts(ext.get("clock_from"))) if t is not None]
+    if not starts:
+        return None
+    end = end or _now()
+    out = (end - max(starts)).total_seconds() - float(ext.get("paused_seconds") or 0.0)
+    paused = _ts(ext.get("paused_at"))
+    if paused is not None and paused < end:
+        out -= (end - max(paused, max(starts))).total_seconds()
+    return max(0.0, out)
+
+
 def stage_label(key: str, provider: str) -> str:
     return {"evidence": "Evidence and strategies", "provider": {"mirofish": "MiroFish", "ai": "Single AI call", "demo": "Demo provider"}.get(provider, provider),
             "paths": "Price paths and valuation", "findings": "Findings"}[key]
@@ -445,9 +463,11 @@ class Pipeline:
         if (ext.get("approval") or {}).get("code") == "agents_unknown":
             state["agents_unknown_approved"] = True
             ext["state"] = state
-        if ext.get("paused_at"):
-            paused = _ts(ext.pop("paused_at"))
-            ext["paused_seconds"] = float(ext.get("paused_seconds") or 0.0) + max(0.0, (_now() - paused).total_seconds() if paused else 0.0)
+        # 4.6.1: the time cap's clock starts again when you approve: the graph built before the approval and the wait
+        # for it are not counted against the simulation's time.
+        ext.pop("paused_at", None)
+        ext["paused_seconds"] = 0.0
+        ext["clock_from"] = C.utc_now()
         ext.update(approval=approval, estimate=adm["estimate"], profile=prof["key"], run_minutes=prof["minutes"], admitted=True)
         self._save_external(r["id"], ext)
         G.Ledger(self.svc).open(self._run(r["id"]), "provider", prof["key"], adm["estimate"], approval)
@@ -601,10 +621,9 @@ class Pipeline:
             ext["started_at"] = C.utc_now()
             self._save_external(run_id, ext, status="running")
             self._stage_of(r, stages={"provider": {"state": "running", "detail": f"{prov.label} started"}})
-        started = _ts(ext.get("started_at")) or _now()
         minutes = float(ext.get("run_minutes") or s.mirofish_run_minutes)
-        # Time spent waiting for your approval is not the run's time.
-        if (_now() - started).total_seconds() - float(ext.get("paused_seconds") or 0.0) > minutes * 60.0:
+        # Time spent waiting for your approval, and anything before it, is not the run's time.
+        if (cap_seconds(ext) or 0.0) > minutes * 60.0:
             return self._stop(r, ext, f"it took longer than its time cap ({minutes:g} minutes; MIROFISH_RUN_MINUTES and the profile)")
         try:
             out = prov.advance(self._ctx(r), ext.get("state") or {})
@@ -1161,6 +1180,8 @@ class Pipeline:
                 run = {"id": r["id"], "provider": r["provider"], "status": r["status"], "stage": ext.get("stage"), "detail": ext.get("detail"),
                        "created_at": r["created_at"], "started_at": ext.get("started_at"), "completed_at": r["completed_at"],
                        "elapsed_seconds": round(((_ts(r["completed_at"]) or _now()) - started).total_seconds(), 1) if started else None,
+                       "cap_seconds": _round1(cap_seconds(ext, _ts(r["completed_at"]))),
+                       "run_minutes": ext.get("run_minutes"),
                        "remote": {k: state.get(k) for k in ("project_id", "graph_id", "simulation_id", "report_id") if state.get(k)},
                        "error": r["error"], "model": ext.get("model"), "catalyst_basis": ext.get("catalyst_basis"),
                        "report_excerpt": r["report_excerpt"], "seed_id": r["seed_id"], "rounds": state.get("rounds"),
