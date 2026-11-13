@@ -624,7 +624,10 @@ class Pipeline:
         minutes = float(ext.get("run_minutes") or s.mirofish_run_minutes)
         # Time spent waiting for your approval, and anything before it, is not the run's time.
         if (cap_seconds(ext) or 0.0) > minutes * 60.0:
-            return self._stop(r, ext, f"it took longer than its time cap ({minutes:g} minutes; MIROFISH_RUN_MINUTES and the profile)")
+            # 4.6.2: the message says where it was, so a slow graph build is told apart from a slow simulation.
+            where = ext.get("detail") or (ext.get("state") or {}).get("stage")
+            return self._stop(r, ext, f"it took longer than its time cap ({minutes:g} minutes; MIROFISH_RUN_MINUTES and the profile)"
+                                      + (f" while {where}" if where else ""))
         try:
             out = prov.advance(self._ctx(r), ext.get("state") or {})
         except Exception as exc:  # noqa: BLE001 - a provider bug must not leave the run hanging
