@@ -91,7 +91,7 @@ def profile(settings: Any, key: str | None) -> dict[str, Any]:
     rounds, agents, minutes = int(s.mirofish_max_rounds), int(s.mirofish_max_agents), float(s.mirofish_run_minutes)
     if key == "quick":
         p = {"rounds": max(1, min(4, rounds)), "agents": max(2, min(20, agents // 2 or 2)), "minutes": max(2.0, min(20.0, minutes)),
-             "platform": "reddit", "parallel_profiles": 3, "always_ask": False}
+             "platform": "parallel", "parallel_profiles": 3, "always_ask": False}
     elif key == "standard":
         p = {"rounds": rounds, "agents": agents, "minutes": minutes, "platform": "parallel", "parallel_profiles": 5, "always_ask": False}
     else:
