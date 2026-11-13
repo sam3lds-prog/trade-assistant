@@ -12,6 +12,8 @@ def install(svc: Any) -> None:
     if getattr(svc, "_v3_installed", False):
         return
     import importlib
+    from ..bus import bus_for
+    bus_for(svc)                 # the event bus exists before any area's start-up work publishes on it
     for name in AREAS:
         importlib.import_module(f"{__name__}.{name}").install(svc)
     svc._v3_installed = True
