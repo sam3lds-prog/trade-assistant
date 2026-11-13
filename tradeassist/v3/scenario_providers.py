@@ -390,13 +390,36 @@ class MiroFish:
         if rs in ("completed", "stopped"):
             # 4.5.1: a simulation stopped on the server before its last round is not a finished one, and says so.
             cur, total = st.get("current_round"), st.get("total_rounds")
-            early = rs == "stopped" or (isinstance(cur, int) and isinstance(total, int) and total > 0 and cur < total)
+            # 4.6.1: stopped by this app after every platform had finished (see below) is a finished run.
+            early = (rs == "stopped" and not state.get("close_tries")) or (
+                isinstance(cur, int) and isinstance(total, int) and total > 0 and cur < total)
             words = (f"simulation stopped early, after {cur or '?'} of {total or '?'} rounds" if early
                      else f"simulation finished after {cur or '?'} rounds")
             return Step(self._go(state, "report", rounds=cur, total_rounds=total, stopped_early=early), next_in=0.0, stage="simulation",
                         detail=words)
+        if rs == "running" and self._platforms_done(st):
+            # 4.6.1: after its last round MiroFish's runner keeps the process alive in "wait for commands" mode (for
+            # interviews), so run-status stays "running" for ever and no report can be written. Once every platform has
+            # logged simulation_end the environment is closed (no model calls); if it is still alive after a few tries
+            # it is stopped, which MiroFish also accepts for a report.
+            closes = int(state.get("close_tries") or 0)
+            sid = state["simulation_id"]
+            try:
+                if closes < 3:
+                    self._req("POST", "/api/simulation/close-env", write=False, json={"simulation_id": sid, "timeout": 30}, timeout=60)
+                else:
+                    self._req("POST", "/api/simulation/stop", write=False, json={"simulation_id": sid}, timeout=30)
+            except (Transient, Failed):
+                pass
+            return Step({**state, "close_tries": closes + 1, "total_rounds": st.get("total_rounds"), "rounds": st.get("current_round")},
+                        next_in=5.0, stage="simulation",
+                        detail=f"all {st.get('current_round') or '?'} rounds done; closing the simulation")
         return self._poll({**state, "total_rounds": st.get("total_rounds"), "rounds": st.get("current_round")}, "simulation",
                           f"round {st.get('current_round') or 0} of {st.get('total_rounds') or '?'}")
+
+    def _platforms_done(self, st: dict[str, Any]) -> bool:
+        tw, rd = bool(st.get("twitter_completed")), bool(st.get("reddit_completed"))
+        return (tw and rd) if self.platform == "parallel" else (tw or rd)
 
     def _report(self, ctx: dict[str, Any], state: dict[str, Any]) -> Step:
         try:

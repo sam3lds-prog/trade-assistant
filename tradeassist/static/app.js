@@ -48,6 +48,7 @@ async function api(path, body) {
 }
 
 const isNum = v => typeof v === "number" && isFinite(v);
+const fmtClock = sec => { const t = Math.max(0, Math.round(sec)); return t < 60 ? `${t} s` : `${Math.floor(t / 60)} min ${String(t % 60).padStart(2, "0")} s`; };
 // Rounded before the sign is chosen, so -0.3 shown with no decimals reads "$0", not "-$0".
 const money = (v, d = 2) => {
   if (!isNum(v)) return "n/a";

@@ -432,12 +432,18 @@ def test_the_pages_helpers_clamp_windows_build_overlays_and_lay_out_scenarios():
         ["pinchOf", [[{"clientX": 0, "clientY": 0}, {"clientX": 30, "clientY": 40}]]],
         ["zoomCentre", [None, {"min": 10, "max": 20}]], ["zoomCentre", [25, {"min": 10, "max": 20}]],
         ["zoomRange", [{"min": 10, "max": 20}, 2, 15]], ["zoomRange", [{"min": 10, "max": 20}, 0.5, 10]],
-        ["zoomRange", [{"min": 10, "max": 10.001}, 2, 10.0005]]])],
+        ["zoomRange", [{"min": 10, "max": 10.001}, 2, 10.0005]],
+        ["pinchFactors", [{"dx": 100, "dy": 10}, {"dx": 200, "dy": 30}]], ["pinchFactors", [{"dx": 100, "dy": 100}, {"dx": 50, "dy": 200}]],
+        ["zoomLogical", [{"from": 0, "to": 100}, 2, 50]], ["zoomLogical", [{"from": 0, "to": 100}, 2, 100]],
+        ["zoomLogical", [{"from": 0, "to": 10}, 4, 5, 5]]])],
         capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
-    a, b, c, lines, rows, none, pinch, c1, c2, z_in, z_out, z_floor = [x["ok"] for x in json.loads(done.stdout)]
+    a, b, c, lines, rows, none, pinch, c1, c2, z_in, z_out, z_floor, f_side, f_both, t_mid, t_edge, t_min = [x["ok"] for x in json.loads(done.stdout)]
     # 2.14: the vertical zoom's arithmetic: a pinch's distance and middle, the still point, the range around it.
-    assert pinch == {"dist": 50, "y": 20} and c1 == 15 and c2 == 20
+    assert pinch == {"dist": 50, "x": 15, "y": 20, "dx": 30, "dy": 40} and c1 == 15 and c2 == 20
+    # 4.6.1: each axis zooms by how far the fingers spread along it; an axis they barely span is left alone.
+    assert f_side == {"fx": 2, "fy": 1} and f_both == {"fx": 0.5, "fy": 2}
+    assert t_mid == {"from": 25, "to": 75} and t_edge == {"from": 50, "to": 100} and t_min == {"from": 2.5, "to": 7.5}
     assert z_in == {"min": 12.5, "max": 17.5} and z_out == {"min": 10, "max": 30} and z_floor == {"min": 10, "max": 10.001}
     assert a == [10, 39] and b == [10, 30] and c == [600, 999]
     kinds = [ln["kind"] for ln in lines]

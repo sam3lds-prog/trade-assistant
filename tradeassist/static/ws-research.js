@@ -276,7 +276,7 @@
         const rounds = isNum(r.rounds) && isNum(r.total_rounds) ? ` · round ${r.rounds} of ${r.total_rounds}` : "";
         const prof = r.profile ? ` · ${r.profile} profile` : "";
         const cost = r.estimate && r.estimate.words ? ` · estimated ${r.estimate.words}` : "";
-        kids.push(el("p", { class: "small muted", text: `${r.status === "queued" ? "Waiting to start" : `${r.stage || "starting"}: ${r.detail || ""}`}${rounds}${prof}${isNum(r.elapsed_seconds) ? ` · ${Math.round(r.elapsed_seconds)} s` : ""}${cost}${ids ? ` · ${ids}` : ""}. The quantitative study above is complete; this continues if you refresh or switch stocks.` }));
+        kids.push(el("p", { class: "small muted", text: `${r.status === "queued" ? "Waiting to start" : `${r.stage || "starting"}: ${r.detail || ""}`}${rounds}${prof}${isNum(r.cap_seconds) ? ` · ${fmtClock(r.cap_seconds)}${isNum(r.run_minutes) ? ` of its ${r.run_minutes} min time cap` : ""}` : (isNum(r.elapsed_seconds) ? ` · ${Math.round(r.elapsed_seconds)} s` : "")}${cost}${ids ? ` · ${ids}` : ""}. The quantitative study above is complete; this continues if you refresh or switch stocks.` }));
       }
       if (p.usage && p.status !== "running") kids.push(el("p", { class: "small muted ws-sim-details", text: `Simulation: ${p.usage.provider}${p.usage.profile ? `, ${p.usage.profile} profile` : ""}${p.usage.model ? `, ${p.usage.model}` : ""}; ${p.usage.agents ?? "?"} agents, ${p.usage.rounds ?? "?"} rounds; ${p.usage.status}; cost ${p.usage.words}.` }));
       if (r && r.stopped_early) kids.push(el("p", { class: "small" }, statusTag("warn", "Stopped early"), ` The simulation stopped on the server after ${r.rounds || "?"} of ${r.total_rounds || "?"} rounds: its cases come from an unfinished run.`));
@@ -1165,18 +1165,21 @@
     const pts = arr => [{ time: t0, value: p0 }].concat(arr.map((p, i) => ({ time: times[i], value: p0 * (1 + p / 100) })));
     const day = i => (fixed ? ` · session ${i + 1}, ${sc.sessions[i].date} close` : ` · session ${i + 1}`);
     const tipsOf = (label, prices, why) => Object.fromEntries(prices.map((v, i) => [times[i], `${label}: ${money(v)} (${pctText(100 * (v / p0 - 1))})${day(i)}${why ? ` · if ${why}` : ""}`]));
+    // 4.6.1: named in the chart's legend (grouped: the forecast, then the catalyst's cases), not on the price axis.
+    const fg = "Forecast", cg = sc.catalyst ? `Catalyst v${sc.catalyst.version}` : "Alternatives";
     const lines = [
-      { key: "forecast:base", points: pts(sc.base.path_pct), color: FORECAST_COLOR, width: 2, style: 0, title: sc.catalyst ? "Base" : "Forecast",
+      { key: "forecast:base", points: pts(sc.base.path_pct), color: FORECAST_COLOR, width: 2, style: 0, legend: sc.catalyst ? "Base" : "Forecast", legendGroup: fg,
         tips: tipsOf("Base forecast", sc.base.path_pct.map(p => p0 * (1 + p / 100))) },
-      { key: "forecast:low", points: pts(sc.base.low_pct), color: FORECAST_COLOR + "99", width: 1, style: 3, title: sc.calibrated ? "80% band" : "Model P10" },
-      { key: "forecast:high", points: pts(sc.base.high_pct), color: FORECAST_COLOR + "99", width: 1, style: 3, title: sc.calibrated ? "" : "Model P90" },
+      { key: "forecast:low", points: pts(sc.base.low_pct), color: FORECAST_COLOR + "99", width: 1, style: 3, legend: sc.calibrated ? "80% band" : "Model P10–P90", legendShare: "forecast:band", legendGroup: fg },
+      { key: "forecast:high", points: pts(sc.base.high_pct), color: FORECAST_COLOR + "99", width: 1, style: 3, legend: sc.calibrated ? "80% band" : "Model P10–P90", legendShare: "forecast:band", legendGroup: fg },
     ];
     if (sc.catalyst && fixed) {
       for (const k of sc.catalyst.cases || []) {
         lines.push({ key: `forecast:case:${k.key}`, points: [{ time: t0, value: p0 }].concat(k.price.map((v, i) => ({ time: times[i], value: v }))),
-          color: CASE_COLORS[k.key] || ALT_COLOR, width: 2, style: 2, title: `${k.label} (v${sc.catalyst.version})`, tips: tipsOf(k.label, k.price, k.trigger) });
+          color: CASE_COLORS[k.key] || ALT_COLOR, width: 2, style: 2, legend: k.label, legendGroup: cg, tips: tipsOf(k.label, k.price, k.trigger) });
       }
-    } else lines.push(...(sc.alternatives || []).map(alt => ({ key: `forecast:${alt.key}`, points: pts(alt.path_pct), color: ALT_COLOR, width: 1, style: 2, title: alt.label })));
+    } else lines.push(...(sc.alternatives || []).map(alt => ({ key: `forecast:${alt.key}`, points: pts(alt.path_pct), color: ALT_COLOR, width: 1, style: 2,
+      legend: alt.label, legendGroup: cg })));
     chart.setLines("forecast", lines);
     if (chart.showAhead) chart.showAhead(sc.horizon);
   });
