@@ -86,6 +86,7 @@ QUALITY_REASONS = {
     "wide_spread": "an option leg's spread is wider than OPPORTUNITY_MAX_SPREAD_PCT of its midpoint",
     "low_open_interest": "an option leg's open interest is below OPPORTUNITY_MIN_OPEN_INTEREST",
     "study_midpoint_used": "an option leg had no midpoint now: the study's older midpoint was used",
+    "open_interest_unknown": "an option leg's open interest is not reported: its liquidity cannot be checked",
 }
 
 
@@ -233,7 +234,7 @@ def leg_quality(lg: dict[str, Any], lim: dict[str, Any], realtime: bool, max_spr
         codes.append("wide_spread")
     oi = _f(lg.get("open_interest"))
     if oi is None:
-        notes.append(f"{lg.get('option_symbol')}: open interest not reported")
+        codes.append("open_interest_unknown")                # unknown liquidity is not execution quality (as unknown age)
     elif oi < min_oi:
         codes.append("low_open_interest")
     if lg.get("study_mid_used"):

@@ -37,15 +37,18 @@ intelligence*; the gaps it found in 4.5.0 are in [IMPROVEMENTS.md](IMPROVEMENTS.
 - **Data quality on every structure: execution, research or unavailable.** Each option leg's quote now has its own
   time and freshness (from the snapshot's market clock); a quote whose time is unknown is never taken as fresh (4.5.0
   took it as fresh). Crossed quotes, a missing side, a spread over `OPPORTUNITY_MAX_SPREAD_PCT`, an open interest
-  below the new `OPPORTUNITY_MIN_OPEN_INTEREST` (10 by default), delayed or last-session quotes, and the study's old
+  below the new `OPPORTUNITY_MIN_OPEN_INTEREST` (10 by default) or not reported, delayed or last-session quotes, and the study's old
   midpoint standing in for a missing one all make a structure *research only*: it is still valued and shown, and it can
   still be a Watch, but it can never back a Qualified setup. Missing or old Greeks are flagged on the leg (the
   valuation's volatility comes from the quotes, not from the provider's Greeks).
 - **A trigger you record is evidence for review, not proof.** It has a status (*unverified*, *verification pending*,
   *verified*, *rejected*, *expired*) and only a *verified* one can turn a Watch into a Qualified setup. With a link,
-  the app reads the source itself (public addresses only, never this computer or its network): it must give its own
-  publication time after the study's cutoff and inside the trigger's window, name the stock, and support what you
-  describe and the case's trigger. No language model's reading counts as verification. Event, publication, retrieval,
+  the app reads the source itself (public addresses only, connected to the very address it checked, never this
+  computer or its network): it must give its own publication time after the study's cutoff and inside the trigger's
+  window, name the stock, and have a sentence that affirms what you describe and the case's trigger; a page that
+  negates it, says the opposite (*misses* for *beats*, *cuts* for *raises*) or only previews it does not verify it. No
+  language model's reading counts as verification, and a verification belongs to the scenario version it was checked
+  against. Event, publication, retrieval,
   verification and recording times are kept apart (migration 28), every submission is kept in order, and a trigger
   recorded after the target session closed never counts toward the forward scorecard. Triggers recorded before
   4.5.1 were never verified: they are now *unverified*.

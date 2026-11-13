@@ -60,6 +60,7 @@ REASONS = {
     "no_two_sided_quote": "an option leg has no two-sided quote",
     "wide_spread": "an option leg's spread is wider than OPPORTUNITY_MAX_SPREAD_PCT of its midpoint",
     "low_open_interest": "an option leg's open interest is below OPPORTUNITY_MIN_OPEN_INTEREST",
+    "open_interest_unknown": "an option leg's open interest is not reported: its liquidity cannot be checked",
     "cost_eroded": "spreads and fees consume the expected payoff",
     "payoff_below_minimum": "the modeled net upside is below OPPORTUNITY_MIN_NET_PCT of the capital",
     "no_base_support": "no validated directional edge or setup history behind the base case",
@@ -74,7 +75,7 @@ PRIORITY = list(REASONS)                       # the order above is the order of
 GLOBAL = {"valuation_failed", "expired_session"}
 # 4.5.1: execution-quality data is needed to qualify; a Watch is rechecked on a fresh snapshot when its trigger is verified.
 QUALIFY_ONLY = {"stale_quote", "delayed_quotes", "quote_freshness_unknown", "market_closed", "crossed_quote", "one_sided_quote",
-                "study_midpoint_used"}
+                "study_midpoint_used", "open_interest_unknown"}
 LIQUIDITY = {"no_two_sided_quote", "wide_spread", "low_open_interest"}     # a setup's own liquidity: checked for a Watch too
 TRIGGER_WORDS = {"unverified": "reported, not verified", "verification_pending": "reported; its source is being checked",
                  "verified": "verified from its source", "rejected": "reported, but its source did not support it",
@@ -351,11 +352,12 @@ class Opportunities:
         return {"budget": lim["budget"], "loss_limit": lim["loss_limit"], "min_net_pct": s.opportunity_min_net_pct,
                 "max_spread_pct": s.opportunity_max_spread_pct}
 
-    def observed(self, study_id: str) -> dict[str, dict[str, Any]]:
-        """Each case's reported trigger with its verification status (4.5.1): only a verified one qualifies."""
+    def observed(self, study_id: str, version_id: str | None = None) -> dict[str, dict[str, Any]]:
+        """Each case's reported trigger with its verification status (4.5.1): only one verified against this version
+        qualifies."""
         tr = getattr(self.svc, "triggers", None)
         if tr is not None:
-            return tr.for_study(study_id)
+            return tr.for_study(study_id, version_id)
         return {r["case_key"]: {**json.loads(r["source_json"]), "observed_at": r["observed_at"], "recorded_at": r["recorded_at"],
                                 "status": r["status"] if "status" in r.keys() else "unverified"}
                 for r in self.svc.db.query("SELECT * FROM scenario_triggers WHERE study_id = ?", (study_id,))}
@@ -375,7 +377,8 @@ class Opportunities:
         h = str(st.get("horizon_days") or version.get("horizon_sessions"))
         an = ((view.get("analogs") or {}).get("summary") or {}).get("by_horizon", {}).get(h) or {}
         return evaluate(symbol=st.get("symbol") or version.get("symbol"), version=version, valuation=valuation, thresholds=self.thresholds(),
-                        routes=routes, readiness=(st.get("forecast") or {}).get("readiness"), analogs=an, observed=self.observed(study_id),
+                        routes=routes, readiness=(st.get("forecast") or {}).get("readiness"), analogs=an,
+                        observed=self.observed(study_id, version.get("id")),
                         mode=self.svc.market.info.mode, realtime=bool(self.svc.market.info.realtime), today=today)
 
     # --- after the findings ------------------------------------------------------------------------------------------
@@ -383,9 +386,21 @@ class Opportunities:
         # 4.5.1: a finalization resumed after a crash reaches here again with the same valuation: its decision is
         # already recorded (and published and notified), so it is returned as it is, not recorded twice.
         if valuation.get("id"):
-            r = self.svc.db.one("SELECT id FROM scenario_decisions WHERE study_id = ? AND valuation_id = ? ORDER BY created_at DESC LIMIT 1",
-                                (study_id, valuation["id"]))
+            r = self.svc.db.one("SELECT id, decision_json FROM scenario_decisions WHERE study_id = ? AND valuation_id = ? "
+                                "ORDER BY created_at DESC LIMIT 1", (study_id, valuation["id"]))
             if r is not None:
+                # Its later steps may not have happened (a crash after the decision was written): publishing and
+                # notifying are idempotent (the observation's key, the notification's dedupe key), so they are done again.
+                d = json.loads(r["decision_json"])
+                try:
+                    oid = self.publish(study_id, d)
+                    if oid:
+                        with self.svc.db.tx() as cur:
+                            cur.execute("UPDATE scenario_decisions SET opportunity_id = ? WHERE id = ?", (oid, r["id"]))
+                    if d.get("changed") and d["status"] in ("qualified", "watch"):
+                        self.notify(study_id, d)
+                except Exception:  # noqa: BLE001 - the decision stands
+                    log.exception("Could not finish publishing decision %s", r["id"])
                 return self.latest(study_id) or {}
         d = self.evaluate_study(study_id, version, valuation)
         return self.record(study_id, version, valuation, d)

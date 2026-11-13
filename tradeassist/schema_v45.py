@@ -32,7 +32,7 @@ def verified_triggers(cur: sqlite3.Cursor) -> None:
     cols = _columns(cur, "scenario_triggers")
     for name, ddl in (("status", "TEXT NOT NULL DEFAULT 'unverified'"), ("claimed_published_at", "TEXT"), ("published_at", "TEXT"),
                       ("event_at", "TEXT"), ("retrieved_at", "TEXT"), ("verified_at", "TEXT"), ("cutoff", "TEXT"),
-                      ("deadline", "TEXT"), ("verification_json", "TEXT NOT NULL DEFAULT '{}'")):
+                      ("deadline", "TEXT"), ("verification_json", "TEXT NOT NULL DEFAULT '{}'"), ("version_id", "TEXT")):
         if name not in cols:
             cur.execute(f"ALTER TABLE scenario_triggers ADD COLUMN {name} {ddl}")
     # Before 4.5.1 observed_at held the publication time you entered: it is your claim, not the source's.

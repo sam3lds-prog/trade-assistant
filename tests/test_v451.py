@@ -485,3 +485,135 @@ def test_the_migration_marks_old_triggers_unverified(tmp_path):
     assert status[4] == "'unverified'"                     # a row 4.5.0 wrote (or writes, after a rollback) is unverified
     db.close()
     _ = requests
+
+
+# --- regressions from the independent review ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, status", [
+    ("XYZ misses earnings estimates and cuts its full-year guidance.", "rejected"),
+    ("XYZ did not beat earnings estimates and did not raise its guidance.", "rejected"),
+    ("Preview: will XYZ beat earnings estimates and raise guidance?", "unverified"),
+    ("XYZ is expected to beat earnings estimates and raise guidance next week.", "unverified"),
+    ("XYZ beat earnings estimates but cut its full-year guidance.", "rejected"),
+    ("XYZ beat earnings estimates and raised its full-year guidance on Thursday.", "verified"),
+])
+def test_a_source_that_negates_contradicts_or_only_previews_the_trigger_does_not_verify_it(text, status):
+    v = verdict(page(text), claim="XYZ beats estimates and raises guidance", trigger="The company beats earnings estimates and raises guidance")
+    assert v["status"] == status, (text, v["reason"], v.get("match"))
+
+
+def test_the_fetch_connects_to_the_address_it_checked_and_shared_addresses_are_refused(monkeypatch):
+    answers = iter(["93.184.216.34", "127.0.0.1", "127.0.0.1"])           # a rebinding: public for the check, loopback after
+    monkeypatch.setattr(T.socket, "getaddrinfo", lambda host, port: [(None, None, None, None, (next(answers), 0))])
+    seen = []
+
+    def pinned(url, ip):
+        seen.append(ip)
+        return SimpleNamespace(status_code=200, headers={"Content-Type": "text/html"}, iter_content=lambda n: iter([b"<p>ok</p>"]), close=lambda: None)
+    monkeypatch.setattr(T, "_pinned_get", pinned)
+    out = T.fetch("https://news.example.com/a")
+    assert seen == ["93.184.216.34"] and out["status"] == 200                # the name was not resolved a second time
+    monkeypatch.setattr(T.socket, "getaddrinfo", lambda host, port: [(None, None, None, None, ("100.64.1.2", 0))])
+    with pytest.raises(T.Unsafe):
+        T.check_url("https://cgnat.example.com/")
+
+
+def test_unreported_open_interest_is_not_execution_quality():
+    svc = FakeSvc([_row("XYZ2026-10-29C110", 110, "call", "2026-10-29", oi=None)])
+    res, _ = V.value(svc, study(call("2026-10-29")), version())
+    assert "open_interest_unknown" in res["structures"][0]["quality"]["reasons"]
+
+
+def test_a_canceled_attempt_is_not_valued_or_decided_again(app):
+    c, svc, ids, _, _ = app
+    sid = ids[10]
+    svc.scenario_provider_override = Scripted(lambda ctx, state: Step({**state, "polls": 1}, next_in=60.0, stage="simulation", detail="round 1"))
+    try:
+        c.post(f"/v3/studies/{sid}/pipeline/start", json={})
+        drain(svc, rounds=2)
+        c.post(f"/v3/studies/{sid}/pipeline/cancel", json={})
+    finally:
+        svc.scenario_provider_override = None
+    p = svc.pipeline.load(sid)
+    svc.pipeline._update(sid, version_id="sver_from_the_canceled_attempt")       # as if it had been saved just before Cancel
+    r = c.post(f"/v3/studies/{sid}/pipeline/revalue", json={})
+    assert r.status_code == 400 and "canceled" in r.json()["error"]
+    assert svc.pipeline.load(sid)["status"] == "canceled" and p["status"] == "canceled"
+
+
+def test_retry_says_honestly_whether_it_reuses_the_report(app, monkeypatch):
+    c, svc, ids, _, _ = app
+    sid = ids[11]
+    svc.scenario_provider_override = Scripted(lambda ctx, state: Step({"stage": "done"}, report="x", cases={"cases": "not a list"}, stage="report"))
+    try:
+        c.post(f"/v3/studies/{sid}/pipeline/start", json={})
+        drain(svc)
+    finally:
+        svc.scenario_provider_override = None
+    p = svc.pipeline.view(sid)
+    assert p["status"] == "needs_attention" and p["retry_reuses_report"] is False          # its cases are unusable: a new run
+
+
+def test_a_verified_trigger_does_not_carry_over_to_another_version(app):
+    c, svc, ids, _, _ = app
+    sid = ids[0]
+    p = svc.pipeline.load(sid)
+    src = {"title": "Guidance raised", "url": "https://x.example/a"}
+    with svc.db.tx() as cur:
+        cur.execute("""INSERT INTO scenario_triggers (study_id, case_key, observed_at, recorded_at, source_json, status, verification_json, version_id)
+                       VALUES (?, 'bullish', 'x', 'y', ?, 'verified', ?, ?) ON CONFLICT(study_id, case_key) DO UPDATE SET status = 'verified',
+                       source_json = excluded.source_json, verification_json = excluded.verification_json, version_id = excluded.version_id""",
+                    (sid, json.dumps(src), json.dumps({"checked_url": src["url"]}), p["version_id"]))
+    assert svc.triggers.for_study(sid, p["version_id"])["bullish"]["status"] == "verified"
+    assert svc.triggers.for_study(sid, "sver_a_newer_one")["bullish"]["status"] == "unverified"
+    # A source replaced without a new check (what the 4.5.0 code does after a rollback) is not verified either.
+    with svc.db.tx() as cur:
+        cur.execute("UPDATE scenario_triggers SET source_json = ? WHERE study_id = ?", (json.dumps({**src, "url": "https://y.example/b"}), sid))
+    assert svc.triggers.for_study(sid, p["version_id"])["bullish"]["status"] == "unverified"
+
+
+def test_a_crash_while_publishing_or_right_after_saving_the_valuation_is_finished_once(app, monkeypatch):
+    c, svc, ids, _, _ = app
+    calls = {"publish": 0}
+    real_publish = svc.opportunities.publish
+
+    def counted(*a, **k):
+        calls["publish"] += 1
+        if calls["publish"] == 1:
+            raise Crash("stopped while publishing")
+        return real_publish(*a, **k)
+    monkeypatch.setattr(svc.opportunities, "publish", counted)
+    sid = ids[1]
+    svc.pipeline.retry(sid, confirm_new_run=True)
+    with pytest.raises(Crash):
+        drain(svc)
+    _restart(svc)
+    drain(svc)
+    p = svc.pipeline.view(sid)
+    assert p["status"] == "complete" and calls["publish"] >= 2                # published again on resume (it is idempotent)
+    decs = svc.db.query("SELECT * FROM scenario_decisions WHERE study_id = ? AND valuation_id = ?", (sid, p["valuation"]["id"]))
+    assert len(decs) == 1
+    if decs[0]["status"] in ("qualified", "watch"):
+        assert decs[0]["opportunity_id"] and svc.db.one("SELECT COUNT(*) AS n FROM opportunity_observations WHERE source = 'study' AND source_key LIKE ?",
+                                                        (f"scenario:{sid}:%",))["n"] == 1
+    monkeypatch.undo()
+    # Saved, then stopped before the pipeline recorded it: the resumed pass finds that valuation and adds none.
+    real_save = V.save
+    state = {"n": 0}
+
+    def save_then_crash(*a, **k):
+        vid = real_save(*a, **k)
+        if not state["n"]:
+            state["n"] = 1
+            raise Crash("stopped right after saving the valuation")
+        return vid
+    monkeypatch.setattr(V, "save", save_then_crash)
+    sid = ids[2]
+    before = svc.db.one("SELECT COUNT(*) AS n FROM scenario_valuations WHERE study_id = ?", (sid,))["n"]
+    svc.pipeline.retry(sid, confirm_new_run=True)
+    with pytest.raises(Crash):
+        drain(svc)
+    _restart(svc)
+    drain(svc)
+    assert svc.pipeline.view(sid)["status"] == "complete"
+    assert svc.db.one("SELECT COUNT(*) AS n FROM scenario_valuations WHERE study_id = ?", (sid,))["n"] == before + 1

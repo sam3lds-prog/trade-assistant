@@ -263,7 +263,7 @@
         const b = el("button", { class: "ws-btn", type: "button", title: "The last paid request may have run on the server: check it first" }, "Start a new run anyway");
         b.addEventListener("click", () => act("retry", b, "Starting a new run…", { confirm_new_run: true })); row.append(b);
       } else if (p.can_retry) {
-        const resume = r && r.report_received && !(p.history || []).length && p.status !== "canceled";
+        const resume = !!p.retry_reuses_report;          // the server's own rule: the saved report is finished again, no new run
         const b = el("button", { class: "ws-btn primary", type: "button", title: resume ? "Finish the saved report again: no new run" : "" }, resume ? "Retry (no new run)" : "Retry");
         b.addEventListener("click", () => act("retry", b, "Starting again…")); row.append(b);
       }

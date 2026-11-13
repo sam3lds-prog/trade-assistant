@@ -699,19 +699,24 @@ class Pipeline:
         is reused rather than made again, and nothing is written if the pipeline was canceled or moved on meanwhile."""
         sc = self.scenarios()
         p = self.load(study_id) or {}
+        if not finalizing and p.get("status") == "canceled":
+            raise RequestError("This attempt was canceled: nothing from it is valued or decided. Retry to run it again.")
         if ver is None:
             if not p.get("version_id"):
                 raise RequestError("This study has no scenario version to value yet.")
             ver = sc.version(p["version_id"])
         study = self.svc.research3.get(study_id)
         res, vid = None, None
-        if finalizing and p.get("valuation_id"):
+        if finalizing:
+            # A valuation an interrupted pass saved for this (automatic, this run's own) version is reused, also when
+            # the pass stopped before recording it on the pipeline.
+            old = None
             try:
-                old = V.load(self.svc, p["valuation_id"])
-                if old.get("version_id") == ver["id"]:
-                    res, vid = old, old["id"]
+                old = V.load(self.svc, p["valuation_id"]) if p.get("valuation_id") else V.latest_for_version(self.svc, ver["id"])
             except RequestError:
-                res = None
+                old = None
+            if old is not None and old.get("version_id") == ver["id"]:
+                res, vid = old, old["id"]
         if res is None:
             try:
                 res, snap = V.value(self.svc, study, ver)
@@ -816,6 +821,15 @@ class Pipeline:
                      stages={p.get("stage") or "provider": {"state": "canceled", "detail": f"canceled ({said})"}})
         return self.view(study_id)
 
+    @staticmethod
+    def _resumable(p: dict[str, Any], run: Any) -> bool:
+        """Whether Retry can finish the saved report again instead of starting a new run."""
+        if run is None or p.get("status") == "canceled":
+            return False
+        rext = json.loads(run["external_json"] or "{}")
+        return bool((run["report_text"] or "").strip() and run["status"] in ("complete", "needs_attention", "running")
+                    and not rext.get("cases_unusable") and (p.get("finalize") or {}).get("state") != "complete")
+
     def retry(self, study_id: str, confirm_new_run: bool = False) -> dict[str, Any]:
         """Retry the pipeline, without paying for another run when it need not:
 
@@ -834,10 +848,7 @@ class Pipeline:
             self.revalue(study_id)                                     # only the valuation failed: value again
             return self.view(study_id)
         run = self.svc.db.one("SELECT * FROM scenario_runs WHERE id = ?", (p["run_id"],)) if p.get("run_id") else None
-        rext = json.loads(run["external_json"] or "{}") if run is not None else {}
-        if (run is not None and not confirm_new_run and p.get("status") != "canceled" and (run["report_text"] or "").strip()
-                and run["status"] in ("complete", "needs_attention", "running") and not rext.get("cases_unusable")
-                and (p.get("finalize") or {}).get("state") != "complete"):
+        if run is not None and not confirm_new_run and self._resumable(p, run):
             self._update(study_id, status="running", stage="paths", error=None,
                          stages={"paths": {"state": "running", "detail": "finishing the saved report again: no new run"}})
             n = int(json.loads(run["external_json"] or "{}").get("finish_tries") or 0) + 1
@@ -846,6 +857,7 @@ class Pipeline:
             self._save_external(run["id"], ext)
             self._enqueue(FINISH, {"run_id": run["id"], "resume": True}, f"{FINISH}:{run['id']}:resume:{n}")
             return self.view(study_id)
+        rext = json.loads(run["external_json"] or "{}") if run is not None else {}
         if run is not None and run["status"] == "needs_attention" and rext.get("ambiguous_outcome") and not confirm_new_run:
             raise RequestError("The last run's paid request may have run on the provider's server without an answer reaching the app. "
                                "Check the server first; to start a new run anyway (it may cost model calls), confirm a new run.")
@@ -920,7 +932,8 @@ class Pipeline:
                 elif state in ("failed", "discarded"):
                     self._finish_run(run["id"], "failed", error="Its background step failed after several tries.")
                     self._fail(r["id"], "provider", "The scenario run's background step failed after several tries; press Retry.")
-            elif run["status"] == "complete" and (p.get("finalize") or {}).get("state") != "complete" and not p.get("findings"):
+            elif run["status"] == "complete" and ((p.get("finalize") and p["finalize"].get("state") != "complete")
+                                                  or (not p.get("finalize") and not p.get("version_id"))):
                 # 4.5.1: validated (and perhaps a version saved) when the process stopped: finish it from what is saved.
                 n = int(json.loads(run["external_json"] or "{}").get("finish_tries") or 0)
                 key = f"{FINISH}:{run['id']}:recover:{n}"
@@ -983,6 +996,8 @@ class Pipeline:
                 if self._has_forward() else [],
                 "finalize": p.get("finalize"), "history": p.get("history") or [],
                 "retry_needs_confirmation": bool(run and run["status"] == "needs_attention" and run.get("ambiguous_outcome")),
+                "retry_reuses_report": bool(p.get("run_id") and self._resumable(p, self.svc.db.one("SELECT * FROM scenario_runs WHERE id = ?",
+                                                                                                   (p["run_id"],)))),
                 "can_cancel": status in ("running", "awaiting_approval"), "can_retry": status in ("failed", "needs_attention", "canceled")
                 or (status == "complete" and (p.get("stages") or {}).get("paths", {}).get("state") == "failed"),
                 "updated_at": p.get("updated_at"), "demo": prov == "demo"}
