@@ -20,6 +20,11 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.6.2 — The time-cap message says where the run was
+
+- A run stopped by its time cap now says which stage it was in, for example "... while building the graph (40%)" or
+  "... while preparing the agents (60%)". This shows whether the graph, the agents or the simulation was slow.
+
 ## 4.6.1 — MiroFish runs finish; time cap from approval; chart pinch and legend
 
 - **A finished simulation no longer hangs at its last round.** After its last round, MiroFish's runner stays open,
