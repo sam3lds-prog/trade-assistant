@@ -6,7 +6,6 @@ change, a trigger recorded with its independent source, and drafts that carry th
 from __future__ import annotations
 
 import json
-import time
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -27,11 +26,16 @@ TH = {"budget": 1000.0, "loss_limit": 200.0, "min_net_pct": 5.0, "max_spread_pct
 TODAY = date(2026, 10, 22)
 
 
-def struct(key, direction, cap, ml, cases, costs=5.0, spread=2.0, two_sided=True, unlimited=False):
+def struct(key, direction, cap, ml, cases, costs=5.0, spread=2.0, two_sided=True, unlimited=False, quality=()):
+    # 4.5.1: each structure carries its data quality; execution quality unless the test names what keeps it research only.
     return {"key": key, "label": key.replace("_", " "), "direction": direction, "quantity": 1, "costs": costs, "capital": cap,
             "max_loss": None if unlimited else ml, "unlimited_loss": unlimited,
             "legs": [{"option_symbol": f"X{key}", "bid": 1.0 if two_sided else None, "ask": 1.1, "spread_pct": spread}],
-            "by_case": {k: {"expected_pnl": v[0], "worst_tenth": v[1]} for k, v in cases.items()}, "flags": []}
+            "by_case": {k: {"expected_pnl": v[0], "worst_tenth": v[1]} for k, v in cases.items()}, "flags": [],
+            "quality": {"tier": "research" if quality else "execution", "reasons": list(quality)}}
+
+
+VERIFIED = "verified"
 
 
 def val(*structs, stale=False):
@@ -95,7 +99,16 @@ def test_a_trigger_that_passed_unobserved_expires_and_an_observed_one_qualifies(
     assert d["status"] == "watch" and d["setup"]["expires_on"] == "2026-10-23"
     d = run(val(call), version=dated, today=date(2026, 10, 26))
     assert d["status"] == "no_setup" and d["reason"]["code"] == "expired_trigger"
-    seen = {"bullish": {"title": "Company release: outlook raised", "published_at": "2026-10-23T12:00:00+00:00"}}
+    # 4.5.1: a reported trigger alone is evidence for review: it keeps the Watch (and expires like one), it never qualifies.
+    reported = {"bullish": {"title": "Company release: outlook raised", "published_at": "2026-10-23T12:00:00+00:00", "status": "unverified"}}
+    d = run(val(call), version=dated, today=date(2026, 10, 22), observed=reported)
+    assert d["status"] == "watch" and d["setup"]["trigger_evidence"]["status"] == "unverified" and "only once verified" in d["answers"]["when"]
+    d = run(val(call), version=dated, today=date(2026, 10, 26), observed=reported)
+    assert d["status"] == "no_setup" and d["reason"]["code"] == "expired_trigger"
+    for not_yet in ("verification_pending", "rejected", "expired", None):
+        d = run(val(call), version=dated, today=date(2026, 10, 22), observed={"bullish": {**reported["bullish"], "status": not_yet}})
+        assert d["status"] == "watch", not_yet
+    seen = {"bullish": {**reported["bullish"], "status": VERIFIED}}
     d = run(val(call), version=dated, today=date(2026, 10, 26), observed=seen)
     assert d["status"] == "qualified" and d["setup"]["mode"] == "triggered" and "outlook raised" in d["answers"]["when"]
     d = run(val(call), version=dated, today=date(2026, 10, 30), observed=seen)
@@ -108,6 +121,7 @@ def test_without_a_trigger_a_setup_needs_a_supported_base_and_stays_safe_in_ever
     assert d["status"] == "watch"                                      # no support for the base: only the trigger's case
     d = run(val(shares), readiness=EDGE)
     assert d["status"] == "qualified" and d["setup"]["case"] is None and "validated on its holdout" in d["setup"]["support"]
+    assert d["setup"]["data_quality"] == "execution"
     d = run(val(shares), analogs={"independent": 45, "median_pct": 0.8})
     assert d["status"] == "qualified" and "45 independent past cases" in d["setup"]["support"]
     d = run(val(shares), readiness=EDGE, version=ver(base_end=-0.5))     # the edge points the other way
@@ -128,9 +142,22 @@ def test_quotes_and_liquidity_and_eligibility_are_checked():
     d = run(val(struct("short", "SHORT", 100, None, {"central": (-5, 40), "bullish": (-90, 99), "bearish": (60, 20)}, unlimited=True)))
     assert d["status"] == "no_setup" and "unlimited_loss" in d["counts"]
     assert run(val(struct("long_call", "LONG", 100, 100, good), stale=True))["status"] == "watch"       # a Watch is rechecked later
-    seen = {"bullish": {"title": "release"}}
+    seen = {"bullish": {"title": "release", "status": VERIFIED}}
     d = run(val(struct("long_call", "LONG", 100, 100, good), stale=True), observed=seen)
     assert d["status"] == "no_setup" and d["reason"]["code"] == "stale_quote"
+    # 4.5.1: research-quality data never qualifies (it still supports a Watch); its reason is named.
+    for code in ("market_closed", "quote_freshness_unknown", "crossed_quote", "study_midpoint_used"):
+        rq = struct("long_call", "LONG", 100, 100, good, quality=(code,))
+        assert run(val(rq))["status"] == "watch"
+        d = run(val(rq), observed=seen)
+        assert d["status"] == "no_setup" and d["reason"]["code"] == code, code
+    legacy = {k: v for k, v in struct("long_call", "LONG", 100, 100, good).items() if k != "quality"}     # valued before 4.5.1
+    d = run(val(legacy), observed=seen)
+    assert d["status"] == "no_setup" and d["reason"]["code"] == "quote_freshness_unknown"
+    thin = struct("long_call", "LONG", 100, 100, good)
+    thin["legs"][0]["quality"] = {"tier": "research", "reasons": ["low_open_interest"]}
+    thin["quality"] = {"tier": "research", "reasons": ["low_open_interest"]}
+    assert run(val(thin))["reason"]["code"] == "low_open_interest"                                   # liquidity: a Watch too
     d = run(val(struct("long_call", "LONG", 100, 100, good)), observed=seen, mode="sandbox", realtime=False)
     assert d["status"] == "no_setup" and d["reason"]["code"] == "delayed_quotes" and d["example"]
     d = run(val(struct("long_call", "LONG", 100, 100, good)), mode="demo")
@@ -143,7 +170,8 @@ def test_the_fingerprint_changes_only_when_the_decision_does():
     a = run(val(call))
     b = run(val({**call, "by_case": {**call["by_case"], "bullish": {"expected_pnl": 61, "worst_tenth": 21}}}))
     assert fingerprint(a) == fingerprint(b)
-    c = run(val(call), observed={"bullish": {"title": "r"}})
+    assert fingerprint(run(val(call), observed={"bullish": {"title": "r", "status": "unverified"}})) == fingerprint(a)   # still a Watch
+    c = run(val(call), observed={"bullish": {"title": "r", "status": VERIFIED}})
     assert fingerprint(c) != fingerprint(a)
 
 
@@ -239,30 +267,6 @@ def test_a_draft_carries_its_scenario_and_goes_the_cases_way(app):
     assert r.status_code == 400 and "another study" in r.json()["error"]
 
 
-def test_an_observed_trigger_qualifies_the_setup_and_is_noticed_again(app):
-    c, svc, st = app
-    sid = st["one"]["id"]
-    d = c.get(f"/v3/studies/{sid}/decision").json()["decision"]
-    case = d["setup"]["case"]
-    created = datetime.fromisoformat(st["one"]["created_at"].replace("Z", "+00:00"))
-    early = c.post(f"/v3/studies/{sid}/decision/trigger", json={"case": case, "title": "An old article", "published_at": (created - timedelta(hours=1)).isoformat()})
-    assert early.status_code == 400 and "before the study's evidence cutoff" in early.json()["error"]
-    future = c.post(f"/v3/studies/{sid}/decision/trigger", json={"case": case, "title": "Tomorrow", "published_at": "2030-01-01T00:00:00+00:00"})
-    assert future.status_code == 400
-    time.sleep(0.05)
-    when = (datetime.now(timezone.utc) - timedelta(milliseconds=10)).isoformat()
-    r = c.post(f"/v3/studies/{sid}/decision/trigger", json={"case": case, "title": "Company release: the outlook changed", "published_at": when,
-                                                            "url": "https://example.com/release"})
-    assert r.status_code == 200, r.text
-    q = r.json()["decision"]
-    assert q["status"] == "qualified" and q["setup"]["mode"] == "triggered" and q["changed"] is True
-    assert "Company release" in q["answers"]["when"]
-    feed = [x for x in c.get("/v3/discover", params={"kind": "scenario"}).json()["candidates"] if x["study_id"] == sid]
-    assert len(feed) == 1 and not feed[0]["autopilot_eligible"]
-    assert [n["status"] for n in mine_n(c, sid)] == ["qualified"]
-    assert notes_of(svc, sid) == 2
-
-
 def test_scenario_evidence_never_reaches_execution(app):
     c, svc, st = app
     before = _count(svc, "SELECT COUNT(*) AS n FROM trade_proposals")
@@ -291,3 +295,67 @@ def test_no_setup_withdraws_the_observation(app, monkeypatch):
     assert d["status"] == "no_setup" and d["reason"]["code"] in ("contract_loss_over_limit", "scenario_downside_over_limit")
     assert _count(svc, "SELECT COUNT(*) AS n FROM opportunity_observations WHERE source = 'study' AND source_key LIKE ?", f"scenario:{sid}:%") == 0
     assert [x for x in c.get("/v3/discover", params={"kind": "scenario"}).json()["candidates"] if x["study_id"] == sid] == []
+
+
+# Last in the file: it runs on a later clock (the next session, market open), so nothing after it sees its records as
+# being from the future.
+
+def _page(symbol, published, *words):
+    return {"status": 200, "content_type": "text/html", "text": (
+        f'<html><head><meta property="article:published_time" content="{published.isoformat()}"></head>'
+        f'<body><h1>{symbol} news</h1><p>({symbol}) {" ".join(words)}</p></body></html>')}
+
+
+@pytest.mark.clock("2026-10-23T11:00")
+def test_a_reported_trigger_qualifies_the_setup_only_once_its_source_verifies_it(app):
+    """4.5.1: a trigger you record is evidence for review. Without a link it stays unverified (a Watch); with one,
+    the app reads the source and only a verified report, on execution-quality quotes, makes the setup qualified."""
+    c, svc, st = app
+    sid = st["one"]["id"]
+    d = c.post(f"/v3/studies/{sid}/pipeline/revalue", json={}).json()["pipeline"]["decision"]      # on this session's quotes
+    assert d["status"] == "watch", d["reasons"]
+    case = d["setup"]["case"]
+    created = datetime.fromisoformat(st["one"]["created_at"].replace("Z", "+00:00"))
+    early = c.post(f"/v3/studies/{sid}/decision/trigger", json={"case": case, "title": "An old article", "published_at": (created - timedelta(hours=1)).isoformat()})
+    assert early.status_code == 400 and "before the study's evidence cutoff" in early.json()["error"]
+    future = c.post(f"/v3/studies/{sid}/decision/trigger", json={"case": case, "title": "Tomorrow", "published_at": "2030-01-01T00:00:00+00:00"})
+    assert future.status_code == 400
+    when = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    # 1. No link: recorded, unverified, and the setup is still a Watch.
+    r = c.post(f"/v3/studies/{sid}/decision/trigger", json={"case": case, "title": "Company release: the outlook changed", "published_at": when})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["decision"]["status"] == "watch" and body["triggers"][case]["status"] == "unverified"
+    assert "only once verified" in body["decision"]["answers"]["when"]
+    # 2. A link whose page does not name the stock: rejected, still a Watch.
+    ver = svc.scenarios.version(svc.pipeline.load(sid)["version_id"])
+    trig = next(x for x in ver["cases"] if x["key"] == case)["trigger"]
+    pub = datetime.now(timezone.utc) - timedelta(minutes=3)
+    svc.trigger_fetcher = lambda url: {"url": url, **_page("ZZZZ", pub, "the outlook changed", trig.replace("AAPL", "the company"))}
+    try:
+        r = c.post(f"/v3/studies/{sid}/decision/trigger", json={"case": case, "title": "Company release: the outlook changed", "published_at": when,
+                                                                "url": "https://example.com/release"})
+        assert r.json()["triggers"][case]["status"] == "verification_pending" and r.json()["decision"]["status"] == "watch"
+        drain(svc)
+        t = c.get(f"/v3/studies/{sid}/triggers").json()
+        assert t["triggers"][case]["status"] == "rejected" and "does not name AAPL" in t["triggers"][case]["reason"]
+        assert c.get(f"/v3/studies/{sid}/decision").json()["decision"]["status"] == "watch"
+        before = notes_of(svc, sid)
+        # 3. A page that names the stock, was published after the cutoff and supports the claim and the trigger: verified.
+        svc.trigger_fetcher = lambda url: {"url": url, **_page("AAPL", pub, "Company release: the outlook changed.", trig)}
+        r = c.post(f"/v3/studies/{sid}/decision/trigger", json={"case": case, "title": "Company release: the outlook changed", "published_at": when,
+                                                                "url": "https://example.com/release"})
+        drain(svc)
+    finally:
+        svc.trigger_fetcher = None
+    t = c.get(f"/v3/studies/{sid}/triggers").json()
+    rec = t["triggers"][case]
+    assert rec["status"] == "verified" and rec["verified_at"] and rec["published_at"] and rec["recorded_at"] and rec["cutoff"]
+    assert [h["status"] for h in t["history"]][-2:] == ["verification_pending", "verified"]
+    q = c.get(f"/v3/studies/{sid}/decision").json()["decision"]
+    assert q["status"] == "qualified" and q["setup"]["mode"] == "triggered" and q["changed"] is True, q["reasons"]
+    assert q["setup"]["data_quality"] == "execution" and "Company release" in q["answers"]["when"]
+    feed = [x for x in c.get("/v3/discover", params={"kind": "scenario"}).json()["candidates"] if x["study_id"] == sid]
+    assert len(feed) == 1 and not feed[0]["autopilot_eligible"]
+    assert [n["status"] for n in mine_n(c, sid)] == ["qualified"]
+    assert notes_of(svc, sid) == before + 1                                   # one notification for the change to Qualified

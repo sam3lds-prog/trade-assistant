@@ -44,7 +44,7 @@ from .scenario_providers import PINNED_UPSTREAM, provider_for
 
 log = logging.getLogger(__name__)
 
-PIPELINE_VERSION = "pipeline-4.3"
+PIPELINE_VERSION = "pipeline-4.3"            # kept: it is part of each run's configuration hash
 STAGES = ("evidence", "provider", "paths", "findings")
 SETTINGS_KEY = "research:scenario_settings"
 START, STEP, FINISH, RECOVER = "scenario.start", "scenario.step", "scenario.finish", "scenario.recover"
@@ -61,6 +61,10 @@ class ScenarioSettingsIn(C.Strict):
 
 class PipelineStartIn(C.Strict):
     catalyst: C.CatalystSpec | None = None
+
+
+class RetryIn(C.Strict):
+    confirm_new_run: bool = False          # 4.5.1: start a new run although the last paid request's outcome is unknown
 
 
 def _now() -> datetime:
@@ -463,6 +467,7 @@ class Pipeline:
             self._fail_run(r, "provider", f"{prov.label}: {out.failed}")
             return {"failed": out.failed}
         if out.attention:
+            ext["ambiguous_outcome"] = True          # 4.5.1: a paid request may have run: a new run needs your confirmation
             self._save_external(run_id, ext)
             self._finish_run(run_id, "needs_attention", error=out.attention)
             self._fail_run(r, "provider", f"{prov.label}: {out.attention}", attention=True)
@@ -519,6 +524,8 @@ class Pipeline:
         try:
             return self.scenarios().check_import(seed, raw), None
         except RequestError as exc:
+            # The report's own cases are wrong (another packet's, or invalid): reading it again would fail the same way.
+            ext["cases_unusable"] = str(exc)[:300]
             return None, str(exc)
 
     def auto_assumptions(self, seed: dict[str, Any], cases: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -583,37 +590,91 @@ class Pipeline:
         want = 1.0 if direction == "up" else -1.0
         return round(size if effect * want > 0 else -size, 4)
 
+    # Finalization (4.5.1): each state is saved before the next begins, and every step reuses what an earlier,
+    # interrupted pass already wrote, so a paid report is never lost to a local failure and never paid for again.
+    FINAL_STATES = ("report_received", "validated", "version_saved", "valued", "findings_saved", "complete")
+
+    def _obsolete(self, r: Any, p: dict[str, Any] | None) -> str | None:
+        """Why a run's results must not be applied to its study (None when they may): the pipeline moved on to another
+        attempt, or was canceled."""
+        if p is None:
+            return "the study has no pipeline"
+        if self._role(r) == "control":
+            return None if p.get("control_run_id") == r["id"] else "a newer control run replaced it"
+        if p.get("run_id") != r["id"]:
+            return "a newer attempt replaced it"
+        if p.get("status") == "canceled":
+            return "the pipeline was canceled"
+        return None
+
+    def _finalized(self, r: Any, state: str) -> None:
+        ext = json.loads(self._run(r["id"])["external_json"] or "{}")
+        ext["finalize"] = {"state": state, "at": C.utc_now()}
+        self._save_external(r["id"], ext)
+        if self._role(r) != "control":
+            self._update(r["study_id"], finalize={"run_id": r["id"], "state": state})
+
+    def _auto_version(self, run_id: str, role: str) -> dict[str, Any] | None:
+        origin = "control" if role == "control" else "auto"
+        v = self.svc.db.one("SELECT id FROM scenario_versions WHERE run_id = ? AND origin = ? ORDER BY version LIMIT 1", (run_id, origin))
+        return self.scenarios().version(v["id"]) if v else None
+
     def finish(self, payload: dict[str, Any]) -> dict[str, Any]:
         run_id = payload["run_id"]
         r = self._run(run_id)
-        if r["status"] in TERMINAL:
+        resume = bool(payload.get("resume"))
+        if r["status"] in ("canceled", "failed") or (r["status"] == "needs_attention" and not resume):
             return {"skipped": f"the run is {r['status']}"}
         study_id = r["study_id"]
+        role = self._role(r)
+        why_not = self._obsolete(r, self.load(study_id))
+        if why_not:
+            return {"skipped": f"its results are not applied: {why_not}"}
         sc = self.scenarios()
         seed = sc._seed(r["seed_id"])
         ext = json.loads(r["external_json"] or "{}")
-        imp, why = self.cases_from(r, seed, ext)
-        excerpt = (r["report_text"] or "").strip()[: SC.MAX_EXCERPT] or None
-        if imp is None:
-            self._finish_run(run_id, "needs_attention", error=why, report_excerpt=excerpt)
-            self._fail_run(r, "paths", why, attention=True)
-            return {"attention": why}
-        cases = sc.normalized(imp)
-        with self.svc.db.tx() as cur:
-            cur.execute("""UPDATE scenario_runs SET status = 'complete', completed_at = ?, response_hash = ?, cases_json = ?, report_excerpt = ?
-                           WHERE id = ? AND status = 'running'""",
-                        (C.utc_now(), C.digest(imp.model_dump()), json.dumps(cases), excerpt, run_id))
-            if cur.rowcount == 0:
-                return {"skipped": "the run changed while its report was read"}
-        self.svc.bus.publish("scenario.imported", run_id, study_id=study_id, symbol=seed["symbol"], cases=len(cases), provider=r["provider"])
+        if not (r["report_text"] or "").strip() and r["status"] != "complete":
+            return {"skipped": "no report was received for this run"}
+        # 1-2. report_received → validated: the cases parsed and checked against the frozen packet, saved on the run.
+        if r["status"] != "complete":
+            imp, why = self.cases_from(r, seed, ext)
+            excerpt = (r["report_text"] or "").strip()[: SC.MAX_EXCERPT] or None
+            if imp is None:
+                self._save_external(run_id, ext)
+                self._finish_run(run_id, "needs_attention", error=why, report_excerpt=excerpt)
+                self._fail_run(r, "paths", why if ext.get("cases_unusable") else f"{why} The report is kept: Retry reads it again without a new run.",
+                               attention=True)
+                return {"attention": why}
+            cases = sc.normalized(imp)
+            with self.svc.db.tx() as cur:
+                cur.execute("""UPDATE scenario_runs SET status = 'complete', completed_at = ?, response_hash = ?, cases_json = ?, report_excerpt = ?,
+                               error = NULL WHERE id = ? AND status IN ('running', 'needs_attention')""",
+                            (C.utc_now(), C.digest(imp.model_dump()), json.dumps(cases), excerpt, run_id))
+                if cur.rowcount == 0:
+                    return {"skipped": "the run changed while its report was read"}
+            self._finalized(r, "validated")
+            self.svc.bus.publish("scenario.imported", run_id, study_id=study_id, symbol=seed["symbol"], cases=len(cases), provider=r["provider"])
+        r = self._run(run_id)
+        cases = json.loads(r["cases_json"] or "[]")
+        # 3. version_saved: one automatic version per run; a resumed pass finds the one it saved before.
+        ver = self._auto_version(run_id, role)
         assumptions, notes = self.auto_assumptions(seed, cases)
-        role = self._role(r)
-        try:
-            ver = sc.create_version(run_id, C.ScenarioVersionIn(cases=[C.CaseAssumptions(**a) for a in assumptions]),
-                                    origin="control" if role == "control" else "auto")
-        except (RequestError, ValueError) as exc:
-            self._fail_run(r, "paths", f"The cases were saved but no price paths could be made from them: {exc}")
-            return {"failed": str(exc)}
+        if ver is None:
+            try:
+                ver = sc.create_version(run_id, C.ScenarioVersionIn(cases=[C.CaseAssumptions(**a) for a in assumptions]),
+                                        origin="control" if role == "control" else "auto")
+            except (RequestError, ValueError) as exc:
+                ext = json.loads(self._run(run_id)["external_json"] or "{}")
+                ext["cases_unusable"] = str(exc)[:300]           # the same cases would fail again: Retry starts a new run
+                self._save_external(run_id, ext)
+                self._fail_run(r, "paths", f"The cases were saved but no price paths could be made from them: {exc}")
+                return {"failed": str(exc)}
+            except Exception as exc:  # noqa: BLE001 - another pass saved it first (the one-per-run index)
+                ver = self._auto_version(run_id, role)
+                if ver is None:
+                    raise
+                log.info("Reused the version another pass saved for %s (%s)", run_id, exc.__class__.__name__)
+        self._finalized(r, "version_saved")
         fw = getattr(self.svc, "forward", None)              # 4.5: frozen for the scorecard (late if the window has opened)
         if fw is not None:
             try:
@@ -621,26 +682,56 @@ class Pipeline:
             except Exception:  # noqa: BLE001 - forward evidence never stops the pipeline
                 log.exception("Could not freeze the forward forecast of %s", run_id)
         if role == "control":
+            self._finalized(r, "complete")
             return {"version_id": ver["id"], "role": "control"}
+        why_not = self._obsolete(r, self.load(study_id))
+        if why_not:
+            return {"skipped": f"the version was saved; its valuation is not applied: {why_not}", "version_id": ver["id"]}
         self._update(study_id, version_id=ver["id"], sizing_notes=notes,
                      stages={"paths": {"state": "running", "detail": f"version {ver['version']} saved; valuing the strategies"}})
-        return self.revalue(study_id, ver)
+        out = self.revalue(study_id, ver, finalizing=run_id)
+        return out
 
-    def revalue(self, study_id: str, ver: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Price the study's fixed candidates under a version from one fresh snapshot, and write the findings."""
+    def revalue(self, study_id: str, ver: dict[str, Any] | None = None, finalizing: str | None = None) -> dict[str, Any]:
+        """Price the study's fixed candidates under a version from one fresh snapshot, and write the findings.
+
+        While finishing a run (`finalizing`, 4.5.1), a valuation already saved for this version by an interrupted pass
+        is reused rather than made again, and nothing is written if the pipeline was canceled or moved on meanwhile."""
         sc = self.scenarios()
         p = self.load(study_id) or {}
+        if not finalizing and p.get("status") == "canceled":
+            raise RequestError("This attempt was canceled: nothing from it is valued or decided. Retry to run it again.")
         if ver is None:
             if not p.get("version_id"):
                 raise RequestError("This study has no scenario version to value yet.")
             ver = sc.version(p["version_id"])
         study = self.svc.research3.get(study_id)
-        try:
-            res, snap = V.value(self.svc, study, ver)
-            vid = V.save(self.svc, res, snap)
-            res["id"] = vid
-        except (RequestError, DataError, ValueError) as exc:
-            res, vid = {"status": "failed", "problems": [str(exc)[:300]], "structures": [], "mixes": [], "failed": []}, None
+        res, vid = None, None
+        if finalizing:
+            # A valuation an interrupted pass saved for this (automatic, this run's own) version is reused, also when
+            # the pass stopped before recording it on the pipeline.
+            old = None
+            try:
+                old = V.load(self.svc, p["valuation_id"]) if p.get("valuation_id") else V.latest_for_version(self.svc, ver["id"])
+            except RequestError:
+                old = None
+            if old is not None and old.get("version_id") == ver["id"]:
+                res, vid = old, old["id"]
+        if res is None:
+            try:
+                res, snap = V.value(self.svc, study, ver)
+                vid = V.save(self.svc, res, snap)
+                res["id"] = vid
+            except (RequestError, DataError, ValueError) as exc:
+                res, vid = {"status": "failed", "problems": [str(exc)[:300]], "structures": [], "mixes": [], "failed": []}, None
+        if finalizing:
+            r = self._run(finalizing)
+            why_not = self._obsolete(r, self.load(study_id))
+            if why_not:
+                return {"skipped": f"the valuation is not applied: {why_not}", "version_id": ver["id"], "valuation_id": vid}
+            if vid:
+                self._update(study_id, valuation_id=vid)
+                self._finalized(r, "valued")
         detail = {"complete": "every candidate valued under every case", "partial": "valued, with gaps (listed)",
                   "failed": "the strategies could not be valued: " + "; ".join(res.get("problems") or [])[:300]}[res["status"]]
         findings = self.findings(study, ver, res)
@@ -654,6 +745,10 @@ class Pipeline:
                 hook(study_id, ver, res)
             except Exception:  # noqa: BLE001 - the findings are saved whatever a later step does
                 log.exception("The findings hook failed")
+        if finalizing:
+            r = self._run(finalizing)
+            self._finalized(r, "findings_saved")
+            self._finalized(r, "complete")
         self.svc.bus.publish("scenario.findings", study_id, version_id=ver["id"], valuation_id=vid)
         return {"version_id": ver["id"], "valuation_id": vid, "status": res["status"]}
 
@@ -678,48 +773,102 @@ class Pipeline:
             words.append("No budgeted mix beats holding cash in its worst case across the cases.")
         else:
             words.append("The strategies could not be valued: " + "; ".join(val.get("problems") or [])[:200])
+        run = self.svc.db.one("SELECT external_json FROM scenario_runs WHERE id = ?", (ver.get("run_id"),)) if ver.get("run_id") else None
+        state = (json.loads(run["external_json"] or "{}").get("state") or {}) if run else {}
+        if state.get("stopped_early"):
+            words.append(f"The simulation was stopped early ({state.get('rounds') or '?'} of {state.get('total_rounds') or '?'} rounds): "
+                         "its cases come from an unfinished run.")
         return {"conclusion": " ".join(words), "cases": cases, "best_mix": best, "valuation_status": val.get("status"),
+                "stopped_early": bool(state.get("stopped_early")),
                 "readiness": {k: rd.get(k) for k in ("state", "label", "directional", "range")}, "made_at": C.utc_now()}
 
     # --- cancel, retry, recover ----------------------------------------------------------------------------------------
+    def _cancel_run(self, run_id: str | None) -> str | None:
+        """Mark one run canceled (if it is still going) and ask its provider to stop; what the provider said."""
+        if not run_id:
+            return None
+        r = self.svc.db.one("SELECT * FROM scenario_runs WHERE id = ?", (run_id,))
+        if r is None or r["status"] not in ("queued", "running"):
+            return None
+        with self.svc.db.tx() as cur:
+            cur.execute("UPDATE scenario_runs SET status = 'canceled', completed_at = ?, error = 'canceled by you' "
+                        "WHERE id = ? AND status IN ('queued', 'running')", (C.utc_now(), r["id"]))
+        ext = json.loads(r["external_json"] or "{}")
+        try:
+            prov = self.provider(r["provider"])
+            return prov.stop(ext.get("state") or {}) if hasattr(prov, "stop") else "stopped"
+        except ValueError:
+            return "stopped"
+
     def cancel(self, study_id: str) -> dict[str, Any]:
+        """Stop the attempt: the provider run and the control beside it (each asked to stop on its server), and any
+        step of it still queued. A report that arrives later, a valuation or a decision of the canceled attempt is
+        never applied. What was already validated (an earlier version, valuation and decision) is kept."""
         p = self.load(study_id)
         if p is None:
             raise RequestError("This study has no scenario pipeline.")
-        said = "nothing was running"
-        if p.get("run_id"):
-            r = self._run(p["run_id"])
-            if r["status"] in ("queued", "running"):
-                with self.svc.db.tx() as cur:
-                    cur.execute("UPDATE scenario_runs SET status = 'canceled', completed_at = ?, error = 'canceled by you' "
-                                "WHERE id = ? AND status IN ('queued', 'running')", (C.utc_now(), r["id"]))
-                ext = json.loads(r["external_json"] or "{}")
-                try:
-                    prov = self.provider(r["provider"])
-                    said = prov.stop(ext.get("state") or {}) if hasattr(prov, "stop") else "stopped"
-                except ValueError:
-                    said = "stopped"
-        elif p.get("status") not in ("running",):
+        said = self._cancel_run(p.get("run_id")) or "nothing was running"
+        ctrl = self._cancel_run(p.get("control_run_id"))
+        if not p.get("run_id") and p.get("status") not in ("running", "awaiting_approval"):
             raise RequestError(f"Nothing to cancel: the pipeline is {p.get('status') or 'idle'}.")
-        self._update(study_id, status="canceled", error=f"Canceled by you ({said}).",
+        if p.get("status") not in ("running", "awaiting_approval") and said == "nothing was running" and ctrl is None:
+            raise RequestError(f"Nothing to cancel: the pipeline is {p.get('status') or 'idle'}.")
+        with self.svc.db.tx() as cur:          # its queued steps: they would only find the run canceled
+            cur.execute("UPDATE jobs SET status = 'discarded', finished_at = ?, error = 'the scenario run was canceled' WHERE status = 'queued' "
+                        "AND kind IN (?, ?) AND (payload_json LIKE ? OR payload_json LIKE ?)",
+                        (C.utc_now(), STEP, FINISH, f'%"{p.get("run_id") or "-"}"%', f'%"{p.get("control_run_id") or "-"}"%'))
+        self._update(study_id, status="canceled", error=f"Canceled by you ({said}).", canceled_attempt=int(p.get("attempt") or 1),
                      stages={p.get("stage") or "provider": {"state": "canceled", "detail": f"canceled ({said})"}})
         return self.view(study_id)
 
-    def retry(self, study_id: str) -> dict[str, Any]:
-        """A new provider run for the same study (a new attempt: a failed or abandoned one is never resumed blindly)."""
+    @staticmethod
+    def _resumable(p: dict[str, Any], run: Any) -> bool:
+        """Whether Retry can finish the saved report again instead of starting a new run."""
+        if run is None or p.get("status") == "canceled":
+            return False
+        rext = json.loads(run["external_json"] or "{}")
+        return bool((run["report_text"] or "").strip() and run["status"] in ("complete", "needs_attention", "running")
+                    and not rext.get("cases_unusable") and (p.get("finalize") or {}).get("state") != "complete")
+
+    def retry(self, study_id: str, confirm_new_run: bool = False) -> dict[str, Any]:
+        """Retry the pipeline, without paying for another run when it need not:
+
+        - only the valuation failed: value again;
+        - the provider's report arrived but finishing it failed (it could not be read, a local write failed): finish it
+          again from the saved report, with no new run;
+        - a paid request's answer never came and could not be reconciled (*needs attention*): a new run only with
+          `confirm_new_run`, since the first may have run (and cost) on the server;
+        - otherwise a new provider run (a new attempt: a failed or abandoned one is never resumed blindly)."""
         p = self.load(study_id)
         if p is None:
             raise RequestError("This study has no scenario pipeline: run it with scenarios on.")
-        if p.get("status") == "running":
+        if p.get("status") in ("running",):
             raise RequestError("The scenario pipeline is still running.")
         if p.get("version_id") and p.get("status") == "complete" and p.get("stages", {}).get("paths", {}).get("state") == "failed":
             self.revalue(study_id)                                     # only the valuation failed: value again
             return self.view(study_id)
+        run = self.svc.db.one("SELECT * FROM scenario_runs WHERE id = ?", (p["run_id"],)) if p.get("run_id") else None
+        if run is not None and not confirm_new_run and self._resumable(p, run):
+            self._update(study_id, status="running", stage="paths", error=None,
+                         stages={"paths": {"state": "running", "detail": "finishing the saved report again: no new run"}})
+            n = int(json.loads(run["external_json"] or "{}").get("finish_tries") or 0) + 1
+            ext = json.loads(run["external_json"] or "{}")
+            ext["finish_tries"] = n
+            self._save_external(run["id"], ext)
+            self._enqueue(FINISH, {"run_id": run["id"], "resume": True}, f"{FINISH}:{run['id']}:resume:{n}")
+            return self.view(study_id)
+        rext = json.loads(run["external_json"] or "{}") if run is not None else {}
+        if run is not None and run["status"] == "needs_attention" and rext.get("ambiguous_outcome") and not confirm_new_run:
+            raise RequestError("The last run's paid request may have run on the provider's server without an answer reaching the app. "
+                               "Check the server first; to start a new run anyway (it may cost model calls), confirm a new run.")
         attempt = int(p.get("attempt") or 1) + 1
         st = self.settings()
         cfg = self.config_for(st["provider"])
+        history = list(p.get("history") or [])
+        history.append({k: p.get(k) for k in ("attempt", "run_id", "control_run_id", "version_id", "valuation_id", "decision", "status", "error")})
         p = self._update(study_id, attempt=attempt, provider=st["provider"], config=cfg, config_hash=C.digest(cfg)[:16], status="running",
-                         stage="provider", error=None, run_id=None, version_id=None, valuation_id=None, findings=None, decision=None,
+                         stage="provider", error=None, run_id=None, control_run_id=None, version_id=None, valuation_id=None, findings=None,
+                         decision=None, finalize=None, history=history[-10:],
                          stages={"provider": {"state": "queued", "detail": "retrying"}, "paths": {"state": "pending", "detail": ""},
                                  "findings": {"state": "pending", "detail": ""}}) or {}
         self._enqueue(START, {"study_id": study_id}, self._start_key(study_id, p))
@@ -751,7 +900,9 @@ class Pipeline:
         queued = []
         for r in self.svc.db.query("SELECT id, status, pipeline_json FROM studies WHERE pipeline_json IS NOT NULL AND status IN ('complete', 'partial')"):
             p = json.loads(r["pipeline_json"])
-            if p.get("status") in ("complete", "failed", "canceled", "needs_attention"):
+            if p.get("status") in ("failed", "canceled", "needs_attention", "awaiting_approval"):
+                continue
+            if p.get("status") == "complete" and (not p.get("finalize") or (p.get("finalize") or {}).get("state") == "complete"):
                 continue
             if not p.get("run_id"):
                 key = self._start_key(r["id"], p)
@@ -781,8 +932,19 @@ class Pipeline:
                 elif state in ("failed", "discarded"):
                     self._finish_run(run["id"], "failed", error="Its background step failed after several tries.")
                     self._fail(r["id"], "provider", "The scenario run's background step failed after several tries; press Retry.")
-            elif run["status"] == "complete" and not p.get("version_id") and job_status(f"{FINISH}:{run['id']}") in ("failed", "discarded"):
-                self._fail(r["id"], "paths", "Reading the provider's cases failed after several tries; press Retry.")
+            elif run["status"] == "complete" and ((p.get("finalize") and p["finalize"].get("state") != "complete")
+                                                  or (not p.get("finalize") and not p.get("version_id"))):
+                # 4.5.1: validated (and perhaps a version saved) when the process stopped: finish it from what is saved.
+                n = int(json.loads(run["external_json"] or "{}").get("finish_tries") or 0)
+                key = f"{FINISH}:{run['id']}:recover:{n}"
+                if job_status(key) is None and n < 5:
+                    ext = json.loads(run["external_json"] or "{}")
+                    ext["finish_tries"] = n + 1
+                    self._save_external(run["id"], ext)
+                    self._enqueue(FINISH, {"run_id": run["id"], "resume": True}, f"{FINISH}:{run['id']}:recover:{n + 1}")
+                    queued.append(run["id"])
+                elif n >= 5:
+                    self._fail(r["id"], "paths", "Finishing the provider's report failed after several tries; the report is kept: press Retry.")
         # A study left in the evidence stage by a process that stopped: the study itself is marked failed by its sweep.
         for r in self.svc.db.query("SELECT id, status, pipeline_json FROM studies WHERE pipeline_json IS NOT NULL AND status = 'failed'"):
             p = json.loads(r["pipeline_json"])
@@ -815,7 +977,9 @@ class Pipeline:
                        "elapsed_seconds": round(((_ts(r["completed_at"]) or _now()) - started).total_seconds(), 1) if started else None,
                        "remote": {k: state.get(k) for k in ("project_id", "graph_id", "simulation_id", "report_id") if state.get(k)},
                        "error": r["error"], "model": ext.get("model"), "catalyst_basis": ext.get("catalyst_basis"),
-                       "report_excerpt": r["report_excerpt"], "seed_id": r["seed_id"], "rounds": state.get("rounds")}
+                       "report_excerpt": r["report_excerpt"], "seed_id": r["seed_id"], "rounds": state.get("rounds"),
+                       "total_rounds": state.get("total_rounds"), "stopped_early": bool(state.get("stopped_early")),
+                       "report_received": bool((r["report_text"] or "").strip()), "ambiguous_outcome": bool(ext.get("ambiguous_outcome"))}
         val = None
         if p.get("valuation_id"):
             try:
@@ -830,7 +994,11 @@ class Pipeline:
                 "forward": [{k: r[k] for k in ("variant", "status", "median_pct", "low_pct", "high_pct", "realized_pct", "abs_error")}
                             for r in self.svc.db.query("SELECT * FROM scenario_forecasts WHERE study_id = ? ORDER BY variant", (study_id,))]
                 if self._has_forward() else [],
-                "can_cancel": status == "running", "can_retry": status in ("failed", "needs_attention", "canceled")
+                "finalize": p.get("finalize"), "history": p.get("history") or [],
+                "retry_needs_confirmation": bool(run and run["status"] == "needs_attention" and run.get("ambiguous_outcome")),
+                "retry_reuses_report": bool(p.get("run_id") and self._resumable(p, self.svc.db.one("SELECT * FROM scenario_runs WHERE id = ?",
+                                                                                                   (p["run_id"],)))),
+                "can_cancel": status in ("running", "awaiting_approval"), "can_retry": status in ("failed", "needs_attention", "canceled")
                 or (status == "complete" and (p.get("stages") or {}).get("paths", {}).get("state") == "failed"),
                 "updated_at": p.get("updated_at"), "demo": prov == "demo"}
 
@@ -895,8 +1063,8 @@ def install(svc: Any) -> None:
             return {"pipeline": pl.cancel(study_id)}
 
         @router.post("/studies/{study_id}/pipeline/retry")
-        def retry(study_id: str) -> dict[str, Any]:
-            return {"pipeline": pl.retry(study_id)}
+        def retry(study_id: str, body: RetryIn | None = None) -> dict[str, Any]:
+            return {"pipeline": pl.retry(study_id, confirm_new_run=bool(body and body.confirm_new_run))}
 
         @router.post("/studies/{study_id}/pipeline/start")
         def enable(study_id: str, body: PipelineStartIn | None = None) -> dict[str, Any]:

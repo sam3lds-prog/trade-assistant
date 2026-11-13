@@ -20,6 +20,47 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.5.1 — Trading correctness, safety and recovery
+
+The first of four steps of the 4.6 plan (*MiroFish production hardening, simulation optimization and trading
+intelligence*; the gaps it found in 4.5.0 are in [IMPROVEMENTS.md](IMPROVEMENTS.md#46-plan-gap-analysis-on-450)).
+**No trading permission is added or changed**, and scenario evidence still never reaches the autopilot.
+
+- **Options are valued at their own session.** 4.5.0 moved a contract that expires before the study's last session to
+  its expiration date but still read the stock's price from the last session's distribution: a call expiring after
+  two sessions was valued as if the stock had made its five-session move. Each structure is now valued against the
+  case's saved price and dispersion at the last forecast session on or before the date it is held to. Legs of
+  different expirations are closed at the first one (said so on the structure); a leg expiring before the first
+  forecast session, or a case whose prices reach past the range the option model was evaluated on, *cannot be valued
+  reliably* and is listed, not priced. An earnings release's volatility collapse is applied only to options valued at
+  or after the release's session.
+- **Data quality on every structure: execution, research or unavailable.** Each option leg's quote now has its own
+  time and freshness (from the snapshot's market clock); a quote whose time is unknown is never taken as fresh (4.5.0
+  took it as fresh). Crossed quotes, a missing side, a spread over `OPPORTUNITY_MAX_SPREAD_PCT`, an open interest
+  below the new `OPPORTUNITY_MIN_OPEN_INTEREST` (10 by default) or not reported, delayed or last-session quotes, and the study's old
+  midpoint standing in for a missing one all make a structure *research only*: it is still valued and shown, and it can
+  still be a Watch, but it can never back a Qualified setup. Missing or old Greeks are flagged on the leg (the
+  valuation's volatility comes from the quotes, not from the provider's Greeks).
+- **A trigger you record is evidence for review, not proof.** It has a status (*unverified*, *verification pending*,
+  *verified*, *rejected*, *expired*) and only a *verified* one can turn a Watch into a Qualified setup. With a link,
+  the app reads the source itself (public addresses only, connected to the very address it checked, never this
+  computer or its network): it must give its own publication time after the study's cutoff and inside the trigger's
+  window, name the stock, and have a sentence that affirms what you describe and the case's trigger; a page that
+  negates it, says the opposite (*misses* for *beats*, *cuts* for *raises*) or only previews it does not verify it. No
+  language model's reading counts as verification, and a verification belongs to the scenario version it was checked
+  against. Event, publication, retrieval,
+  verification and recording times are kept apart (migration 28), every submission is kept in order, and a trigger
+  recorded after the target session closed never counts toward the forward scorecard. Triggers recorded before
+  4.5.1 were never verified: they are now *unverified*.
+- **A paid report is never lost to a local failure.** Finishing a run now goes report received → validated → version
+  saved → valued → findings saved → complete, each saved before the next; a crash or a failed write at any point
+  resumes from what was saved, with one version, one valuation and one decision (no duplicate notice or Discover
+  entry), and never a second provider run. *Retry* after a finish that failed reads the saved report again (no new
+  run). When a paid request's answer never came (*needs attention*), a new run needs your explicit confirmation.
+- **Cancel stops the whole attempt**: the provider run, the single-prompt control beside it, and their queued steps. A
+  report, valuation or decision of a canceled or replaced attempt is never applied, and earlier validated results are
+  kept in the study's attempt history. A simulation stopped early on the server is labelled as such in the findings.
+
 ## 4.5.0 — Forward evidence for scenarios
 
 The last of four steps of the one-click Research plan ([ONE_CLICK_RESEARCH.md](ONE_CLICK_RESEARCH.md)). **No trading
