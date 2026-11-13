@@ -82,8 +82,9 @@ class Resp:
 class FakeMiroFish:
     """MiroFish's pinned routes, in memory: each long stage answers "processing" once before it finishes."""
 
-    def __init__(self, report=None, timeout_on=()):
+    def __init__(self, report=None, timeout_on=(), agents=8):
         self.calls, self.projects, self.sims, self.stopped = [], [], [], []
+        self.agents = agents                      # 4.5.2: the graph's filtered entities, one agent each
         self.timeout_on = set(timeout_on)
         self.seen = {}
         self.report = report if report is not None else "The swarm leaned bearish.\n\n```json\n" + json.dumps(_cases(drop_seed=True)) + "\n```"
@@ -121,6 +122,8 @@ class FakeMiroFish:
                 self.timeout_on.discard(("POST", path))
                 raise requests.Timeout("no answer")
             return ok({"simulation_id": sid})
+        if path.startswith("/api/simulation/entities/"):
+            return ok({"entities": [], "entity_types": ["Investor"], "total_count": self.agents + 3, "filtered_count": self.agents})
         if path == "/api/simulation/list":
             return ok([s for s in self.sims if s["project_id"] == kw["params"]["project_id"]])
         if path == "/api/simulation/prepare":
@@ -154,7 +157,8 @@ def app(tmp_path_factory):
     import tradeassist.api as api_mod
     api_mod.TEST_HOSTS = ("testserver",)
     path = tmp_path_factory.mktemp("oneclick") / "t.db"
-    s = Settings(data_mode="demo", db_path=path, desk_worker="off", scenario_provider="demo", scenario_auto=True)
+    # 4.5.2: a MiroFish run of unknown cost waits for approval; these tests give it a small known estimate so it starts on its own.
+    s = Settings(data_mode="demo", db_path=path, desk_worker="off", scenario_provider="demo", scenario_auto=True, mirofish_cost_per_run_usd=0.05)
     svc = TradeAssistant(s, provider=DemoData(), db=Database(path))
     c = TestClient(create_app(s, svc))
     studies = {}
@@ -455,7 +459,7 @@ def test_a_run_that_takes_too_long_is_stopped(app, provider):
     sid = st["b"]["id"]
     assert c.post(f"/v3/studies/{sid}/pipeline/start", json={}).status_code == 200
     w = workers_for(svc).worker("scenarios")
-    for _ in range(10):
+    for _ in range(16):                     # 4.5.2 added a stage (the agent count, read before any agent is prepared)
         w.run_once()
         with svc.db.tx() as cur:
             cur.execute("UPDATE jobs SET due_at = ? WHERE status = 'queued' AND kind LIKE 'scenario.%'", (_iso(datetime.now(timezone.utc)),))

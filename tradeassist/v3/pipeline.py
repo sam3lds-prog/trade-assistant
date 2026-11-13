@@ -39,6 +39,7 @@ from ..optionmath import NY
 from ..providers.base import DataError
 from ..service import RequestError
 from . import scenarios as SC
+from . import simulation as G
 from . import valuation as V
 from .scenario_providers import PINNED_UPSTREAM, provider_for
 
@@ -57,6 +58,16 @@ WAIT_TURN = 30.0                         # seconds a run waits for a free MiroFi
 class ScenarioSettingsIn(C.Strict):
     provider: Literal["mirofish", "ai", "demo"] | None = None
     auto: bool | None = None
+    profile: Literal["quick", "standard", "deep"] | None = None
+
+
+class ApproveIn(C.Strict):
+    profile: Literal["quick", "standard", "deep"] | None = None
+
+
+class ActualCostIn(C.Strict):
+    actual_usd: float
+    note: str = ""
 
 
 class PipelineStartIn(C.Strict):
@@ -102,15 +113,22 @@ class Pipeline:
         saved = self.svc.db.cache_get(SETTINGS_KEY) or {}
         provider = saved.get("provider") or s.scenario_provider
         auto = bool(saved["auto"]) if "auto" in saved else bool(s.scenario_auto)
-        return {"provider": provider, "auto": auto, "control": bool(s.scenario_control),
+        prof = saved.get("profile") or getattr(s, "scenario_default_profile", "quick")
+        return {"provider": provider, "auto": auto, "control": bool(s.scenario_control), "profile": prof,
+                "profiles": G.profiles(s),
                 "mirofish": {"url": s.mirofish_url, "max_rounds": s.mirofish_max_rounds, "run_minutes": s.mirofish_run_minutes,
                              "concurrency": s.mirofish_concurrency, "http_timeout": s.mirofish_http_timeout, "upstream": PINNED_UPSTREAM},
                 "source": {"provider": "Research settings" if saved.get("provider") else "SCENARIO_PROVIDER in .env",
-                           "auto": "Research settings" if "auto" in saved else "SCENARIO_AUTO in .env"},
+                           "auto": "Research settings" if "auto" in saved else "SCENARIO_AUTO in .env",
+                           "profile": "Research settings" if saved.get("profile") else "SCENARIO_DEFAULT_PROFILE in .env"},
                 "horizons": list(SC.SCENARIO_HORIZONS), "enabled": self.scenarios().enabled()}
 
-    def save_settings(self, provider: str | None, auto: bool | None) -> dict[str, Any]:
+    def save_settings(self, provider: str | None, auto: bool | None, profile: str | None = None) -> dict[str, Any]:
         saved = dict(self.svc.db.cache_get(SETTINGS_KEY) or {})
+        if profile is not None:
+            if profile not in G.PROFILE_KEYS:
+                raise RequestError("profile must be quick, standard or deep")
+            saved["profile"] = profile
         if provider is not None:
             if provider not in ("mirofish", "ai", "demo"):
                 raise RequestError("provider must be mirofish, ai or demo")
@@ -122,24 +140,27 @@ class Pipeline:
         self.svc.db.cache_put(SETTINGS_KEY, saved)
         return self.settings()
 
-    def provider(self, name: str | None = None) -> Any:
+    def provider(self, name: str | None = None, profile: str | None = None) -> Any:
         override = getattr(self.svc, "scenario_provider_override", None)        # tests and the demo inject one
         if override is not None:
             return override(name or self.settings()["provider"]) if callable(override) and not hasattr(override, "advance") else override
-        return provider_for(self.svc, name or self.settings()["provider"])
+        return provider_for(self.svc, name or self.settings()["provider"], profile=profile or self.settings()["profile"])
 
     def readiness(self) -> dict[str, Any]:
+        """4.5.2: the provider's state (Ready, Degraded, Unavailable, Configuration error, Circuit open, Budget
+        exceeded) with its reason and what to do, from free checks only (levels A and B); the last real functional
+        test (level C) is reported, never run here."""
         st = self.settings()
         try:
             p = self.provider(st["provider"])
-            r = p.ready()
+            r = G.readiness(self.svc, p, getattr(p, "name", st["provider"]), st["profile"])
         except ValueError as exc:
-            r = {"ok": False, "detail": str(exc)}
-        return {**r, "provider": st["provider"], "auto": st["auto"]}
+            r = {"ok": False, "detail": str(exc), "state": "config_error", "state_label": G.STATE_WORDS["config_error"], "action": str(exc)}
+        return {**r, "provider": st["provider"], "auto": st["auto"], "profile_key": st["profile"]}
 
-    def config_for(self, name: str) -> dict[str, Any]:
+    def config_for(self, name: str, profile: str | None = None) -> dict[str, Any]:
         try:
-            cfg = dict(self.provider(name).config())
+            cfg = dict(self.provider(name, profile).config())
         except ValueError:
             cfg = {"provider": name}
         return {**cfg, "pipeline": PIPELINE_VERSION, "prompt": SC.PROMPT_VERSION}
@@ -155,8 +176,8 @@ class Pipeline:
         on = st["auto"] if wanted is None else bool(wanted)
         if not on or horizon not in SC.SCENARIO_HORIZONS or not st["enabled"]:
             return None
-        cfg = self.config_for(st["provider"])
-        return {"version": PIPELINE_VERSION, "provider": st["provider"], "config": cfg, "config_hash": C.digest(cfg)[:16],
+        cfg = self.config_for(st["provider"], st["profile"])
+        return {"version": PIPELINE_VERSION, "provider": st["provider"], "profile": st["profile"], "config": cfg, "config_hash": C.digest(cfg)[:16],
                 "catalyst": catalyst, "attempt": 1, "requested_at": C.utc_now(),
                 "stages": {"evidence": {"state": "running", "at": C.utc_now()}, "provider": {"state": "pending"},
                            "paths": {"state": "pending"}, "findings": {"state": "pending"}}}
@@ -302,16 +323,22 @@ class Pipeline:
             return {"failed": str(exc)}
         seed = seed_view["seed"]
         name = p["provider"]
+        prof_key = p.get("profile") or self.settings()["profile"]
         try:
-            prov = self.provider(name)
+            prov = self.provider(name, prof_key)
         except ValueError as exc:
             self._fail(study_id, "provider", str(exc))
             return {"failed": str(exc)}
-        ready = prov.ready()
         name = getattr(prov, "name", name)
+        governed = name == "mirofish"
+        prof = G.profile(self.svc.settings, prof_key) if governed else None
+        ready = prov.ready()
         run_id = C.new_id("srun")
         now = C.utc_now()
         external = {"stage": "", "detail": "", "step": 0, "state": {}, "started_at": None, "catalyst_basis": basis, "attempt": p.get("attempt", 1)}
+        if governed:
+            # Not admitted until admission has run: a crash between here and the decision cannot let a step send it.
+            external.update(profile=prof["key"], run_minutes=prof["minutes"], governed=True, admitted=False)
         with self.svc.db.tx() as cur:
             cur.execute("""INSERT INTO scenario_runs (id, seed_id, study_id, provider, status, created_at, schema_version, prompt_version,
                            config_json, external_json) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
@@ -320,13 +347,125 @@ class Pipeline:
         self._update(study_id, run_id=run_id, seed_id=seed["seed_id"], catalyst_used=spec.model_dump(), catalyst_basis=basis,
                      stages={"provider": {"state": "queued", "detail": f"packet {seed['seed_id']} frozen; waiting for {prov.label}"}})
         self.svc.bus.publish("scenario.run_queued", run_id, study_id=study_id, provider=name)
-        if not ready.get("ok"):
+        if governed:
+            gate = self._govern(run_id, study_id, prov, prof, ready)
+            if gate is not None:
+                return gate
+        elif not ready.get("ok"):
             self._finish_run(run_id, "failed", error=f"{prov.label} is not available: {ready.get('detail')}")
             self._fail(study_id, "provider", f"{prov.label} is not available: {ready.get('detail')}")
             return {"failed": ready.get("detail"), "run_id": run_id}
+        else:
+            G.Ledger(self.svc).open(self._run(run_id), "provider", None, None)
         self._enqueue(STEP, {"run_id": run_id, "n": 0}, f"{STEP}:{run_id}:0")
         control = self._start_control(study_id, seed, name, int(p.get("attempt") or 1))
         return {"run_id": run_id, "seed_id": seed["seed_id"], "control_run_id": control}
+
+    def _govern(self, run_id: str, study_id: str, prov: Any, prof: dict[str, Any], ready: dict[str, Any]) -> dict[str, Any] | None:
+        """4.5.2, before a MiroFish run sends anything: the circuit, readiness, then admission (automatic, your
+        approval, or refused). None when it may start now."""
+        circ = G.Circuit(self.svc)
+        cs = circ.state()
+        led = G.Ledger(self.svc)
+        if cs["state"] == "open":
+            why = f"the circuit is open after {cs.get('failures')} provider failures in a row (last: {cs.get('last_error')}) until {cs.get('until')}"
+            led.open(self._run(run_id), "provider", prof["key"], None)
+            self._finish_run(run_id, "failed", error=f"Not sent: {why}.")
+            self._fail(study_id, "provider", f"MiroFish was not called: {why}. The quantitative study stands; reset the circuit once MiroFish works.")
+            return {"failed": "circuit open", "run_id": run_id}
+        if cs["state"] == "half_open":
+            lv = prov.levels() if hasattr(prov, "levels") else {"A": ready}
+            ok = bool((lv.get("A") or {}).get("ok")) and bool((lv.get("B") or {"ok": True}).get("ok"))
+            if ok:
+                circ.success()                         # the one recovery probe (free) passed
+            else:
+                circ.failure("the recovery probe failed: " + str(((lv.get("B") or lv.get("A") or {}).get("detail")) or "")[:200])
+                led.open(self._run(run_id), "provider", prof["key"], None)
+                self._finish_run(run_id, "failed", error="Not sent: the circuit's recovery probe failed.")
+                self._fail(study_id, "provider", "MiroFish was not called: its recovery check failed, so the circuit is open again.")
+                return {"failed": "circuit probe failed", "run_id": run_id}
+        if not ready.get("ok"):
+            if not ready.get("config_error"):
+                circ.failure(str(ready.get("detail"))[:300])
+            led.open(self._run(run_id), "provider", prof["key"], None)
+            self._finish_run(run_id, "failed", error=f"{prov.label} is not available: {ready.get('detail')}")
+            self._fail(study_id, "provider", f"{prov.label} is not available: {ready.get('detail')}")
+            return {"failed": ready.get("detail"), "run_id": run_id}
+        adm = G.admit(self.svc, prof["key"])
+        approval = {"required": adm["decision"] == "approval", "decision": adm["decision"], "reason": adm["reason"], "code": adm["code"],
+                    "estimate": adm["estimate"], "profile": prof["key"], "at": C.utc_now()}
+        r = self._run(run_id)
+        ext = json.loads(r["external_json"] or "{}")
+        ext.update(estimate=adm["estimate"], approval=approval, admitted=adm["decision"] == "auto")
+        self._save_external(run_id, ext)
+        led.open(self._run(run_id), "provider", prof["key"], adm["estimate"], approval)
+        if adm["decision"] == "refused":
+            self._finish_run(run_id, "failed", error=f"Not sent: {adm['reason']}.")
+            self._fail(study_id, "provider", f"MiroFish was not called: {adm['reason']}. The quantitative study stands.")
+            self._update(study_id, governance={"state": "budget_exceeded", "reason": adm["reason"], "estimate": adm["estimate"]})
+            return {"failed": "budget exceeded", "run_id": run_id}
+        if adm["decision"] == "approval":
+            self._await(study_id, run_id, approval, f"{prof['label']} run, estimated {adm['estimate']['words']}: waiting for your approval "
+                                                    f"({adm['reason']})")
+            return {"awaiting_approval": adm["reason"], "run_id": run_id}
+        return None
+
+    def _await(self, study_id: str, run_id: str, approval: dict[str, Any], detail: str) -> None:
+        self._update(study_id, status="awaiting_approval", stage="provider", governance={"state": "approval", **approval},
+                     stages={"provider": {"state": "approval", "detail": detail[:600]}})
+        self.svc.bus.publish("scenario.approval", study_id, run_id=run_id, reason=approval.get("reason"))
+
+    def approve(self, study_id: str, profile: str | None = None) -> dict[str, Any]:
+        """Approve the simulation spending a waiting run asked for (its estimate, a larger agent count, Deep). It
+        approves spending only, never a trade. The budgets are checked again; a different profile may be chosen."""
+        p = self.load(study_id)
+        if p is None or p.get("status") != "awaiting_approval" or not p.get("run_id"):
+            raise RequestError("Nothing is waiting for approval in this study's scenarios.")
+        r = self._run(p["run_id"])
+        if r["status"] not in ("queued", "running"):
+            raise RequestError(f"The run is {r['status']}: nothing to approve.")
+        ext = json.loads(r["external_json"] or "{}")
+        state = ext.get("state") or {}
+        prof_key = profile or ext.get("profile") or self.settings()["profile"]
+        if profile and profile != ext.get("profile") and r["status"] != "queued":
+            raise RequestError("The run has started: its profile can no longer be changed (cancel, then retry with another profile).")
+        prof = G.profile(self.svc.settings, prof_key)
+        circ = G.Circuit(self.svc).state()
+        if circ["state"] == "open":
+            raise RequestError(f"Not approved: the provider's circuit is open after {circ.get('failures')} failures in a row "
+                               f"(last: {circ.get('last_error')}). Fix MiroFish and reset the circuit first.")
+        adm = G.admit(self.svc, prof["key"], agents=state.get("agents") if (ext.get("approval") or {}).get("code") in ("agents_over_cap", "agents_unknown") else None)
+        if adm["decision"] == "refused":
+            raise RequestError(f"Not approved: {adm['reason']}.")
+        approval = {**(ext.get("approval") or {}), "required": False, "approved": True, "approved_at": C.utc_now(), "profile": prof["key"],
+                    "approved_up_to_usd": adm["estimate"].get("high"), "estimate": adm["estimate"], "for": "simulation spending only"}
+        if (ext.get("approval") or {}).get("code") == "agents_over_cap":
+            state["agents_approved"] = int(state.get("agents") or 0)
+            ext["state"] = state
+        if (ext.get("approval") or {}).get("code") == "agents_unknown":
+            state["agents_unknown_approved"] = True
+            ext["state"] = state
+        if ext.get("paused_at"):
+            paused = _ts(ext.pop("paused_at"))
+            ext["paused_seconds"] = float(ext.get("paused_seconds") or 0.0) + max(0.0, (_now() - paused).total_seconds() if paused else 0.0)
+        ext.update(approval=approval, estimate=adm["estimate"], profile=prof["key"], run_minutes=prof["minutes"], admitted=True)
+        self._save_external(r["id"], ext)
+        G.Ledger(self.svc).open(self._run(r["id"]), "provider", prof["key"], adm["estimate"], approval)
+        if profile and profile != p.get("profile"):
+            cfg = self.config_for(p["provider"], prof["key"])
+            with self.svc.db.tx() as cur:
+                cur.execute("UPDATE scenario_runs SET config_json = ? WHERE id = ?", (json.dumps(cfg), r["id"]))
+            self._update(study_id, profile=prof["key"], config=cfg)
+        self._update(study_id, status="running", governance={"state": "approved", **approval},
+                     stages={"provider": {"state": "queued" if r["status"] == "queued" else "running", "detail": "approved; starting"}})
+        n = int(ext.get("step") or 0)
+        self._enqueue(STEP, {"run_id": r["id"], "n": n}, f"{STEP}:{r['id']}:{n}:approved")
+        if not p.get("control_run_id") and r["status"] == "queued":       # the control waits with the provider, then starts beside it
+            try:
+                self._start_control(study_id, self.scenarios()._seed(r["seed_id"]), p.get("provider") or "mirofish", int(p.get("attempt") or 1))
+            except Exception:  # noqa: BLE001 - the control never stops the provider run
+                log.exception("Could not start the control of %s", study_id)
+        return self.view(study_id)
 
     def _start_control(self, study_id: str, seed: dict[str, Any], main: str, attempt: int) -> str | None:
         """4.5 (SCENARIO_CONTROL=1): the single-prompt control on the same packet, beside the provider. Its cases are
@@ -346,6 +485,7 @@ class Pipeline:
                         (run_id, seed["seed_id"], study_id, getattr(prov, "name", "ai"), C.utc_now(), C.SCENARIO_SCHEMA_VERSION,
                          SC.PROMPT_VERSION, json.dumps(self.config_for("ai")), json.dumps(ext)))
         self._update(study_id, control_run_id=run_id)
+        G.Ledger(self.svc).open(self._run(run_id), "control", None, None)
         if not ready.get("ok"):
             self._finish_run(run_id, "failed", error=f"The control is not available: {ready.get('detail')}")
             return run_id
@@ -366,7 +506,15 @@ class Pipeline:
     def _ctx(self, r: Any) -> dict[str, Any]:
         sc = self.scenarios()
         seed = sc._seed(r["seed_id"])
-        return {"run_id": r["id"], "seed": seed, "markdown": SC.markdown(seed, SC.OUTPUT_PROMPT, SC.template_for(seed)),
+        run_id = r["id"]
+
+        def checkpoint(state: dict[str, Any]) -> None:
+            """4.5.2: saved before a costly write is sent, so a stop mid-request is reconciled, not sent again."""
+            row = self._run(run_id)
+            ext = json.loads(row["external_json"] or "{}")
+            ext["state"] = state
+            self._save_external(run_id, ext)
+        return {"run_id": r["id"], "checkpoint": checkpoint, "seed": seed, "markdown": SC.markdown(seed, SC.OUTPUT_PROMPT, SC.template_for(seed)),
                 "filename": f"{seed['symbol']}-catalyst-evidence-{seed['seed_id'][-8:]}.md", "question": seed["question"],
                 "instructions": ("Write the report as Central, Bullish and Bearish cases. End it with one JSON object that follows the "
                                  "packet's output template exactly. No prices, price targets or probabilities.")}
@@ -377,6 +525,13 @@ class Pipeline:
                 cur.execute("UPDATE scenario_runs SET external_json = ?, status = ? WHERE id = ?", (json.dumps(ext, default=str), status, run_id))
             else:
                 cur.execute("UPDATE scenario_runs SET external_json = ? WHERE id = ?", (json.dumps(ext, default=str), run_id))
+        self._ledger(run_id)
+
+    def _ledger(self, run_id: str) -> None:
+        try:
+            G.Ledger(self.svc).sync(run_id)
+        except Exception:  # noqa: BLE001 - the usage record never stops a run
+            log.exception("Could not update the usage record of %s", run_id)
 
     def _finish_run(self, run_id: str, status: str, *, error: str | None = None, **cols: Any) -> None:
         sets, vals = ["status = ?", "completed_at = ?"], [status, C.utc_now()]
@@ -388,6 +543,7 @@ class Pipeline:
             vals.append(v)
         with self.svc.db.tx() as cur:
             cur.execute(f"UPDATE scenario_runs SET {', '.join(sets)} WHERE id = ? AND status NOT IN ('complete', 'canceled')", (*vals, run_id))
+        self._ledger(run_id)
 
     def _fail_run(self, r: Any, stage: str, detail: str, attention: bool = False) -> None:
         """A provider run's failure is the study's; a control run's is only its own."""
@@ -423,12 +579,22 @@ class Pipeline:
             return {"skipped": f"step {n} is not the run's next step ({ext.get('step')})"}
         if n >= MAX_STEPS:
             return self._stop(r, ext, "the run took too many steps")
-        prov = self.provider(r["provider"])
+        prov = self.provider(r["provider"], ext.get("profile"))
         s = self.svc.settings
+        if (ext.get("approval") or {}).get("required"):
+            return {"skipped": "waiting for your approval"}
+        if ext.get("governed") and not ext.get("admitted"):
+            # Created but never admitted (the app stopped before admission finished): admit it now, or stop here.
+            gate = self._govern(run_id, r["study_id"], prov, G.profile(s, ext.get("profile")), prov.ready())
+            if gate is not None:
+                return gate
+            r = self._run(run_id)
+            ext = json.loads(r["external_json"] or "{}")
         if r["status"] == "queued":
             if r["provider"] == "mirofish":
-                busy = self.svc.db.one("SELECT COUNT(*) AS n FROM scenario_runs WHERE provider = 'mirofish' AND status = 'running' AND id != ?",
-                                       (run_id,))["n"]
+                # A run paused for your approval (after its graph, before its agents) does not hold a MiroFish slot.
+                busy = self.svc.db.one("""SELECT COUNT(*) AS n FROM scenario_runs WHERE provider = 'mirofish' AND status = 'running' AND id != ?
+                                          AND COALESCE(json_extract(external_json, '$.approval.required'), 0) != 1""", (run_id,))["n"]
                 if busy >= s.mirofish_concurrency:
                     self._save_external(run_id, {**ext, "detail": f"waiting for a free MiroFish slot ({busy} running)"})
                     raise Deferred(_now() + timedelta(seconds=WAIT_TURN), "waiting for a free MiroFish slot")
@@ -436,9 +602,10 @@ class Pipeline:
             self._save_external(run_id, ext, status="running")
             self._stage_of(r, stages={"provider": {"state": "running", "detail": f"{prov.label} started"}})
         started = _ts(ext.get("started_at")) or _now()
-        budget = s.mirofish_run_minutes * 60.0
-        if (_now() - started).total_seconds() > budget:
-            return self._stop(r, ext, f"it took longer than MIROFISH_RUN_MINUTES ({s.mirofish_run_minutes:g} minutes)")
+        minutes = float(ext.get("run_minutes") or s.mirofish_run_minutes)
+        # Time spent waiting for your approval is not the run's time.
+        if (_now() - started).total_seconds() - float(ext.get("paused_seconds") or 0.0) > minutes * 60.0:
+            return self._stop(r, ext, f"it took longer than its time cap ({minutes:g} minutes; MIROFISH_RUN_MINUTES and the profile)")
         try:
             out = prov.advance(self._ctx(r), ext.get("state") or {})
         except Exception as exc:  # noqa: BLE001 - a provider bug must not leave the run hanging
@@ -456,6 +623,13 @@ class Pipeline:
             self._finish_run(run_id, "failed", error=err)
             self._fail_run(r, "provider", f"{prov.label} failed: {err}")
             return {"failed": err}
+        if out.approval:                                          # 4.5.2: the agent check asks first
+            ext.update({"state": out.state, "stage": out.stage, "detail": out.detail, "step": n + 1, "last_step_at": C.utc_now()})
+            ext["approval"] = {**out.approval, "required": True, "decision": "approval", "at": C.utc_now(), "profile": ext.get("profile")}
+            ext["paused_at"] = C.utc_now()
+            self._save_external(run_id, ext)
+            self._await(r["study_id"], run_id, ext["approval"], f"{out.detail}")
+            return {"awaiting_approval": out.approval.get("reason")}
         ext.update({"state": out.state, "stage": out.stage, "detail": out.detail, "step": n + 1, "last_step_at": C.utc_now()})
         if out.model:
             ext["model"] = out.model
@@ -463,6 +637,8 @@ class Pipeline:
             ext["usage"] = out.usage
         if out.failed:
             self._save_external(run_id, ext)
+            if r["provider"] == "mirofish":
+                G.Circuit(self.svc).failure(out.failed)            # 4.5.2: a provider failure (never a cancel or bad cases)
             self._finish_run(run_id, "failed", error=out.failed)
             self._fail_run(r, "provider", f"{prov.label}: {out.failed}")
             return {"failed": out.failed}
@@ -473,11 +649,14 @@ class Pipeline:
             self._fail_run(r, "provider", f"{prov.label}: {out.attention}", attention=True)
             return {"attention": out.attention}
         if out.report is not None:
+            if r["provider"] == "mirofish":
+                G.Circuit(self.svc).success()
             ext["parsed_cases"] = out.cases
             ext["report_received_at"] = C.utc_now()
             with self.svc.db.tx() as cur:
                 cur.execute("UPDATE scenario_runs SET external_json = ?, report_text = ?, model_version = ? WHERE id = ?",
                             (json.dumps(ext, default=str), out.report[:REPORT_LIMIT], out.model, run_id))
+            self._ledger(run_id)
             self._stage_of(r, stages={"provider": {"state": "done", "detail": f"{prov.label}: report received"}}, stage="paths")
             self._enqueue(FINISH, {"run_id": run_id}, f"{FINISH}:{run_id}")
             return {"report": True}
@@ -487,7 +666,9 @@ class Pipeline:
         return {"next_in": out.next_in, "stage": out.stage}
 
     def _stop(self, r: Any, ext: dict[str, Any], why: str) -> dict[str, Any]:
-        prov = self.provider(r["provider"])
+        prov = self.provider(r["provider"], ext.get("profile"))
+        if r["provider"] == "mirofish":
+            G.Circuit(self.svc).failure(f"stopped: {why}")
         said = prov.stop(ext.get("state") or {}) if hasattr(prov, "stop") else "nothing to stop"
         self._finish_run(r["id"], "failed", error=f"Stopped: {why} ({said}).")
         self._fail_run(r, "provider", f"{prov.label} was stopped: {why} ({said}).")
@@ -652,6 +833,7 @@ class Pipeline:
                             (C.utc_now(), C.digest(imp.model_dump()), json.dumps(cases), excerpt, run_id))
                 if cur.rowcount == 0:
                     return {"skipped": "the run changed while its report was read"}
+            self._ledger(run_id)
             self._finalized(r, "validated")
             self.svc.bus.publish("scenario.imported", run_id, study_id=study_id, symbol=seed["symbol"], cases=len(cases), provider=r["provider"])
         r = self._run(run_id)
@@ -793,6 +975,7 @@ class Pipeline:
         with self.svc.db.tx() as cur:
             cur.execute("UPDATE scenario_runs SET status = 'canceled', completed_at = ?, error = 'canceled by you' "
                         "WHERE id = ? AND status IN ('queued', 'running')", (C.utc_now(), r["id"]))
+        self._ledger(r["id"])
         ext = json.loads(r["external_json"] or "{}")
         try:
             prov = self.provider(r["provider"])
@@ -844,6 +1027,8 @@ class Pipeline:
             raise RequestError("This study has no scenario pipeline: run it with scenarios on.")
         if p.get("status") in ("running",):
             raise RequestError("The scenario pipeline is still running.")
+        if p.get("status") == "awaiting_approval":
+            raise RequestError("This study's run is waiting for your approval: approve it, or cancel it before retrying.")
         if p.get("version_id") and p.get("status") == "complete" and p.get("stages", {}).get("paths", {}).get("state") == "failed":
             self.revalue(study_id)                                     # only the valuation failed: value again
             return self.view(study_id)
@@ -863,10 +1048,11 @@ class Pipeline:
                                "Check the server first; to start a new run anyway (it may cost model calls), confirm a new run.")
         attempt = int(p.get("attempt") or 1) + 1
         st = self.settings()
-        cfg = self.config_for(st["provider"])
+        cfg = self.config_for(st["provider"], st["profile"])
         history = list(p.get("history") or [])
         history.append({k: p.get(k) for k in ("attempt", "run_id", "control_run_id", "version_id", "valuation_id", "decision", "status", "error")})
-        p = self._update(study_id, attempt=attempt, provider=st["provider"], config=cfg, config_hash=C.digest(cfg)[:16], status="running",
+        p = self._update(study_id, attempt=attempt, provider=st["provider"], profile=st["profile"], governance=None, config=cfg,
+                         config_hash=C.digest(cfg)[:16], status="running",
                          stage="provider", error=None, run_id=None, control_run_id=None, version_id=None, valuation_id=None, findings=None,
                          decision=None, finalize=None, history=history[-10:],
                          stages={"provider": {"state": "queued", "detail": "retrying"}, "paths": {"state": "pending", "detail": ""},
@@ -980,6 +1166,10 @@ class Pipeline:
                        "report_excerpt": r["report_excerpt"], "seed_id": r["seed_id"], "rounds": state.get("rounds"),
                        "total_rounds": state.get("total_rounds"), "stopped_early": bool(state.get("stopped_early")),
                        "report_received": bool((r["report_text"] or "").strip()), "ambiguous_outcome": bool(ext.get("ambiguous_outcome"))}
+        usage = None
+        if p.get("run_id"):
+            u = self.svc.db.one("SELECT * FROM scenario_usage WHERE run_id = ?", (p["run_id"],))
+            usage = G.Ledger.view(dict(u)) if u else None
         val = None
         if p.get("valuation_id"):
             try:
@@ -987,6 +1177,11 @@ class Pipeline:
             except RequestError:
                 val = None
         status = p.get("status") or "running"
+        if run is not None and p.get("run_id"):
+            rr = self.svc.db.one("SELECT external_json FROM scenario_runs WHERE id = ?", (p["run_id"],))
+            rext = json.loads(rr["external_json"] or "{}") if rr else {}
+            run.update(profile=rext.get("profile"), estimate=rext.get("estimate"), approval=rext.get("approval"),
+                       agents=(rext.get("state") or {}).get("agents"), run_minutes=rext.get("run_minutes"))
         return {"status": status, "stage": p.get("stage"), "provider": prov, "provider_label": stage_label("provider", prov),
                 "attempt": p.get("attempt", 1), "stages": stages, "run": run, "seed_id": p.get("seed_id"), "version_id": p.get("version_id"),
                 "valuation": val, "findings": p.get("findings"), "decision": self._decision(study_id, p), "error": p.get("error"),
@@ -995,6 +1190,8 @@ class Pipeline:
                             for r in self.svc.db.query("SELECT * FROM scenario_forecasts WHERE study_id = ? ORDER BY variant", (study_id,))]
                 if self._has_forward() else [],
                 "finalize": p.get("finalize"), "history": p.get("history") or [],
+                "profile": p.get("profile"), "governance": p.get("governance"), "usage": usage,
+                "can_approve": status == "awaiting_approval",
                 "retry_needs_confirmation": bool(run and run["status"] == "needs_attention" and run.get("ambiguous_outcome")),
                 "retry_reuses_report": bool(p.get("run_id") and self._resumable(p, self.svc.db.one("SELECT * FROM scenario_runs WHERE id = ?",
                                                                                                    (p["run_id"],)))),
@@ -1047,8 +1244,34 @@ def install(svc: Any) -> None:
 
         @router.post("/scenarios/settings")
         def set_settings(body: ScenarioSettingsIn) -> dict[str, Any]:
-            out = pl.save_settings(body.provider, body.auto)
+            out = pl.save_settings(body.provider, body.auto, body.profile)
             return {**out, "readiness": pl.readiness()}
+
+        @router.post("/studies/{study_id}/pipeline/approve")
+        def approve(study_id: str, body: ApproveIn | None = None) -> dict[str, Any]:
+            return {"pipeline": pl.approve(study_id, body.profile if body else None)}
+
+        @router.get("/scenarios/usage")
+        def usage() -> dict[str, Any]:
+            return {**G.Ledger(svc).report(), "budgets": G.budgets(svc)}
+
+        @router.post("/scenarios/usage/{run_id}")
+        def actual(run_id: str, body: ActualCostIn) -> dict[str, Any]:
+            if not (0 <= body.actual_usd <= 10_000):
+                raise RequestError("actual_usd must be between 0 and 10,000")
+            return {"run": G.Ledger(svc).enter_actual(run_id, body.actual_usd, body.note)}
+
+        @router.get("/scenarios/estimate")
+        def estimate(profile: str = "quick") -> dict[str, Any]:
+            if profile not in G.PROFILE_KEYS:
+                raise RequestError("profile must be quick, standard or deep")
+            adm = G.admit(svc, profile)
+            return {"profile": adm["profile"], "estimate": adm["estimate"], "budgets": adm["budgets"],
+                    "admission": {k: adm[k] for k in ("decision", "code", "reason")}}
+
+        @router.post("/scenarios/circuit/reset")
+        def reset_circuit() -> dict[str, Any]:
+            return {"circuit": G.Circuit(svc).reset(), "readiness": pl.readiness()}
 
         @router.post("/scenarios/check")
         def check() -> dict[str, Any]:

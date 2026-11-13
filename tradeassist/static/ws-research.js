@@ -65,8 +65,8 @@
      panel follows it: its four stages, the provider's progress (MiroFish's project and simulation ids as they arrive),
      Cancel and Retry, then the findings, the cases drawn on the linked chart from their saved prices, and the study's
      own candidate strategies valued under every case from one quote snapshot. No case has a probability. */
-  const STAGE_TONE = { done: "pass", running: "info", queued: "info", pending: "", failed: "fail", attention: "warn", canceled: "info", skipped: "info" };
-  const STAGE_WORDS = { done: "done", running: "running", queued: "queued", pending: "waiting", failed: "failed", attention: "needs attention", canceled: "canceled", skipped: "skipped" };
+  const STAGE_TONE = { done: "pass", running: "info", queued: "info", pending: "", failed: "fail", attention: "warn", canceled: "info", skipped: "info", approval: "info" };
+  const STAGE_WORDS = { done: "done", running: "running", queued: "queued", pending: "waiting", failed: "failed", attention: "needs attention", canceled: "canceled", skipped: "skipped", approval: "waiting for you" };
   function stageStrip(p) {
     return el("ol", { class: "ws-stages", "aria-label": "Progress" }, p.stages.map(x => el("li", { class: `ws-stage ${x.state || "pending"}`, "data-stage": x.key, title: x.detail || "" },
       el("span", { class: "ws-stage-label", text: x.label }), " ", STAGE_TONE[x.state] ? statusTag(STAGE_TONE[x.state], STAGE_WORDS[x.state] || x.state) : el("span", { class: "muted small", text: STAGE_WORDS[x.state] || x.state || "waiting" }),
@@ -217,6 +217,28 @@
     void timer;
   })();
 
+  // 4.5.2: what each simulation cost (or may have cost), and entering what the provider actually charged.
+  async function usagePanel(w, into) {
+    let d;
+    try { d = await w.api("/v3/scenarios/usage"); } catch (e) { if (e !== WS.GONE) into.append(el("p", { class: "error", text: e.message })); return; }
+    const m = x => (isNum(x) ? money(x, 2) : "unknown");
+    const t = d.today || {}, mo = d.month || {};
+    const box = el("div", { class: "ws-usage" }, el("h5", { text: "Simulation usage" }),
+      el("p", { class: "small", text: `Today: ${m(t.low_usd)} to ${m(t.high_usd)}${t.unknown_runs ? `, plus ${t.unknown_runs} run(s) of unknown cost` : ""}. This month: ${m(mo.low_usd)} to ${m(mo.high_usd)}${mo.unknown_runs ? `, plus ${mo.unknown_runs} of unknown cost` : ""}. Average successful run: ${m(d.average_successful_usd)} (${d.average_basis}); average time ${isNum(d.average_latency_seconds) ? `${Math.round(d.average_latency_seconds / 60)} min` : "unknown"}; failure rate ${isNum(d.failure_rate) ? `${Math.round(100 * d.failure_rate)}%` : "unknown"}.` }),
+      d.runs.length ? table([
+        { label: "Run", cell: r => el("span", { class: "small", text: `${r.provider}${r.profile ? ` ${r.profile}` : ""} · ${new Date(r.created_at).toLocaleString()}` }) },
+        { label: "Status", cell: r => r.status + (r.stopped_early ? " (stopped early)" : "") },
+        { label: "Agents × rounds", cell: r => `${r.agents ?? "?"} × ${r.rounds ?? "?"}` },
+        { label: "Cost", cell: r => r.words },
+        { label: "Actual", cell: r => { if (r.provider !== "mirofish") return ""; const i = el("input", { type: "number", min: "0", step: "0.01", "aria-label": "Actual cost in dollars", style: "width:6em" });
+          const b = el("button", { class: "ws-btn ws-btn-mini", type: "button" }, "Save");
+          b.addEventListener("click", async () => { try { await w.api(`/v3/scenarios/usage/${enc(r.run_id)}`, { actual_usd: Number(i.value) }); box.remove(); usagePanel(w, into); } catch (e) { if (e !== WS.GONE) b.after(el("span", { class: "error", text: ` ${e.message}` })); } });
+          return el("span", {}, i, " ", b); } }], d.runs) : WS.empty("No simulation has run yet."),
+      el("p", { class: "small muted", text: d.note }));
+    const old = into.querySelector(".ws-usage"); if (old) old.remove();
+    into.append(box);
+  }
+
   function pipelinePanel(w, s, alive) {
     const st = s.study;
     const box = el("section", { class: "ws-pipeline panel", "aria-label": "Scenarios", "data-study": st.id });
@@ -251,12 +273,24 @@
       const r = p.run;
       if (r && p.status === "running") {
         const ids = Object.entries(r.remote || {}).map(([k, x]) => `${k.replace(/_id$/, "")} ${x}`).join(", ");
-        kids.push(el("p", { class: "small muted", text: `${r.status === "queued" ? "Waiting to start" : `${r.stage || "starting"}: ${r.detail || ""}`}${isNum(r.elapsed_seconds) ? ` · ${Math.round(r.elapsed_seconds)} s` : ""}${ids ? ` · ${ids}` : ""}. The quantitative study above is complete; this continues if you refresh or switch stocks.` }));
+        const rounds = isNum(r.rounds) && isNum(r.total_rounds) ? ` · round ${r.rounds} of ${r.total_rounds}` : "";
+        const prof = r.profile ? ` · ${r.profile} profile` : "";
+        const cost = r.estimate && r.estimate.words ? ` · estimated ${r.estimate.words}` : "";
+        kids.push(el("p", { class: "small muted", text: `${r.status === "queued" ? "Waiting to start" : `${r.stage || "starting"}: ${r.detail || ""}`}${rounds}${prof}${isNum(r.elapsed_seconds) ? ` · ${Math.round(r.elapsed_seconds)} s` : ""}${cost}${ids ? ` · ${ids}` : ""}. The quantitative study above is complete; this continues if you refresh or switch stocks.` }));
       }
+      if (p.usage && p.status !== "running") kids.push(el("p", { class: "small muted ws-sim-details", text: `Simulation: ${p.usage.provider}${p.usage.profile ? `, ${p.usage.profile} profile` : ""}${p.usage.model ? `, ${p.usage.model}` : ""}; ${p.usage.agents ?? "?"} agents, ${p.usage.rounds ?? "?"} rounds; ${p.usage.status}; cost ${p.usage.words}.` }));
       if (r && r.stopped_early) kids.push(el("p", { class: "small" }, statusTag("warn", "Stopped early"), ` The simulation stopped on the server after ${r.rounds || "?"} of ${r.total_rounds || "?"} rounds: its cases come from an unfinished run.`));
       if (p.error) kids.push(el("p", { class: "small", role: "alert" }, statusTag(p.status === "canceled" ? "info" : p.status === "needs_attention" ? "warn" : "fail",
         p.status === "canceled" ? "Canceled" : p.status === "needs_attention" ? "Needs attention" : "Did not finish"), ` ${p.error}`));
       const row = el("div", { class: "ws-row" });
+      if (p.can_approve) {
+        // 4.5.2: approval is for simulation spending only, never a trade.
+        const g = p.governance || {}, est = (r && r.estimate) || g.estimate || {};
+        kids.push(el("p", { class: "small ws-approval", role: "status" }, statusTag("info", "Waiting for your approval"),
+          ` ${g.reason || ""}. Estimated ${est.words || "unknown"}. Approving allows this simulation's spending only; it places no order.`));
+        const b = el("button", { class: "ws-btn primary", type: "button" }, "Approve the simulation");
+        b.addEventListener("click", () => act("approve", b, "Approving…")); row.append(b);
+      }
       if (p.can_cancel) { const b = el("button", { class: "ws-btn", type: "button" }, "Cancel"); b.addEventListener("click", () => act("cancel", b, "Canceling…")); row.append(b); }
       if (p.can_retry && p.retry_needs_confirmation) {
         // 4.5.1: the last paid request's outcome is unknown; a new run may pay twice, so it is a separate, explicit choice.
@@ -279,7 +313,7 @@
         kids.push(el("p", { class: "small muted ws-forward-line", text: `Forward evidence: ${p.forward.map(f => `${FW[f.variant] || f.variant} ${pctText(f.median_pct)} (${st2[f.status] || f.status}${isNum(f.realized_pct) ? `; it moved ${pctText(f.realized_pct)}` : ""})`).join("; ")}.` }));
       }
       box.replaceChildren(...kids);
-      if (p.status === "running") timer = setTimeout(load, 1500);
+      if (p.status === "running" || p.status === "awaiting_approval") timer = setTimeout(load, p.status === "running" ? 1500 : 5000);
       else if (p.version_id && !drawn) { drawn = true; drawAuto(p.version_id); }
     }
     paint(s.pipeline);
@@ -299,11 +333,14 @@
     const provider = el("select", { "aria-label": "Scenario provider" }, [["mirofish", "MiroFish (self-hosted)"], ["ai", "Single AI call"], ["demo", "Demo provider"]].map(([k, t]) => el("option", { value: k }, t)));
     const autoBox = el("input", { type: "checkbox", "aria-label": "Run scenarios automatically" });
     const provNote = el("span", { class: "small muted" });
+    // 4.5.2: the simulation profile, the provider's state, and the spending: compact; the details are folded away.
+    const profileSel = el("select", { "aria-label": "Simulation profile" }, [["quick", "Quick"], ["standard", "Standard"], ["deep", "Deep (asks first)"]].map(([k, t]) => el("option", { value: k }, t)));
+    const simInfo = el("div", { class: "small ws-sim-info", "aria-live": "polite" });
     const scenRow = el("div", { class: "ws-row ws-scen-settings" }, el("label", { class: "check" }, scen, " Run scenarios after the study"),
-      field("Provider", provider), el("label", { class: "check" }, autoBox, " On by default"), provNote);
+      field("Provider", provider), field("Simulation", profileSel), el("label", { class: "check" }, autoBox, " On by default"), provNote);
     const form = el("details", { class: "ws-more", open: true }, el("summary", { text: "Study settings" }),
       el("div", { class: "ws-row" }, field("Horizon", horizon), field("Kind of trade", thesis)),
-      el("div", { class: "ws-row" }, field("Direction", dir), field("Peers", peers)), scenRow);
+      el("div", { class: "ws-row" }, field("Direction", dir), field("Peers", peers)), scenRow, simInfo);
     w.body.append(form, el("div", { class: "ws-row" }, run, status), out);
     let scenSettings = null, pendingKey = null;
     const scenFits = () => [1, 5].includes(Number(horizon.value)) && scenSettings && scenSettings.enabled;
@@ -312,12 +349,32 @@
       scen.disabled = !scenFits();
       if (!scenFits()) scen.checked = false;
       const rd = scenSettings && scenSettings.readiness;
-      provNote.replaceChildren(!scenSettings ? "" : !scenFits() ? "Scenarios run on 1- or 5-session studies." : rd ? statusTag(rd.ok ? "pass" : "warn", rd.ok ? "Ready" : "Not ready") : "", rd && !rd.ok && scenFits() ? ` ${rd.detail}` : "");
+      const TONE = { ready: "pass", degraded: "warn", unavailable: "fail", config_error: "fail", circuit_open: "warn", budget_exceeded: "warn" };
+      provNote.replaceChildren(!scenSettings ? "" : !scenFits() ? "Scenarios run on 1- or 5-session studies." : rd ? statusTag(TONE[rd.state] || (rd.ok ? "pass" : "warn"), rd.state_label || (rd.ok ? "Ready" : "Not ready")) : "", rd && !rd.ok && scenFits() ? ` ${rd.detail}` : "");
+      const pf = profileSel.closest(".field"); if (pf) pf.hidden = !scenSettings || scenSettings.provider !== "mirofish";
+      simInfo.replaceChildren();
+      if (!scenSettings || scenSettings.provider !== "mirofish" || !rd || !scenFits()) return;
+      const b = rd.budgets || {}, est = rd.estimate || {}, adm = rd.admission || {}, c = rd.circuit || {}, fn = rd.functional || {};
+      const m = x => (isNum(x) ? money(x, 2) : "unknown");
+      simInfo.append(el("p", { class: "small" }, el("strong", { text: "Next run: " }), `${est.words || "unknown"}. `,
+        adm.decision === "auto" ? statusTag("pass", "Starts on its own") : adm.decision === "approval" ? statusTag("info", "Asks you first") : adm.decision === "refused" ? statusTag("warn", "Not allowed now") : "",
+        adm.decision && adm.decision !== "auto" ? ` ${adm.reason}.` : ""),
+        el("details", { class: "ws-more ws-sim-more" }, el("summary", { text: "Simulation details" }),
+          el("ul", { class: "plain small" },
+            el("li", { text: `Profile: ${(rd.profile || {}).label || ""}, ${(rd.profile || {}).words || ""}.` }),
+            el("li", { text: `Readiness: connection ${((rd.levels || {}).A || {}).ok ? "ok" : "not ok"}; API ${((rd.levels || {}).B || {}).ok ? "ok" : ((rd.levels || {}).B ? "not ok" : "not checked")}; checked ${rd.checked_at ? new Date(rd.checked_at).toLocaleTimeString() : ""}.${rd.action ? ` ${rd.action}` : ""}` }),
+            el("li", { text: `Functional test: ${fn.words || (fn.ok ? "passed" : "not run")}.` }),
+            el("li", { text: `Circuit breaker: ${c.state || "closed"} (${c.failures || 0} of ${c.threshold || "?"} failures in a row)${c.last_error ? `; last: ${c.last_error}` : ""}.` }),
+            el("li", { text: `Spending today ${m((b.today || {}).high_usd)} at most of ${m(b.daily_limit)}; this month ${m((b.month || {}).high_usd)} at most of ${m(b.monthly_limit)}; automatic approval up to ${m(b.auto_approval_usd)}. MiroFish reports no usage: costs are estimates unless you enter what your provider charged.` })),
+          c.state === "open" || c.state === "half_open" ? el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: async () => {
+            try { await w.api("/v3/scenarios/circuit/reset", {}); loadScen(); } catch (e) { if (e !== WS.GONE) simInfo.append(el("p", { class: "error", text: e.message })); } } }, "Reset the circuit") : "",
+          el("button", { class: "ws-btn ws-btn-mini", type: "button", onclick: () => usagePanel(w, simInfo) }, "Simulation usage")));
     };
     async function loadScen() {
       try {
         scenSettings = await w.api("/v3/scenarios/settings");
         provider.value = scenSettings.provider; autoBox.checked = !!scenSettings.auto; scen.checked = !!scenSettings.auto;
+        profileSel.value = scenSettings.profile || "quick";
       } catch (e) { if (e === WS.GONE) return; scenSettings = null; }
       paintScen();
     }
@@ -327,6 +384,7 @@
       paintScen();
     }
     provider.addEventListener("change", () => saveScen({ provider: provider.value }));
+    profileSel.addEventListener("change", () => saveScen({ profile: profileSel.value }));
     autoBox.addEventListener("change", () => { scen.checked = autoBox.checked && scenFits(); saveScen({ auto: autoBox.checked }); });
     horizon.addEventListener("change", () => { if (scenSettings) scen.checked = !!scenSettings.auto && scenFits(); paintScen(); });
     if (catalystOn()) loadScen(); else scenRow.hidden = true;

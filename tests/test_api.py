@@ -41,6 +41,9 @@ V3_WRITES = {
     # 4.4: record a scenario case's trigger as observed (with its independent source; the strategies are valued again
     # and decided again) and mark a scenario notice seen. Records only; no orders.
     "/v3/studies/{study_id}/decision/trigger", "/v3/scenarios/notices/{decision_id}/seen",
+    # 4.5.2: approve a waiting simulation's spending (simulation spending only, never a trade), enter what a run actually
+    # cost, and reset the provider's circuit breaker. Records and settings; no orders.
+    "/v3/studies/{study_id}/pipeline/approve", "/v3/scenarios/usage/{run_id}", "/v3/scenarios/circuit/reset",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.
