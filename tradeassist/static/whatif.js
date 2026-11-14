@@ -39,7 +39,10 @@ const WHATIFX = (() => {
   return { pathLines, scenarioOf, quantities, riskWord };
 })();
 
-function whatIfWidget(symbol, chartApi) {
+function whatIfWidget(symbol, chartApi, opts = {}) {
+  // 4.7: inside the workstation, its lines (another model's) are drawn only when asked, so they never compete with a
+  // Research study's official paths; `opts.lines()` says whether to draw them (the classic screen always does).
+  const linesOn = () => (typeof opts.lines === "function" ? !!opts.lines() : true);
   const st = { setup: null, scenario: {}, include: {}, horizon: null, peers: "", provider: "chatgpt", ai: null, model: null, modelPending: 0,
     source: "model", kind: "shares", quantity: 100, request: 0, timer: null, rank: null, lastArgs: null, disposed: false };
   const err = el("div", { class: "error", role: "alert" });
@@ -115,8 +118,8 @@ function whatIfWidget(symbol, chartApi) {
     if (!m || !a) return null;
     return { ...m, last_time: a.last_time, last: isNum(m.last) ? m.last : a.last_close, times: m.times && m.times.length ? m.times : (a.future_times || []).slice(0, m.path.length) };
   }
-  function drawModel() { chartApi.setLines("whatif:model", WHATIFX.pathLines("whatif:model", st.model, WI_MODEL_COLOR, "model", false)); }
-  function drawAI() { chartApi.setLines("whatif:ai", st.ai ? WHATIFX.pathLines("whatif:ai", st.ai.line, WI_AI_COLOR, st.ai.label, true) : []); }
+  function drawModel() { chartApi.setLines("whatif:model", linesOn() ? WHATIFX.pathLines("whatif:model", st.model, WI_MODEL_COLOR, "model", false) : []); }
+  function drawAI() { chartApi.setLines("whatif:ai", st.ai && linesOn() ? WHATIFX.pathLines("whatif:ai", st.ai.line, WI_AI_COLOR, st.ai.label, true) : []); }
 
   // --- loading the setup -------------------------------------------------------------------------------------
   async function load(refresh, reset) {
@@ -533,6 +536,9 @@ function whatIfWidget(symbol, chartApi) {
     if (!prev || JSON.stringify({ ...prev, horizon: 0 }) !== JSON.stringify({ ...now, horizon: 0 }) || what === "load") load(false);
   });
   if (chartApi.chartArgs()) load(false);        // the chart was already loaded when the widget was made
-  const dispose = () => { st.disposed = true; clearTimeout(st.timer); };
-  return { widget, position, dispose };
+  // 4.7: closing it (or a new stock) takes its lines off the chart: they belong to this widget alone.
+  const dispose = () => { st.disposed = true; clearTimeout(st.timer); try { chartApi.setLines("whatif:", []); } catch (e) { /* the chart is gone */ } };
+  // 4.7: the factor values set here, for the Research study's Scenario Lab (the factors switched on only).
+  const shocks = () => (st.setup ? st.setup.factors.filter(r => st.include[r.key] && isNum(st.scenario[r.key])).map(r => ({ key: r.key, label: r.label, unit: r.unit, value: st.scenario[r.key] })) : []);
+  return { widget, position, dispose, redrawLines: () => { drawModel(); drawAI(); }, shocks };
 }

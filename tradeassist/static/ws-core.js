@@ -28,6 +28,10 @@ const WS = (() => {
   let dockOpen = true;
 
   for (const [g] of GROUPS) ctx[g] = {};
+  // 4.7: Discover's horizons are categories (today, an event, over days); a Research study's are trading sessions.
+  // Kept as separate types, with this one explicit map from a category to the sessions a study of it uses.
+  const HORIZON_SESSIONS = { intraday: 1, event: 5, swing: 5 };
+  const horizonSessions = h => (Number.isInteger(Number(h)) && Number(h) > 0 && String(h).trim() !== "" ? Number(h) : HORIZON_SESSIONS[h] || null);
 
   /* ---------- small DOM helpers (classic el() does the work) ---------- */
   const icon = path => { const s = svg("svg", { viewBox: "0 0 16 16", "aria-hidden": "true" }); s.append(svg("path", { d: path })); return s; };
@@ -724,7 +728,7 @@ const WS = (() => {
     stream();
   }
 
-  return { GROUPS, WORKSPACES, register, set, contextOf, provide, find, empty, toast, openMenu, closeMenu, addToActive, goWorkspace,
+  return { GROUPS, WORKSPACES, register, set, contextOf, provide, find, empty, toast, openMenu, closeMenu, addToActive, goWorkspace, horizonSessions,
     onEvent, boot, saveNow, routeClassic, allWidgets, tabs: () => tabs, active: () => activeTab, ctx, catalog, openPalette, saveLayout,
     status: () => statusInfo, types: () => TYPES, handlerCount: () => eventHandlers.size, GONE, crosshair, dayOf, DEFAULT_LAYOUTS: {}, DEFAULT_DOCK: null };
 })();

@@ -518,6 +518,13 @@ h3.grow { flex: 1 1 auto; margin: 0; align-self: center; }
 .lw-legend-item.off { opacity: 0.45; text-decoration: line-through; }
 .lw-swatch { display: inline-block; width: 16px; height: 0; border-top: 2px solid; }
 .lw-swatch.dashed { border-top-style: dashed; }
+.lw-swatch.dotted { border-top-style: dotted; }
+/* 4.7: a legend entry that is a note, not a line (a case that is the base path); and why a forecast is not drawn. */
+.lw-legend-note { cursor: default; opacity: 0.75; font-style: italic; }
+.lw-legend-note:hover { background: transparent; }
+.lw-notice { margin: 4px 0; padding: 4px 8px; border-left: 3px solid var(--warn, #c98a00); background: color-mix(in srgb, var(--warn, #c98a00) 8%, transparent); }
+.lw-notice[hidden] { display: none; }
+.lw-notice p { margin: 0; }
 .lw-info { min-height: 1.2em; margin: 4px 0; }
 .lw-find { align-items: center; gap: 10px; margin-top: 8px; }
 .lw-find input[type="range"] { width: 120px; vertical-align: middle; }

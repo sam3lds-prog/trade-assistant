@@ -354,3 +354,25 @@ body[data-app="workstation"] { background: var(--ws-grid); margin: 0; min-height
 .ws-cat-factor input[type="text"], .ws-cat-source input[type="text"] { width: 7em; }
 .ws-case-form { border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; }
 .ws-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }
+
+/* 4.7 Forecast Studio: the study's status line, the four zones of Forecast & Scenarios, the Scenario Lab, the decision of
+   the version shown (an exploration is marked research only), the case picked, and the trigger link. */
+.ws-study-head h3 { margin: 6px 0 2px; }
+.ws-lifecycle { margin: 4px 0 8px; }
+.ws-lifecycle .ws-sim-actions { margin-top: 4px; }
+.ws-zone { border-top: 1px solid var(--line); padding: 6px 0 8px; margin-top: 6px; }
+.ws-zone:first-child { border-top: 0; margin-top: 0; }
+.ws-zone > h4 { margin: 2px 0 6px; }
+.ws-lab-editor { margin: 6px 0; }
+.ws-lab-status { margin-top: 4px; }
+.ws-decision.exploratory { border-style: dashed; border-left-style: solid; border-left-color: var(--warn, #c98a00); }
+.ws-decision.none { border-left-color: var(--line); }
+.ws-decision-of { margin: 0 0 4px; }
+.ws-trigger { margin: 6px 0; padding: 6px 8px; background: color-mix(in srgb, var(--accent, #3b82f6) 6%, transparent); border-radius: 6px; }
+.ws-trigger-link { min-width: 22em; font-size: 1.02em; }
+.ws-case-list li.selected strong { text-decoration: underline; }
+.ws-case-list button.plain { padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.ws-decided { color: var(--accent, #3b82f6); font-weight: 600; }
+.ws-promote { margin: 6px 0; }
+.ws-headline p { margin: 2px 0; }
+.ws-strategies table td:nth-child(3) { min-width: 9em; }

@@ -47,6 +47,36 @@ permission is added or changed; nothing here places an order.**
 - **A neutral base says what it can claim**: calibration pending, too little history, range only, no validated edge,
   validated edge, or both validated. A flat base is never an unexplained 0.00%.
 
+### The Research study, the chart and the handoffs (PR 2)
+
+- **One study, four sections**: Summary (the base and what it may claim, the cases, the one decision and its one
+  action), Evidence (with the cutoff and provenance), Forecast & Scenarios (the base, the catalyst and simulation, the
+  Scenario Lab, the versions) and Strategies (one table under the version and case shown). A status line above them
+  says where the study is (baseline complete, simulation running, waiting for your approval, decision ready…) with
+  Approve, Cancel and Retry when they apply.
+- **Full study or Baseline only** in Study settings; the provider, profile and default are under *Simulation
+  settings*. A finished baseline study can *Run scenarios* later. 3-, 10- and 20-session studies stay baseline only.
+- **Drawn without a button.** The study's result is on the linked chart as soon as it exists: the base solid, its
+  range dotted, the cases dashed, the decision's case thicker and marked ◆; a case with no quantified assumption is a
+  legend note ("Central = Base"), not a line. The catalyst's session is marked when its timing is known.
+- **The legend is the one layer control**, and its choices are the study's own (hiding Bearish on one study no longer
+  hides it on the next). A hidden line no longer adds its note to the hover readout.
+- **Scenario Lab.** Pick a case, change its move, factor shocks or extra uncertainty: an unsaved, dotted purple preview
+  (no simulation, nothing stored), then Save version or Discard. A size typed by hand becomes your stress. A saved
+  version is exploratory: valued, assessed as research only, and never the decision that counts. *Make it official…*
+  shows whether it could be promoted and what that would do.
+- **Versions**: choose one, go back to the official one, and compare one (drawn fainter, read only, and only when
+  the two share an anchor and sessions).
+- **Daily bars only** for session forecasts: on other bars the chart says so and offers *Show daily bars*.
+- **Handoffs.** Discover's *Study it* starts one study and opens Research on it; a picked opportunity sets the study's
+  horizon (an explicit map from Discover's categories to sessions), direction and kind of trade. *Review trade* and
+  *Draft* carry the version, case, valuation and decision; the Trading Desk's draft says what it was chosen under and
+  has *Open its study*, which reopens the study at that version.
+- **The What-If explorer** (Advanced) no longer draws its orange and purple lines beside a study's paths unless asked,
+  takes them off the chart when closed, and can hand its factor values to the Scenario Lab.
+- **Fix: a trigger's publication time** typed in the trigger form is now sent with its time zone. It was read as UTC,
+  so a source published minutes ago in Denver could be refused as published before the study.
+
 ## 4.6.2 — The time-cap message says where the run was
 
 - A run stopped by its time cap now says which stage it was in, for example "... while building the graph (40%)" or

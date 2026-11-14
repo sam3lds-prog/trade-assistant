@@ -58,8 +58,23 @@
   /* ---------- Scenario explorer: the what-if model drawn on the linked chart ---------- */
   // 3.1: an advanced panel. Its base line is the 2.x what-if model, not the study's forecast, so it is not in the
   // standard Research layout; add it (Add widget, Advanced) to stress-test a position under shocks you choose.
+  // 4.7: its orange and purple lines are drawn only when you ask (they are another model's, so they never compete with
+  // a study's official paths by default); closing it, or a new stock, takes them off the chart; and its factor values
+  // can be handed to the study's Scenario Lab, which checks them against the study's own frozen factor fit.
   WS.register("scenario", { title: "Scenario explorer (advanced)", category: "Advanced", size: { w: 8, h: 9 }, minW: 4, needs: ["what_if", "analyze_interactive"], create(w) {
     let widget = null, forChart = null, forSymbol = null;
+    const studyDrawn = () => { const sc = w.ctx().scenario; return !!(sc && sc.kind === "forecast" && sc.symbol === w.ctx().symbol); };
+    const draw = el("input", { type: "checkbox", "aria-label": "Draw the What-If paths on the chart", checked: w.config.draw === true || (w.config.draw === undefined && !studyDrawn()) });
+    draw.addEventListener("change", () => { w.config.draw = draw.checked; w.save(); if (widget) widget.redrawLines(); });
+    const hand = el("button", { class: "ws-btn ws-btn-mini", type: "button", title: "Offer these factor values to the linked study's Scenario Lab (as your stress, checked against the study's factor fit)" }, "Use these shocks in the Scenario Lab");
+    hand.addEventListener("click", () => {
+      const list = widget ? widget.shocks() : [];
+      if (!list.length) { WS.toast("Switch on (use) at least one factor first."); return; }
+      WS.studioShocks = WS.studioShocks || {};
+      WS.studioShocks[w.group] = { symbol: w.ctx().symbol, shocks: list, at: Date.now() };
+      for (const fn of WS.studioShockListeners || []) { try { fn(w.group); } catch (e) { console.error(e); } }
+      WS.toast("Offered to the study's Scenario Lab (Forecast & Scenarios).");
+    });
     function mount() {
       const symbol = w.ctx().symbol, chart = WS.find(w, "chart");
       if (widget && chart === forChart && symbol === forSymbol) return;
@@ -67,12 +82,14 @@
       forChart = chart; forSymbol = symbol;
       if (!symbol) { w.body.replaceChildren(WS.empty("Pick a stock to model its scenarios.")); return; }
       if (!chart) { w.body.replaceChildren(WS.empty("Link a stock chart to this widget (the same link colour): the scenarios are drawn on it.")); return; }
-      widget = whatIfWidget(symbol, chart);
+      widget = whatIfWidget(symbol, chart, { lines: () => draw.checked });
       w.body.replaceChildren(el("p", { class: "small ws-help-note", text: "Advanced stress test: these paths come from the what-if factor model and the shocks you set. They are not the Research study's forecast; when the two differ, the study's is the one with a record." }),
+        el("div", { class: "ws-row" }, el("label", { class: "check" }, draw, " Draw the What-If paths on the chart"), hand),
         widget.widget, widget.position);
     }
     return { onContext(c, changed) { if (changed.includes("symbol")) mount(); }, onProvider() { mount(); },
-      refresh() { if (widget) widget.dispose(); widget = null; forChart = null; mount(); }, dispose() { if (widget) widget.dispose(); } };
+      refresh() { if (widget) widget.dispose(); widget = null; forChart = null; mount(); }, dispose() { if (widget) widget.dispose(); },
+      config: () => ({ draw: draw.checked }) };
   } });
 
   /* ---------- Options chain ---------- */

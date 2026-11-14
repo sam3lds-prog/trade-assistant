@@ -51,13 +51,17 @@ RESEARCH_NOTE = ("Research only: an exploratory version's checks show what would
 
 
 class PreviewIn(C.Strict):
-    from_version_id: str = Field(min_length=1, max_length=64)
+    """The edit starts from a version (`from_version_id`), or from a run's cases that have no version yet (`run_id`, a
+    manual import); exactly one of the two."""
+    from_version_id: str | None = Field(default=None, min_length=1, max_length=64)
+    run_id: str | None = Field(default=None, min_length=1, max_length=64)
     cases: list[C.CaseAssumptions] = Field(min_length=1, max_length=3)
     generation: int | None = Field(default=None, ge=0)
 
 
 class LabSaveIn(C.Strict):
-    from_version_id: str = Field(min_length=1, max_length=64)
+    from_version_id: str | None = Field(default=None, min_length=1, max_length=64)
+    run_id: str | None = Field(default=None, min_length=1, max_length=64)
     cases: list[C.CaseAssumptions] = Field(min_length=1, max_length=3)
 
 
@@ -115,20 +119,32 @@ class ScenarioLab:
             raise RequestError("That scenario version belongs to another study.")
         return r, v
 
+    def _start(self, study_id: str, body: Any) -> tuple[Any, int | None]:
+        """The run an edit is made on, and the version number it starts from (none for a run's first version)."""
+        if bool(body.from_version_id) == bool(body.run_id):
+            raise RequestError("Give the version the edit starts from (from_version_id), or the run of imported cases (run_id): one of them.")
+        if body.from_version_id:
+            r, v = self._source(study_id, body.from_version_id)
+            return r, v["version"]
+        r = self.sc._run_row(body.run_id)
+        if r["study_id"] != study_id:
+            raise RequestError("That scenario run belongs to another study.")
+        return r, None
+
     # --- preview: nothing is written ------------------------------------------------------------------------------------
     def preview(self, study_id: str, body: PreviewIn) -> dict[str, Any]:
-        r, v = self._source(study_id, body.from_version_id)
-        seed, cases, assumptions = self.sc.checked(r, C.ScenarioVersionIn(parent_version=v["version"], cases=body.cases))
+        r, parent = self._start(study_id, body)
+        seed, cases, assumptions = self.sc.checked(r, C.ScenarioVersionIn(parent_version=parent, cases=body.cases))
         result = self.sc.compute(seed, cases, assumptions)
         return {"preview": True, "saved": False, "generation": body.generation, "study_id": study_id, "run_id": r["id"],
-                "from_version_id": v["id"], "assumptions": assumptions, **result,
+                "from_version_id": body.from_version_id, "assumptions": assumptions, **result,
                 "note": "Unsaved preview: computed from the study's frozen evidence and base. Nothing is stored, valued, published or "
                         "sent to the provider; Save version keeps it."}
 
     # --- save: a version, its valuation, and a research-only assessment ---------------------------------------------------
     def save(self, study_id: str, body: LabSaveIn) -> dict[str, Any]:
-        r, v = self._source(study_id, body.from_version_id)
-        ver = self.sc.create_version(r["id"], C.ScenarioVersionIn(parent_version=v["version"], cases=body.cases), origin="manual")
+        r, parent = self._start(study_id, body)
+        ver = self.sc.create_version(r["id"], C.ScenarioVersionIn(parent_version=parent, cases=body.cases), origin="manual")
         self.svc.forecast_state.save_presentation(study_id, _sel(ver["id"]))
         out = self.assess(study_id, ver)
         return {"version": ver, **out}

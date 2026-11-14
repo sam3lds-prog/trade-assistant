@@ -324,7 +324,7 @@ class ForecastState:
         out["pipeline"] = p
         out["lifecycle"] = self.lifecycle(got, p)
         if "study" not in got:
-            out.update(base=None, versions=[], selected_context={"version_id": None, "case_key": None, "mode": "baseline",
+            out.update(base=None, versions=[], unversioned_runs=[], selected_context={"version_id": None, "case_key": None, "mode": "baseline",
                                                                   "comparison_version_id": None, "official_version_id": None},
                        selected_version=None, comparison=None, valuation=None, decision=None, strategies=[], automatic_run=None,
                        anchor=None, sessions=[], historical=False, evidence_cutoff=None, provenance={})
@@ -402,6 +402,25 @@ class ForecastState:
                              "parent_id": parent, "created_at": r["created_at"], "late": late, "grading": grading})
         out["versions"] = versions
         by_id = {v["id"]: v for v in versions}
+        # Cases imported by hand that have no version yet: the Lab starts them from the packet's suggested sizes.
+        out["unversioned_runs"] = []
+        if sc is not None and enabled:
+            have = {v["run_id"] for v in versions}
+            for r in self.svc.db.query("SELECT id, seed_id, provider, created_at, cases_json FROM scenario_runs WHERE study_id = ? AND status = 'complete' "
+                                       "ORDER BY created_at DESC LIMIT 5", (study_id,)):
+                if r["id"] in have:
+                    continue
+                try:
+                    seed = sc._seed(r["seed_id"])
+                    cs = json.loads(r["cases_json"] or "[]")
+                    out["unversioned_runs"].append({"run_id": r["id"], "provider": r["provider"], "created_at": r["created_at"],
+                                                    "cases": [{k: c.get(k) for k in ("key", "label", "trigger", "invalidation", "stock_direction")} for c in cs],
+                                                    "suggested": sc.suggested(seed, cs),
+                                                    "factors": [{k: x.get(k) for k in ("key", "label", "unit")} for x in (seed.get("factors") or {}).get("rows") or []],
+                                                    "sessions": seed.get("sessions"), "catalyst_session": seed.get("catalyst_session"),
+                                                    "volatility": {"event_move_pct": (seed.get("volatility") or {}).get("event_move_pct")}})
+                except (RequestError, ValueError, KeyError):
+                    continue
         # The selected context: the request's, else the stored preference, else the official version. A version that is
         # not the study's own is refused (an explicit request) or dropped (a stale preference).
         want = version_id if version_id is not None else pres.get("selected_version_id")

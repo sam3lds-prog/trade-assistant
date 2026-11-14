@@ -201,7 +201,7 @@ def test_a_strategy_goes_from_the_study_to_a_trading_desk_proposal_with_its_cont
         page.wait_for_selector(visible("study") + " .ws-sections", timeout=90000)
         study.locator(".ws-sections button:text-is('Strategies')").click()
         rows = study.locator("[data-section='strategies'] tbody tr")
-        names = [t.replace("✓", "").strip() for t in rows.locator("td:first-child").all_inner_texts()]       # ✓ marks the best
+        names = [t.replace("(base pick)", "").replace("◆ decision", "").strip() for t in rows.locator("td:first-child").all_inner_texts()]
         routes = dict(zip(names, rows.locator(".ws-route").all_inner_texts()))
         assert routes["Buy shares"] == "Desk can send" and routes["Long call"] == "Research only"        # demo prices
         assert all(v in ("Desk can send", "By hand", "Research only") for v in routes.values())

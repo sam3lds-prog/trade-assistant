@@ -117,13 +117,17 @@ function interactiveChart(symbol) {
     view: null,                                // the logical range to show after a draw, when not the range
     lines: {},                                 // 2.13: lines other widgets draw on the chart (the what-if paths), by key
     vzoom: null,                               // 2.14: the price range shown when zoomed vertically (null = automatic)
-    hidden: new Set() };                       // 4.6.1: legend lines switched off, by key
+    hidden: new Set(),                         // 4.6.1: legend lines switched off, by key (4.7: by owner and key)
+    notices: {} };                             // 4.7: why an owner's lines are not drawn (a forecast on intraday bars), by owner
   const listeners = [];                        // 2.13: told when the data or the pattern search changes
   const chartBox = el("div", { class: "lw-chart" });
   const readout = el("div", { class: "small muted lw-readout", text: "Hover the chart for the bar's figures. Drag to pan, scroll to zoom time, pinch to zoom; drag the price axis to stretch prices." });
   // 4.6.1: lines drawn with a `legend` label are named here, not on the price axis, so the scenarios do not pile up
   // labels on the right. Click an entry to hide or show its line.
   const legendBox = el("div", { class: "lw-legend", role: "list", "aria-label": "Lines on the chart" });
+  // 4.7: a line drawn for a study carries its owner (`ns`, the study), so its visibility is that study's alone.
+  const hk = ln => (ln.ns ? `${ln.ns}|${ln.key}` : ln.key);
+  const noticeBox = el("div", { class: "lw-notice", role: "status", hidden: true });
   const info = el("div", { class: "small lw-info" });
   const notes = el("div");
   const err = el("div", { class: "error", role: "alert" });
@@ -310,6 +314,7 @@ function interactiveChart(symbol) {
     lineSeries = [];
     if (!chart) return;
     for (const ln of Object.values(state_.lines)) {
+      if (ln.noLine) continue;                 // 4.7: a legend note only (a case that is the base path)
       // Times unique and ascending: the library's production build does not check and mis-indexes otherwise.
       const pts = (ln.points || []).filter(p => p && isNum(p.time) && isNum(p.value)).sort((a, b) => a.time - b.time)
         .filter((p, i, arr) => i === 0 || p.time > arr[i - 1].time);
@@ -317,14 +322,35 @@ function interactiveChart(symbol) {
       const inLegend = !!ln.legend;
       const s = chart.addSeries(lib.LineSeries, zoomed({ color: ln.color, lineWidth: ln.width || 2, lineStyle: ln.style || 0, priceLineVisible: false,
         lastValueVisible: !inLegend && !!ln.title, crosshairMarkerVisible: false, title: inLegend ? "" : ln.title || "",
-        visible: !state_.hidden.has(ln.key) }));
+        visible: !state_.hidden.has(hk(ln)) }));
       s.setData(pts);
+      // 4.7: a marker on the line (the catalyst's session), only where its time is one of the line's points.
+      const marks = (ln.markers || []).filter(m => pts.some(p => p.time === m.time));
+      if (marks.length && lib.createSeriesMarkers) lib.createSeriesMarkers(s, marks.map(m => ({ time: m.time, position: m.position || "aboveBar",
+        color: m.color || ln.color, shape: m.shape || "arrowDown", text: m.text || "" })));
       lineSeries.push(s);
     }
     drawLegend();
   }
+  // 4.7: say why an owner's lines are not drawn, with the one action that fixes it (or nothing: null clears it).
+  function setNotice(owner, n) {
+    if (n) state_.notices[owner] = n; else delete state_.notices[owner];
+    const all = Object.values(state_.notices);
+    if (!all.length) { noticeBox.hidden = true; noticeBox.replaceChildren(); return; }
+    noticeBox.hidden = false;
+    noticeBox.replaceChildren(...all.map(x => el("p", { class: "small" }, x.text, " ",
+      x.action ? el("button", { class: "plain small-btn", type: "button", onclick: () => { try { x.run(); } catch (e) { console.error(e); } } }, x.action) : "")));
+  }
+  // 4.7: the daily bars a session-level forecast is drawn on: the range is kept when it offers them, else six months.
+  function useDaily() {
+    const d = state_.data;
+    if (!d) return;
+    if (!(d.range.groups || []).includes("1d")) { state_.range = "6m"; rangeSeg.querySelectorAll("input").forEach(i => { i.checked = i.value === "6m"; }); customBox.classList.add("hidden"); }
+    state_.group = "1d";
+    load();
+  }
   function drawLegend() {
-    const items = Object.values(state_.lines).filter(ln => ln.legend && (ln.points || []).length >= 2);
+    const items = Object.values(state_.lines).filter(ln => ln.legend && (ln.noLine || (ln.points || []).length >= 2));
     if (!items.length) { legendBox.replaceChildren(); legendBox.hidden = true; return; }
     if (legendBox.parentNode !== chartBox) chartBox.appendChild(legendBox);
     legendBox.hidden = false;
@@ -344,17 +370,23 @@ function interactiveChart(symbol) {
     legendBox.replaceChildren(...groups.map(g => el("div", { class: "lw-legend-group" },
       g.name ? el("span", { class: "lw-legend-head", text: g.name }) : "",
       ...g.items.map(en => {
-        const off = en.lines.every(ln => state_.hidden.has(ln.key));
+        if (en.lines.every(ln => ln.noLine)) return el("span", { role: "listitem", class: "lw-legend-item lw-legend-note", title: en.lines[0].note || "" },
+          el("span", { class: "lw-swatch dashed", style: `border-color: ${en.color}` }), el("span", { text: en.legend }));
+        const off = en.lines.every(ln => state_.hidden.has(hk(ln)));
         const ends = en.lines.map(ln => ln.points[ln.points.length - 1]).map(p => p && p.value).filter(isNum).sort((a, b) => a - b);
         const value = !ends.length ? "" : ends.length === 1 ? money(ends[0]) : `${money(ends[0])}–${money(ends[ends.length - 1])}`;
         const b = el("button", { type: "button", role: "listitem", class: `lw-legend-item${off ? " off" : ""}`, "aria-pressed": off ? "false" : "true",
-          title: `${off ? "Show" : "Hide"} ${en.legend}` },
-          el("span", { class: `lw-swatch${en.style ? " dashed" : ""}`, style: `border-color: ${en.color}` }),
+          title: `${off ? "Show" : "Hide"} ${en.legend}`, "data-line": en.share },
+          el("span", { class: `lw-swatch${en.style ? " dashed" : ""}${en.style === 1 ? " dotted" : ""}`, style: `border-color: ${en.color}` }),
           el("span", { text: en.legend }),
           value ? el("span", { class: "muted", text: ` ${value}` }) : "");
         b.addEventListener("click", e => {
           e.stopPropagation();
-          for (const ln of en.lines) { if (off) state_.hidden.delete(ln.key); else state_.hidden.add(ln.key); }
+          for (const ln of en.lines) { if (off) state_.hidden.delete(hk(ln)); else state_.hidden.add(hk(ln)); }
+          // 4.7: the owner keeps the choice (a study's view preference); the chart only reflects it.
+          const told = new Set();
+          for (const ln of en.lines) if (typeof ln.onToggle === "function" && !told.has(ln.layer || ln.key)) {
+            told.add(ln.layer || ln.key); try { ln.onToggle(off, ln); } catch (err) { console.error(err); } }
           drawLines();
         });
         return b;
@@ -364,7 +396,11 @@ function interactiveChart(symbol) {
   // Keys that start with `prefix` and are not in the new set are removed. Drawn in place, without a rebuild.
   function setLines(prefix, lines) {
     for (const k of Object.keys(state_.lines)) if (k.startsWith(prefix)) delete state_.lines[k];
-    for (const ln of lines || []) state_.lines[ln.key] = ln;
+    for (const ln of lines || []) {
+      state_.lines[ln.key] = ln;
+      // 4.7: an owner that keeps the visibility (a study's preferences) says it with each line it draws.
+      if (typeof ln.visible === "boolean") { if (ln.visible) state_.hidden.delete(hk(ln)); else state_.hidden.add(hk(ln)); }
+    }
     if (chart && state_.data) drawLines();
   }
   function notify(what) { for (const fn of listeners) { try { fn(what, chartArgs()); } catch (e) { console.error(e); } } }
@@ -523,7 +559,8 @@ function interactiveChart(symbol) {
     // 4.1: lines that carry a note for the hovered time (a scenario's price, move, session and trigger) say it too;
     // past the last bar there is no bar to describe, only them.
     const tips = [];
-    for (const ln of Object.values(state_.lines)) { const t = ln.tips && ln.tips[param.time]; if (t) tips.push(t); }
+    // 4.7: a hidden line says nothing, so the readout matches what is on the screen.
+    for (const ln of Object.values(state_.lines)) { if (state_.hidden.has(hk(ln))) continue; const t = ln.tips && ln.tips[param.time]; if (t) tips.push(t); }
     const lastBar = state_.data.bars[state_.data.bars.length - 1];
     if (lastBar && param.time > lastBar.tl) { if (tips.length) readout.textContent = tips.join("  ·  "); return; }
     const i = indexOfTime(param.time);
@@ -703,13 +740,17 @@ function interactiveChart(symbol) {
     el("h3", { text: "Chart" }),
     el("div", { class: "row chart-controls" }, field("Range", rangeSeg), customBox, field("Group by", groupSel), swingSel, fitBtn, latestBtn),
     el("div", { class: "toggles" }, toggles),
-    err, chartBox, readout, info,
+    err, noticeBox, chartBox, readout, info,
     el("div", { class: "row lw-find" }, findBtn, selectBtn, el("label", { class: "check" }, "Likeness at least ", corrIn, corrOut)),
     notes);
   load();
   loadStructure();
   return { panel, extras: [outlookBox, patternBox, turnBox], structure: structBox, dispose,
     setLines, chartArgs, showAhead, subscribe: fn => { listeners.push(fn); }, redraw: () => { if (state_.data) draw(); },
+    notice: setNotice, useDaily,
+    // 4.7: whether a line is shown (its owner's and key), for the widgets and the tests that check them.
+    shown: (key, ns) => { const ln = state_.lines[key]; return !!ln && !state_.hidden.has(ns ? `${ns}|${key}` : hk(ln)); },
+    readout: () => readout.textContent, hover: time => onHover({ time }),
     // 4.1: the lines drawn by key with their points, read-only (a copy), for the widgets and the tests that check them.
     lines: prefix => JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(state_.lines).filter(([k]) => !prefix || k.startsWith(prefix))))),
     crosshair: { on: fn => { crossFns.add(fn); return () => crossFns.delete(fn); }, set: crosshairAt } };
