@@ -77,6 +77,10 @@ def scenario_ref(svc: Any, study_id: str, strategy: str, ref: ScenarioRefIn) -> 
     v = sc.version(ref.version_id)
     if v.get("study_id") != study_id:
         raise RequestError("That scenario version belongs to another study: draft from that study, or from this study's own scenarios.")
+    if v.get("stale"):
+        # 4.7: an expired association is refused, not attached: the case's prices are for sessions that have passed.
+        raise RequestError(f"That scenario version's last session ({v['sessions'][-1]['date']}) has passed: run the study again, "
+                           "then draft from its new scenarios.")
     case = None
     if ref.case:
         case = next((c for c in v["cases"] if c["key"] == ref.case), None)
@@ -103,10 +107,37 @@ def scenario_ref(svc: Any, study_id: str, strategy: str, ref: ScenarioRefIn) -> 
         out["valued"] = {k: {"expected_pnl": x["expected_pnl"], "worst_tenth": x["worst_tenth"]} for k, x in row["by_case"].items()}
         out["unit_quantity"] = row.get("quantity")
     if ref.decision_id:
-        d = svc.db.one("SELECT study_id, status FROM scenario_decisions WHERE id = ?", (ref.decision_id,))
+        # 4.7: a decision belongs to one study, one scenario version and one valuation; a draft carrying it must name the
+        # same ones, and only the study's current decision is carried (a superseded one is history, not a setup).
+        d = svc.db.one("SELECT study_id, status, version_id, valuation_id FROM scenario_decisions WHERE id = ?", (ref.decision_id,))
+        if d is None and svc.db.one("SELECT 1 FROM scenario_assessments WHERE id = ?", (ref.decision_id,)):
+            raise RequestError("That is an exploratory assessment, not a decision: draft the strategy without it, or promote the "
+                               "version so the Opportunity Engine decides on it.")
         if d is None or d["study_id"] != study_id:
             raise RequestError("That decision is of another study")
+        if d["version_id"] != v["id"]:
+            raise RequestError("That decision was made on another scenario version than the one named: draft from the version it "
+                               "belongs to.")
+        if ref.valuation_id and d["valuation_id"] and ref.valuation_id != d["valuation_id"]:
+            raise RequestError("That decision was made from another valuation than the one named.")
+        latest = svc.db.one("SELECT id FROM scenario_decisions WHERE study_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (study_id,))
+        if latest is None or latest["id"] != ref.decision_id:
+            raise RequestError("That decision has been superseded by a later one for this study: draft from the current decision.")
         out["decision_id"], out["decision_status"] = ref.decision_id, d["status"]
+        if not out.get("valuation_id") and d["valuation_id"]:
+            out["valuation_id"] = d["valuation_id"]
+    # 4.7: what the draft rests on, so the Trading Desk can show it and link back to it: the version's kind, the quote
+    # snapshot of its valuation, and whether it is the study's official version.
+    pl = getattr(svc, "pipeline", None)
+    official = ((pl.load(study_id) if pl is not None else None) or {}).get("version_id")
+    out["official"] = v["id"] == official
+    out["exploratory"] = v.get("origin") == "manual" and v["id"] != official
+    if out.get("valuation_id"):
+        from .valuation import load as _load
+        try:
+            out["snapshot_at"] = _load(svc, out["valuation_id"]).get("snapshot_at")
+        except RequestError:
+            out["snapshot_at"] = None
     return out
 
 
@@ -364,6 +395,9 @@ def build(svc: Any, req: DraftIn) -> dict[str, Any]:
         notes.append(f"Conditional: it was chosen under the {scen['case_label']} case, whose trigger has not been recorded as observed.")
     if scenario["calibration"] != "calibrated":
         notes.append("The forecast behind it is not calibrated for this horizon: its range is the model's, not a validated one.")
+    if scen is not None and scen.get("exploratory"):
+        notes.insert(0, "From an exploratory scenario version (your edit): research only, not an official setup. The Trading Desk's "
+                        "checks still decide whether anything can be sent.")
 
     return {"kind": "draft_trade", "version": 1, "created_at": C.utc_now(), "symbol": sym,
             "source": {"study_id": st["id"], "opportunity_id": opp_id, "study_as_of": st.get("created_at"),
