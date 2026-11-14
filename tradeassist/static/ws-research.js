@@ -104,16 +104,7 @@
       el("p", { class: "small muted", text: `${v.note} Quotes as of ${new Date(v.snapshot_at).toLocaleString()}; ${v.iv_assumption}.` })];
     return el("div", { class: "ws-valuation", "data-status": v.status }, ...kids);
   }
-  function findingsBlock(p) {
-    const f = p.findings;
-    if (!f) return "";
-    return el("div", { class: "ws-findings" }, el("p", { class: "ws-conclusion" }, el("strong", { text: "Findings: " }), f.conclusion),
-      el("ul", { class: "plain small ws-case-list" }, f.cases.map(c => el("li", { "data-case": c.key },
-        el("span", { class: "ws-swatch", style: `background: ${CASE_COLORS[c.key]}` }), " ", el("strong", { text: `${c.label} ${pctText(c.return_pct)} (${money(c.price)})` }),
-        c.quantified ? "" : el("span", { class: "muted", text: " (the base path: no quantified assumption)" }),
-        el("div", {}, el("span", { class: "muted", text: "If " }), c.trigger, el("span", { class: "muted", text: ". Invalidated if " }), c.invalidation, ".")))),
-      (p.sizing_notes || []).length ? el("ul", { class: "plain small muted" }, p.sizing_notes.map(x => el("li", { text: x }))) : "");
-  }
+
   /* ---------- 4.4 the decision: Qualified setup, Watch for trigger, or No setup (4.7: of the version shown) ----------
      One decision, and only the one that belongs to the version on the screen: the official version's official decision,
      or, for a version you edited, its research-only assessment (what would pass or fail under its assumptions; never
@@ -331,6 +322,7 @@
   const PREVIEW_COLOR = "#7048e8";
   const previews = new Map();                 // study id -> { cases, generation }: unsaved, drawn, never saved
   const layerPrefs = new Map();               // study id -> the layers shown (the study's view preference)
+  const layerToggles = new Map();             // study id -> the toggles made in this page (they win over a reply in flight)
   function chartPayload(b) {
     if (!b || !b.base || !b.anchor || !(b.sessions || []).length) return null;
     const sv = b.selected_version, d = b.decision, cat = sv && sv.catalyst;
@@ -352,6 +344,7 @@
   }
   function setLayer(study, layer, on) {
     layerPrefs.set(study, { ...(layerPrefs.get(study) || {}), [layer]: on });
+    layerToggles.set(study, { ...(layerToggles.get(study) || {}), [layer]: on });
     api(`/v3/studies/${enc(study)}/presentation`, { visible_layers: { [layer]: on } }).catch(() => { /* a preference: the screen already shows it */ });
   }
   function redrawLinked(w) {
@@ -447,8 +440,10 @@
     if (catalystOn()) loadScen(); else scenRow.hidden = true;
 
     // A study opens on its Summary; refreshing the same study keeps the section being read.
-    let polling = null, shown = null, current = null, section = "summary", rendered = null;
-    let bundle = null, bundleGen = 0, bundleTimer = null, painted = null, labDraft = null;
+    let polling = null, shown = null, current = null, section = "summary", rendered = null, following = null;
+    let bundle = null, bundleGen = 0, bundleTimer = null, painted = null, labDraft = null, labGen = 0;
+    // An edit in progress stops here: its timer is cleared and any preview on its way is dropped.
+    const stopLab = () => { if (labDraft) clearTimeout(labDraft.timer); ++labGen; };
     run.addEventListener("click", start);
 
     async function start() {
@@ -472,8 +467,9 @@
     }
     function poll(id) {
       clearTimeout(polling);
+      following = id;
       w.api(`/v3/studies/${enc(id)}`).then(s => {
-        if (s.id !== id) return;
+        if (s.id !== id || following !== id) return;          // another study is followed now: this answer is stale
         if (s.status === "running") {
           shown = id;
           out.replaceChildren(el("section", { class: "ws-pipeline panel", "aria-label": "Scenarios" }, el("h4", { text: `Studying ${s.symbol}` }),
@@ -523,6 +519,8 @@
 
     // --- the result: fetched once per change, applied only if it is still the study and the request shown -------
     function render(s) {
+      if (following !== s.id) clearTimeout(polling);
+      following = s.id;
       if (s.id !== rendered) { section = "summary"; labDraft = null; previews.delete(rendered); }
       rendered = s.id; shown = s.id; current = s;
       form.open = false;
@@ -536,7 +534,7 @@
         const b = await w.api(`/v3/studies/${enc(id)}/result`);
         if (mine !== bundleGen || shown !== id || w.disposed) return;           // a later request, or another study, won
         bundle = b;
-        layerPrefs.set(b.study_id, { ...((b.presentation || {}).visible_layers || {}) });
+        layerPrefs.set(b.study_id, { ...((b.presentation || {}).visible_layers || {}), ...(layerToggles.get(b.study_id) || {}) });
         paint(force);
       } catch (e) { if (e !== WS.GONE && mine === bundleGen) out.replaceChildren(el("p", { class: "error", role: "alert", text: e.message })); }
     }
@@ -547,6 +545,7 @@
         b.valuation && b.valuation.id, b.comparison && [b.comparison.version_id, b.comparison.comparable], (b.unversioned_runs || []).map(r => r.run_id)]);
     }
     function schedule(b) {
+      clearTimeout(bundleTimer);                     // one timer at a time, however often the study is painted
       const p = b.pipeline || {};
       const pending = (((b.decision || {}).setup || {}).trigger_evidence || {}).status === "verification_pending";
       if (b.lifecycle.running || p.status === "awaiting_approval" || pending) bundleTimer = setTimeout(() => loadBundle(b.study_id), b.lifecycle.running ? 1500 : 5000);
@@ -704,7 +703,7 @@
       reload: () => { if (shown) loadBundle(shown); },
       async select(versionId) {
         if (!bundle) return;
-        previews.delete(bundle.study_id); labDraft = null;
+        stopLab(); previews.delete(bundle.study_id); labDraft = null;
         try { await w.api(`/v3/studies/${enc(bundle.study_id)}/presentation`, { selected_version_id: versionId, compare_version_id: null }); } catch (e) { if (e === WS.GONE) return; }
         loadBundle(bundle.study_id, true);
       },
@@ -716,12 +715,15 @@
       },
       async compare(versionId) {
         if (!bundle) return;
+        stopLab();
         try { await w.api(`/v3/studies/${enc(bundle.study_id)}/presentation`, { compare_version_id: versionId || null }); } catch (e) { if (e === WS.GONE) return; }
         loadBundle(bundle.study_id, true);
       },
       preview(res) {
         if (!bundle) return;
-        if (res) previews.set(bundle.study_id, { generation: res.generation, cases: res.cases.filter(c => c.quantified).map(c => ({ key: c.key, label: c.label, price: c.price })) });
+        // Kept with what it was made from, so it is drawn only over that version (or those imported cases).
+        if (res) previews.set(bundle.study_id, { generation: res.generation, from: res.from_version_id || `run:${res.run_id}`,
+          cases: res.cases.filter(c => c.quantified).map(c => ({ key: c.key, label: c.label, price: c.price })) });
         else previews.delete(bundle.study_id);
         redrawLinked(w);
       },
@@ -756,7 +758,11 @@
         btn.disabled = false;
       },
       lab: () => labDraft,
-      setLab: d => { labDraft = d; },
+      setLab: d => { if (labDraft && labDraft !== d) clearTimeout(labDraft.timer); labDraft = d; },
+      nextGen: () => ++labGen,
+      gen: () => labGen,
+      stopLab,
+      repaint: () => paint(true),
       bundle: () => bundle,
     };
 
@@ -830,7 +836,7 @@
         } catch (e) { if (e === WS.GONE) return; /* gone */ }
       }
       if (!c.study) {
-        clearTimeout(polling); clearTimeout(bundleTimer); ++bundleGen; run.disabled = false; status.textContent = "";
+        clearTimeout(polling); clearTimeout(bundleTimer); ++bundleGen; following = null; run.disabled = false; status.textContent = "";
         if (shown) previews.delete(shown);
         head.replaceChildren();
         out.replaceChildren(WS.empty(c.symbol ? `Run a study of ${c.symbol}: the trend, its past situations and its peers', the options market, one forecast and every strategy compared.` : "Pick a stock first."));
@@ -842,7 +848,7 @@
     const onShocks = group => { if (group === w.group && bundle) paint(true); };
     (WS.studioShockListeners = WS.studioShockListeners || new Set()).add(onShocks);
     return { onContext(c, changed) { if (changed.includes("symbol") || changed.includes("study") || changed.includes("opportunity")) loadFor(c, changed); },
-      refresh() { if (shown) poll(shown); }, dispose() { clearTimeout(polling); clearTimeout(bundleTimer); if (shown) previews.delete(shown); WS.studioShockListeners.delete(onShocks); },
+      refresh() { if (shown) poll(shown); }, dispose() { clearTimeout(polling); clearTimeout(bundleTimer); stopLab(); if (shown) previews.delete(shown); WS.studioShockListeners.delete(onShocks); },
       config: () => ({ horizon: Number(horizon.value), thesis: thesis.value, peers: peers.value }),
       helpFacts() {
         if (!current) return [];
@@ -873,7 +879,6 @@
     ["analog_tail", "Comparable situations' tail (rule)"], ["implied_sensitivity", "Options-implied s.d. (rule)"], ["factor_volatility", "Factor's own volatility (rule)"]];
   const RULES = new Set(["options_implied_move", "analog_tail", "implied_sensitivity", "factor_volatility"]);
   const labIds = text => String(text || "").split(/[\s,]+/).map(x => x.trim().toUpperCase()).filter(Boolean);
-  let labGen = 0;
   function scenarioLab(w, s, b, ctl) {
     const box = el("section", { class: "ws-zone ws-lab", "data-zone": "lab", "aria-label": "Scenario Lab" }, el("h4", { text: "Scenario Lab" }));
     const sv = b.selected_version, fresh = (b.unversioned_runs || [])[0];
@@ -906,8 +911,7 @@
     const sessionPick = (label, v) => el("select", { "aria-label": label }, sessions.map(x => el("option", { value: String(x.index), selected: Number(v || catSession) === x.index }, `${x.index} (${x.date})`)));
     const sourcePick = (label, v, factor) => el("select", { "aria-label": label }, LAB_SOURCES.filter(([k]) => factor ? !["options_implied_move", "analog_tail", "implied_sensitivity"].includes(k) : k !== "factor_volatility")
       .map(([k, t]) => el("option", { value: k, selected: k === (v || "user_stress") }, t)));
-    let timer = null;
-    const changed = () => { draft.dirty = true; clearTimeout(timer); timer = setTimeout(previewNow, 350); };
+    const changed = () => { draft.dirty = true; clearTimeout(draft.timer); draft.timer = setTimeout(previewNow, 350); };
     function paintEditor() {
       const a = draft.cases.find(x => x.key === caseKey);
       const c = cases.find(x => x.key === caseKey);
@@ -964,16 +968,17 @@
         el("div", { class: "ws-row" }, field("Extra uncertainty, pp", disp)));
     }
     async function previewNow() {
-      const gen = ++labGen, study = b.study_id;
+      if (ctl.lab() !== draft) return;                       // discarded or replaced meanwhile
+      const gen = ctl.nextGen(), study = b.study_id;
       status.replaceChildren(loading("Previewing…"));
       try {
         const r = await w.api(`/v3/studies/${enc(study)}/scenario-lab/preview`, { ...from, cases: clean(), generation: gen });
-        if (r.generation !== labGen || !ctl.bundle() || ctl.bundle().study_id !== study) return;      // a newer edit, or another study
+        if (r.generation !== ctl.gen() || ctl.lab() !== draft || !ctl.bundle() || ctl.bundle().study_id !== study) return;      // a newer edit, or another study
         ctl.preview(r);
         const last = r.horizon_sessions - 1;
         status.replaceChildren(statusTag("info", "Unsaved preview"), ` Drawn dotted on the chart: ${r.cases.map(c => `${c.label} ${pctText(c.return_pct[last])}`).join(", ")}. Nothing is stored until you save.`);
       } catch (e) {
-        if (e === WS.GONE || gen !== labGen) return;
+        if (e === WS.GONE || gen !== ctl.gen()) return;
         ctl.preview(null);
         status.replaceChildren(el("p", { class: "error", role: "alert", text: e.message }));
       }
@@ -981,10 +986,10 @@
     const clean = () => draft.cases.map(a => ({ key: a.key, visible: a.visible !== false, issuer: a.issuer || null,
       factors: (a.factors || []).filter(f => isNum(f.value) && f.value !== 0), dispersion: a.dispersion || null }));
     const discard = el("button", { class: "ws-btn", type: "button" }, "Discard");
-    discard.addEventListener("click", () => { ++labGen; ctl.setLab(null); ctl.preview(null); ctl.reload(); });
+    discard.addEventListener("click", () => { ctl.stopLab(); ctl.setLab(null); ctl.preview(null); ctl.repaint(); });
     const save = el("button", { class: "ws-btn primary", type: "button" }, "Save version");
     save.addEventListener("click", async () => {
-      ++labGen; clearTimeout(timer);
+      ctl.stopLab();
       save.disabled = true; status.replaceChildren(loading("Saving the version and valuing the strategies under it…"));
       try {
         const r = await w.api(`/v3/studies/${enc(b.study_id)}/scenario-lab/versions`, { ...from, cases: clean() });
@@ -1086,8 +1091,10 @@
         ...(val ? [{ label: "Data", cell: r => { const q = QW[r.quality] || ["warn", r.quality ? r.quality : "n/a"]; return el("span", { title: (r.quality_words || []).join("; ") }, statusTag(q[0], q[1])); } }] : []),
         { label: "Route", cell: r => routeTag(r.route ? { route: r.route, label: r.route_label } : null) },
         { label: "", cell: r => el("button", { class: "ws-btn ws-btn-mini", type: "button", title: "A draft for the Trading Desk with this version and case; nothing is sent",
-          onclick: e => { e.stopPropagation(); ctl.draft(r.key, sv && val ? { version_id: sv.id, valuation_id: val.id, case: caseFor(r),
-            decision_id: decided.has(r.key) && d.setup.kind === "single" ? d.id : undefined } : null, note, e.currentTarget); } }, "Draft") }], rows, { onRow: r => ctl.pickStrategy(r) }),
+          onclick: e => { e.stopPropagation();
+            const mine = decided.has(r.key) && d.setup.kind === "single";      // the decision's own strategy: its case and decision travel with it
+            ctl.draft(r.key, sv && val ? { version_id: sv.id, valuation_id: mine ? d.valuation_id || val.id : val.id, case: mine ? d.setup.case || undefined : caseFor(r),
+              decision_id: mine ? d.id : undefined } : null, note, e.currentTarget); } }, "Draft") }], rows, { onRow: r => ctl.pickStrategy(r) }),
       note,
       el("p", { class: "small muted", text: "Net P&L is the modeled result under each case after round-trip costs, conditional on that case: none has a probability. Most it can lose is from the contract terms; capital is what it ties up here (a broker's requirement can differ). Route is where it can go under the policy and broker in force now; the Trading Desk checks it again." }));
     const sg = (s.view || {}).strategies || {};
@@ -1528,17 +1535,19 @@
         lines.push({ key: `forecast:case:${k.key}`, points: ptsP(k.price), color: CASE_COLORS[k.key] || ALT_COLOR, width: focus || picked ? 3 : 2, style: 2,
           legend: `${k.label}${focus ? " ◆ decision" : ""}`, legendGroup: cg, tips: tipsOf(k.label, k.price, k.trigger, cat.kind === "exploratory" ? `${cat.label}, exploratory` : null), ...own(k.key) });
       }
+      // The comparison is one layer: one legend entry switches all its lines.
       if (sc.compare) for (const k of sc.compare.cases || []) {
         lines.push({ key: `forecast:compare:${k.key}`, points: ptsP(k.price), color: (CASE_COLORS[k.key] || ALT_COLOR) + "77", width: 1, style: 2,
-          legend: k.label, legendGroup: `Compare: ${sc.compare.label}`, legendShare: undefined, tips: tipsOf(`${sc.compare.label} (comparison) ${k.label}`, k.price), ...own("compare") });
-      }
-      const pv = previews.get(ns);
-      if (pv) for (const k of pv.cases) {
-        lines.push({ key: `forecast:preview:${k.key}`, points: ptsP(k.price), color: PREVIEW_COLOR, width: 2, style: 1, legend: `${k.label} (unsaved)`, legendGroup: "Exploration · unsaved preview",
-          tips: tipsOf(`Unsaved preview · ${k.label}`, k.price) });
+          legend: `${sc.compare.label} (comparison)`, legendShare: "forecast:compare", legendGroup: "Compare", tips: tipsOf(`${sc.compare.label} (comparison) ${k.label}`, k.price), ...own("compare") });
       }
     } else lines.push(...(sc.alternatives || []).map(alt => ({ key: `forecast:${alt.key}`, points: pts(alt.path_pct), color: ALT_COLOR, width: 1, style: 2,
       legend: alt.label, legendGroup: cg })));
+    // The unsaved preview, only over what it was made from (this version, or the imported cases being edited).
+    const pv = previews.get(ns);
+    if (pv && fixed && ((cat && pv.from === cat.version_id) || (!cat && String(pv.from).startsWith("run:")))) for (const k of pv.cases) {
+      lines.push({ key: `forecast:preview:${k.key}`, points: ptsP(k.price), color: PREVIEW_COLOR, width: 2, style: 1, legend: `${k.label} (unsaved)`,
+        legendGroup: "Exploration · unsaved preview", ns, tips: tipsOf(`Unsaved preview · ${k.label}`, k.price) });
+    }
     chart.setLines("forecast", lines);
     if (chart.showAhead) chart.showAhead(sc.horizon);
   });

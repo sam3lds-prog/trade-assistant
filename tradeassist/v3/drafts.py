@@ -27,6 +27,8 @@ press its button, and the proposal then waits for approval as any other does.
 
 from __future__ import annotations
 
+import json
+
 import math
 from datetime import datetime
 from typing import Any, Literal
@@ -123,6 +125,12 @@ def scenario_ref(svc: Any, study_id: str, strategy: str, ref: ScenarioRefIn) -> 
         latest = svc.db.one("SELECT id FROM scenario_decisions WHERE study_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (study_id,))
         if latest is None or latest["id"] != ref.decision_id:
             raise RequestError("That decision has been superseded by a later one for this study: draft from the current decision.")
+        dj = svc.db.one("SELECT decision_json FROM scenario_decisions WHERE id = ?", (ref.decision_id,))
+        setup = (json.loads(dj["decision_json"]) if dj else {}).get("setup") or {}
+        if strategy not in (setup.get("structures") or []):
+            raise RequestError("That decision is about another strategy: draft the strategy it chose, or draft this one without it.")
+        if (ref.case or None) != (setup.get("case") or None):
+            raise RequestError("That decision is about another case: draft under the case it was decided for.")
         out["decision_id"], out["decision_status"] = ref.decision_id, d["status"]
         if not out.get("valuation_id") and d["valuation_id"]:
             out["valuation_id"] = d["valuation_id"]

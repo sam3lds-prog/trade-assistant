@@ -75,7 +75,7 @@ saved records only: it never starts a simulation, downloads market history or re
 | `base` | the base path, range and prices, and its `headline`: what the readiness lets it claim (below) |
 | `scenarios` | whether this study can have scenario simulations (1- or 5-session studies with the feature on), and why not |
 | `automatic_run` | the official run: provider, status, catalyst, the version it saved, its valuation and decision |
-| `versions` | every version of the study, each `official`, `promoted`, `exploratory` (your edit), `control` (the single-prompt control) or `previous` (an earlier automatic run), with its parent and how the forward scorecard treats it |
+| `versions` | every version of the study, each `official`, `promoted`, `exploratory` (your edit), `control` (the single-prompt control), `previous` (an earlier attempt's automatic run) or `replaced` (the automatic version a promotion replaced), with its parent and how the forward scorecard treats it |
 | `selected_context` | the version and case being looked at, and the one version pinned for comparison |
 | `selected_version` | its assumptions, case paths, catalyst and timing, and the packet's sources and factors |
 | `comparison` | the pinned version's cases, only when it shares the symbol, anchor, sessions and horizon; otherwise why not |
@@ -104,9 +104,9 @@ refused, not quietly replaced. An unsaved preview is never stored.
 
 - A valuation is shown only with the version it valued.
 - An official decision is shown only for its own version, and an earlier (superseded) decision is marked as history.
-- A Trading Desk draft (`POST /v3/drafts`) with a scenario reference is refused when the decision belongs to another
-  version, was made from another valuation, has been superseded, or is an exploratory assessment; and when the
-  version's sessions have passed. A draft from an exploratory version is allowed but says it is research only. The
+- A Trading Desk draft (`POST /v3/drafts`) with a scenario reference is refused in these cases: the decision belongs to
+  another version, was made from another valuation, has been superseded, is about another strategy or another case,
+  or is an exploratory assessment; or the version's sessions have passed. A draft from an exploratory version is allowed but says it is research only. The
   draft carries the version's kind (`official`, `exploratory`) and its quote snapshot time, for the return link.
 
 ## 3. Scenario Lab, preview and exploratory evaluation (PR 4, backend)
@@ -129,14 +129,26 @@ on the exploratory valuation, so you can see what would pass or fail under your 
 only and kept in `scenario_assessments`. It is not written to `scenario_decisions`, not published to Discover, not
 notified, not frozen for outcomes or for the forward scorecard. The study's official version and decision don't change.
 
-**Promotion is the only way an edit becomes official**, and it has two conditions. You must confirm it, and the
-version must meet the standard the automatic run holds itself to. Every size must come from the packet's own rules
-(the options-implied move, the comparable situations' tail, the options-implied standard deviation, a factor's own
-volatility). Each must also be for a driver of that case that cites the packet, in that driver's direction. A user
-stress, a provider's own number or an uncited driver stays exploratory. Promotion then values the strategies again
-from a fresh snapshot. It decides through the normal official checks: real-time, fresh quotes, and triggers verified
-for that version. The forward scorecard is not changed by it: it keeps what the automatic run predicted before the
-window opened.
+**Promotion is the only way an edit becomes official**, and every one of these must hold:
+
+- **You confirm it.**
+- **The official run finished.** It is complete: not running, waiting for approval, canceled, failed or needing
+  attention.
+- **It edits the official run's own cases.** Their triggers and invalidations are the provider's, from the frozen
+  packet. A manual import, the single-prompt control or an earlier attempt can't be promoted.
+- **Every size is one the automatic run could have made itself:**
+  - The stock's own move comes from one of the packet's rules (the options-implied move, the comparable situations'
+    tail, the options-implied standard deviation). It must be for a cited issuer driver of that case, in that
+    driver's direction and on its session.
+  - A factor shock is one standard deviation of a factor that a cited driver of that case names. It must be on that
+    driver's session, with the sign that moves the stock the driver's way.
+  - There is no extra uncertainty (the automatic run never adds any).
+
+A user stress, a provider's own number or an uncited driver stays exploratory.
+
+Promotion then values the strategies again from a fresh snapshot and decides through the normal official checks:
+real-time, fresh quotes, and triggers verified for that version. It changes neither the forward scorecard nor the
+strategy outcome record: both count only decisions on the automatic run's own versions.
 
 ## 4. Data integrity
 
@@ -146,3 +158,144 @@ window opened.
   exploratory version is never scored, saved or not.
 - **Old studies stay as they were.** A study reopened later shows its original anchor, sessions and paths; nothing is
   regenerated to look current.
+
+## 5. The Research study (PR 2)
+
+**Study settings.** Horizon, kind of trade, direction, peers, and **Full study** or **Baseline only**. A full study
+runs the quantitative study and then, with no second click, the simulation, the paths, the valuation and the decision
+(1- and 5-session studies). A baseline-only study stops after the quantitative study; *Run scenarios* starts the rest
+later. 3-, 10- and 20-session studies are baseline only. One line shows the provider's readiness, the profile and the
+next run's estimate, and whether it starts on its own or asks first. The provider, the profile and *Full study by
+default* are under **Simulation settings**, with the readiness levels, the circuit breaker, the spending and *Simulation
+usage*.
+
+**The status line**, above the sections, says where the study is: *Collecting the evidence*, *Baseline complete*,
+*Simulation queued*, *Simulation running*, *Waiting for your simulation approval*, *Valuing the strategies*, *Decision
+ready*, *Simulation did not finish*, *Simulation canceled* or *needs attention*. It has Approve the simulation (spending
+only, never a trade), Cancel and Retry (or *Start a new run anyway* when a paid request's outcome is unknown) when they
+apply. The quantitative study is readable while the simulation runs; its progress updates in place, so nothing you are
+editing is redrawn.
+
+| Section | What it shows |
+| --- | --- |
+| **Summary** | the base headline (its move and price, what its readiness lets it claim, the range); the selected version's cases (each with its move and price; *not probabilities*), click one to select it; the one decision card; the next step |
+| **Evidence** | evidence for and against, context, what is missing, comparable past situations; the evidence cutoff, data source, model and provider; *Ask the AI to challenge it* |
+| **Forecast & Scenarios** | **Base** (readiness, directional evidence and range validation, the explanation, other paths, what would prove it wrong); **Catalyst and simulation** (the catalyst, hypothetical events labelled as such, the simulation's stages and details, the cases' triggers and invalidations, the findings); **Scenario Lab**; **Versions**; under Advanced, *import cases by hand* |
+| **Strategies** | one table: strategy, direction, legs and expiry, entry (debit, credit or share price), each case's net P&L (the selected case marked ▸), worst case, most it can lose, capital, data quality, route, Draft; the decision's setup is marked ◆; payoff details, volatility sensitivity and the budgeted mixes are folded |
+
+**The decision card** is the selected version's own:
+
+| Decision | Primary action |
+| --- | --- |
+| Qualified setup (official, current) | **Review trade**: a draft with its version, case, valuation and decision, opened on the Trading Desk, which checks it again; nothing is sent |
+| Watch for trigger | **Check this source**: paste the link that shows the trigger happened. The app reads the page; only a verified source can qualify the setup. Submitted, being checked, verified, rejected and expired are shown as different states |
+| No setup | **Refresh research**: one fresh quote snapshot, the same strategies and cases, decided again |
+| An exploratory version's assessment | labelled *Research only*; *Back to the official version*, *Make it official…* |
+
+**Scenario Lab.** Pick a case. Edit its stock-specific move (percentage points from a session, with its source and
+the packet's source ids), its factor shocks (in each factor's unit, through the study's frozen factor fit) and any
+extra uncertainty. Each change is previewed after a short pause as a dotted purple line, labelled *unsaved*. The
+preview costs no simulation and writes nothing, and a late answer never overwrites a newer edit. A size typed by hand
+over a rule's size becomes your stress. *Save version* keeps it, values the strategies under it and shows its
+research-only assessment. *Discard* drops the edit. For an exploratory version there are *Value again* and *Make it
+official…*: the promotion check lists what promotion would do, or why it stays exploratory. Cases imported by hand
+start from the packet's suggested sizes. The What-If explorer's factor values can be offered here, as your stress.
+
+**Versions.** *Showing* picks the version (official, exploratory, control, earlier). *Back to the official version*
+returns to it. *Compare with* pins one other version: drawn fainter beside the selected one when the two share an
+anchor, sessions and horizon, and listed as differences otherwise. A comparison is read only: the selected version's
+valuation and decision do not change.
+
+## 6. The chart (PR 3)
+
+| Layer | Drawn as |
+| --- | --- |
+| Price history | candles or a line, as before |
+| Base forecast | solid, the forecast colour |
+| Range | dotted edges (one legend entry: *80% band* when calibrated, else *Model P10–P90*) |
+| Central, Bullish, Bearish | dashed in each case's colour; the case the official decision names is thicker and marked ◆; the selected case is thicker |
+| A case with no quantified assumption | not drawn; a legend note, *Central = Base* |
+| Unsaved preview | dotted, purple, in the legend group *Exploration · unsaved preview* |
+| Comparison | fainter, thinner dashes; one legend entry, *vN (comparison)*, switches all of them |
+| Catalyst | a small marker on the base line at the reaction session, only when the event's date and time of day are known (before the open, during the session, after the close); never at an invented time |
+
+- **The legend is the one layer control.** Each entry shows its end price; click it to hide or show it. The choice
+  is the study's (kept on the server), so two studies of the same stock keep their own.
+- **Hover** shows, for a future session, the session date, the base's price and move, each visible case's price, move
+  and trigger, the preview, and the comparison. A hidden line says nothing.
+- **Daily bars only.** The forecasts are in trading sessions. On another grouping the chart draws none of them and
+  says so, with *Show daily bars*.
+- **Fixed coordinates.** Every path starts at the study's anchor price and is drawn at its session dates, so a chart
+  that refreshes, or a study reopened weeks later, draws the same points. A study whose last session has passed is
+  labelled historical.
+- **Switching** stocks clears every forecast layer at once, and an unsaved preview with it. Starting a new study of
+  the same stock clears the old one's forecast until the new result exists. A late answer for another study is
+  dropped.
+- **The What-If explorer's lines** (orange and purple, another model) are drawn only when you tick *Draw the What-If
+  paths on the chart* in that widget, and are removed when it closes.
+
+## 7. Handoffs (PR 6)
+
+- **Discover → Research.** Discover's horizons are categories (today, an event, over days); a study's are trading
+  sessions. One explicit map joins them (`WS.horizonSessions`: today 1, event 5, over days 5). Picking an opportunity
+  sets the study's horizon, direction and kind of trade, and carries its id, source and catalyst. *Study it* starts
+  exactly one study (a repeat of the same click finds it) and opens Research, which follows it.
+- **Research → Trading Desk.** *Review trade* and *Draft* carry the study, the strategy and its legs, the version,
+  the case, the valuation, the decision, the quote snapshot, the trigger, the invalidation and the sizing. The desk
+  shows *Chosen under* and still checks quote freshness, the policy, the broker and the limits; nothing is submitted
+  from Research.
+- **Trading Desk → Research.** The draft's *Open its study* reopens the study at the version the draft was chosen
+  under.
+- **Reopened studies** show what they forecast then; current prices are on the chart separately.
+
+## 8. Updating, restarting and operating
+
+The update adds migration 31 (two tables, nothing removed). The first start backs the database up to `data/backups/`
+first, as every migration does. MiroFish itself is unchanged by 4.7 (still the pinned `7657031`). It only needs a
+restart if you want a clean process, and its settings are where they were.
+
+```bash
+# 1. Stop the app (Ctrl+C in its terminal) and close Grok if it is reviewing.
+cd ~/projects/trade-assistant
+git rev-parse --short HEAD          # note it, in case you roll back
+./update.sh                         # pulls 4.7.0, installs packages, lists what changed
+
+# 2. Restart MiroFish (optional; it is unchanged) and check it answers.
+./setup_mirofish.sh restart
+./setup_mirofish.sh status
+
+# 3. Start the app; the first start applies migration 31 after a backup.
+.venv/bin/python run.py
+
+# 4. Free checks: Tradier, MiroFish's levels, settings, circuit, spending.
+.venv/bin/python run.py --scenario-check SPY
+```
+
+Then in the browser, reload the workstation (Cmd+Shift+R once, so the new scripts load). No `.env` change is needed:
+*Full study* follows `SCENARIO_AUTO` until you change it in Simulation settings.
+
+**Roll back**: stop the app; `git checkout <the version you noted>`; `.venv/bin/pip install -q -r requirements.txt`;
+start it. 4.6.2 runs on the migrated database and ignores the two new tables. To undo the migration as well, put the
+newest `data/backups/` copy from before the update in place of `data/tradeassist.db`.
+
+## 9. Independent review
+
+A separate reviewer, who had not seen the work, read the change against this design before release. The findings and
+their fixes are recorded in [IMPROVEMENTS.md](IMPROVEMENTS.md#47-independent-review), each with a test. The most
+serious: promotion was not tied to the official run's own cases (a manual import sized like the official version could
+be promoted); it now is.
+
+## 10. Acceptance
+
+The plan's 24 tests are mapped in `tests/test_acceptance_47.py`. The new tests are:
+
+- `tests/test_forecast_studio.py`: the bundle, presentation, preview, save, assessment, comparison, focus, promotion
+  and drafts.
+- `tests/test_forecast_studio_ui.py`: four browser tests.
+- `tests/test_acceptance_47.py`: tests 4, 11, 14, 16, 17, 18, 21 and 24.
+
+The older browser tests were updated to the new screen. The whole suite runs in CI on Python 3.11 and 3.13 with
+Chromium.
+
+**Not done by these tests, by design:** a paid MiroFish run (`run.py --scenario-smoke`, which asks before spending)
+and live-market checks; both are for you to run on the Mac when you choose.

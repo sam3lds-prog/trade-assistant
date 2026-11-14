@@ -95,16 +95,19 @@ def test_preview_save_compare_and_return_to_the_official_version(tmp_path):
         study.locator(".ws-sections button:text-is('Forecast & Scenarios')").click()
         study.locator(".ws-lab input[value='bullish']").check()
         page.wait_for_selector(f"{SHOWN} .ws-lab input[aria-label='Bullish stock-specific move']", timeout=10000)
+        start = study.locator(".ws-lab input[aria-label='Bullish stock-specific move']").input_value()
         study.locator(".ws-lab input[aria-label='Bullish stock-specific move']").fill("9")
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:preview:bullish']; }})()", timeout=15000)
         pv = page.evaluate(LINES)["forecast:preview:bullish"]
         assert pv["style"] == 1 and pv["legend"] == "Bullish (unsaved)" and "unsaved" in pv["legendGroup"]
         assert "Unsaved preview" in study.locator(".ws-lab-status").inner_text()
         assert "preview" not in page.evaluate("JSON.stringify(WS.ctx.blue)") and n_versions() == 1
-        # Discard: the preview goes, nothing was saved.
+        # Discard: the preview goes, the editor is back to the saved sizes, nothing was saved (and nothing comes back).
         study.locator(".ws-lab button:text-is('Discard')").click()
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:case:bullish'] && !l['forecast:preview:bullish']; }})()", timeout=15000)
-        assert n_versions() == 1
+        page.wait_for_timeout(800)
+        assert study.locator(".ws-lab input[aria-label='Bullish stock-specific move']").input_value() == start
+        assert "forecast:preview:bullish" not in page.evaluate(LINES) and n_versions() == 1
         # Again, and Save version.
         page.wait_for_selector(f"{SHOWN} .ws-lab input[aria-label='Bullish stock-specific move']", timeout=10000)
         study.locator(".ws-lab input[aria-label='Bullish stock-specific move']").fill("9")
@@ -124,10 +127,15 @@ def test_preview_save_compare_and_return_to_the_official_version(tmp_path):
         study.locator(".ws-versions select[aria-label='Compare with']").select_option(index=1)
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:compare:bullish']; }})()", timeout=15000)
         cmp_ = page.evaluate(LINES)["forecast:compare:bullish"]
-        assert cmp_["width"] == 1 and cmp_["legendGroup"] == "Compare: v1"
-        # Back to the official version: its decision, no comparison of itself.
+        assert cmp_["width"] == 1 and cmp_["legendGroup"] == "Compare" and cmp_["legend"] == "v1 (comparison)" and cmp_["legendShare"] == "forecast:compare"
+        # An edit in flight on v2, then back to the official version at once: its preview never lands on v1.
+        study.locator(".ws-lab input[value='bullish']").dispatch_event("click")
+        page.wait_for_selector(f"{SHOWN} .ws-lab input[aria-label='Bullish stock-specific move']", timeout=10000)
+        study.locator(".ws-lab input[aria-label='Bullish stock-specific move']").fill("13")
         study.locator(".ws-versions button:text-is('Back to the official version')").click()
         page.wait_for_function("WS.ctx.blue.scenario.catalyst.kind === 'official'", timeout=15000)
+        page.wait_for_timeout(1500)
+        assert not [k for k in page.evaluate(LINES) if "preview" in k]
         study.locator(".ws-sections button:text-is('Summary')").click()
         assert study.locator("[data-section='summary'] .ws-decision").get_attribute("data-kind") == "official"
     assert errors == []

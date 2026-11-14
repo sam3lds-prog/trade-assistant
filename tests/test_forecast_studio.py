@@ -283,26 +283,32 @@ def test_only_a_rule_sized_edit_can_become_official_and_only_when_confirmed(app)
     assert svc.db.one("SELECT COUNT(*) AS n FROM scenario_forecasts WHERE study_id = ?", (sid,))["n"] == forward     # never scored
     nb = _bundle(c, sid)
     kinds = {v["id"]: v["kind"] for v in nb["versions"]}
-    assert kinds[vid] == "promoted" and kinds[official] == "previous" and nb["selected_context"]["is_official"]
+    assert kinds[vid] == "promoted" and kinds[official] == "replaced" and nb["selected_context"]["is_official"]
+    assert "promoted from your edit" in next(v for v in nb["versions"] if v["id"] == vid)["grading"]
     assert nb["decision"]["kind"] == "official" and nb["decision"]["current"]
     old = _bundle(c, sid, version=official)
     assert old["decision"] is None or (old["decision"]["current"] is False and "superseded" in (old["decision_note"] or ""))
 
 
-def test_promotion_rules_follow_the_automatic_runs_standard():
-    cases = {"bullish": {"drivers": [{"type": "issuer_event", "direction": "up", "source_ids": ["S1"]},
-                                     {"type": "market", "direction": "up", "factor": "market", "source_ids": ["S2"]}]}}
-    ok = [{"key": "bullish", "issuer": {"value_pct": 3.0, "source": "analog_tail"}, "factors": [{"key": "market", "source": "factor_volatility"}],
-           "dispersion": None}]
-    assert promotion_problems({}, cases, ok) == []
-    down = [{**ok[0], "issuer": {"value_pct": -3.0, "source": "analog_tail"}}]
-    assert "no cited issuer driver of this case goes down" in promotion_problems({}, cases, down)[0]
-    sector = [{**ok[0], "factors": [{"key": "sector", "source": "factor_volatility"}]}]
-    assert "names the sector factor" in promotion_problems({}, cases, sector)[0]
-    provider = [{**ok[0], "issuer": {"value_pct": 3.0, "source": "provider"}}]
-    assert "provider" in promotion_problems({}, cases, provider)[0]
-    widened = [{**ok[0], "dispersion": {"value_pct": 2.0, "source": "user_stress", "source_ids": []}}]
-    assert len(promotion_problems({}, cases, widened)) == 2
+def test_promotion_rules_follow_the_automatic_runs_standard(monkeypatch):
+    import tradeassist.v3.pipeline as PL
+    monkeypatch.setattr(PL.Pipeline, "_factor_sign", staticmethod(lambda seed, key, size, session, direction: size if direction == "up" else -size))
+    seed = {"horizon_sessions": 5, "catalyst_session": 2}
+    cases = {"bullish": {"drivers": [{"type": "issuer_event", "direction": "up", "timing": "first_session_after_release", "source_ids": ["S1"]},
+                                     {"type": "market", "direction": "up", "factor": "market", "timing": "unknown", "source_ids": ["S2"]}]}}
+    ok = [{"key": "bullish", "issuer": {"value_pct": 3.0, "session": 2, "source": "analog_tail"},
+           "factors": [{"key": "market", "value": 1.2, "session": 2, "source": "factor_volatility"}], "dispersion": None}]
+    assert promotion_problems(seed, cases, ok) == []
+    down = [{**ok[0], "issuer": {"value_pct": -3.0, "session": 2, "source": "analog_tail"}}]
+    assert "no cited issuer driver of this case goes down" in promotion_problems(seed, cases, down)[0]
+    early = [{**ok[0], "issuer": {"value_pct": 3.0, "session": 1, "source": "analog_tail"}}]
+    assert "not the session its driver gives (2)" in promotion_problems(seed, cases, early)[0]
+    sector = [{**ok[0], "factors": [{"key": "sector", "value": 1.0, "session": 2, "source": "factor_volatility"}]}]
+    assert "names the sector factor" in promotion_problems(seed, cases, sector)[0]
+    provider = [{**ok[0], "issuer": {"value_pct": 3.0, "session": 2, "source": "provider"}}]
+    assert "provider" in promotion_problems(seed, cases, provider)[0]
+    widened = [{**ok[0], "dispersion": {"value_pct": 2.0, "session": 2, "source": "implied_sensitivity", "source_ids": ["S1"]}}]
+    assert "extra uncertainty" in promotion_problems(seed, cases, widened)[0]
 
 
 # --- Trading Desk references ---------------------------------------------------------------------------------------------------
@@ -312,23 +318,26 @@ def test_the_draft_api_refuses_mismatched_study_version_valuation_or_decision(ap
     c, svc, st = app
     sid = st["auto"]
     b = _bundle(c, sid)
-    off, d, val = b["selected_context"]["version_id"], b["decision"], b["valuation"]
+    off, d = b["selected_context"]["version_id"], b["decision"]
     ex = next(v for v in b["versions"] if v["kind"] == "exploratory")
-    strat = "shares"
+    setup = d.get("setup") or {}
+    strat = (setup.get("structures") or ["shares"])[0]            # a decision travels with its own strategy and case
+    case = {"case": setup["case"]} if setup.get("case") else {}
 
     def draft(scenario, study=sid):
         return c.post("/v3/drafts", json={"study_id": study, "strategy": strat, "scenario": scenario})
 
-    ok = draft({"version_id": off, "valuation_id": val["id"], "decision_id": d["id"]})
+    ok = draft({"version_id": off, "valuation_id": d["valuation_id"], "decision_id": d["id"], **case})
     assert ok.status_code == 200, ok.text
     ref = ok.json()["source"]["scenario"]
-    assert ref["official"] is True and ref["exploratory"] is False and ref["snapshot_at"] == val["snapshot_at"] and ref["decision_id"] == d["id"]
+    assert ref["official"] is True and ref["exploratory"] is False and ref["snapshot_at"] and ref["decision_id"] == d["id"]
+    assert ref["valuation_id"] == d["valuation_id"]
     # The decision with another version.
-    r = draft({"version_id": ex["id"], "decision_id": d["id"]})
+    r = draft({"version_id": ex["id"], "decision_id": d["id"], **case})
     assert r.status_code == 400 and "another scenario version" in r.json()["error"]
     # The decision with another valuation.
     other_val = svc.db.one("SELECT id FROM scenario_valuations WHERE version_id = ?", (ex["id"],))["id"]
-    r = draft({"version_id": off, "valuation_id": other_val, "decision_id": d["id"]})
+    r = draft({"version_id": off, "valuation_id": other_val, "decision_id": d["id"], **case})
     assert r.status_code == 400 and "another scenario version" in r.json()["error"]         # the valuation is checked first
     # A research-only assessment is not a decision.
     asm = _bundle(c, sid, version=ex["id"])["decision"]["id"]
@@ -337,7 +346,7 @@ def test_the_draft_api_refuses_mismatched_study_version_valuation_or_decision(ap
     # Another study's version or decision.
     assert draft({"version_id": off}, study=st["other"]).status_code == 400
     # From an exploratory version: allowed, said to be research only.
-    r = draft({"version_id": ex["id"]})
+    r = draft({"version_id": ex["id"], **case})
     assert r.status_code == 200 and r.json()["source"]["scenario"]["exploratory"] is True
     assert "exploratory scenario version" in r.json()["notes"][0]
 
@@ -349,9 +358,11 @@ def test_a_superseded_decision_is_not_carried_into_a_draft(app):
     svc.pipeline.revalue(sid)                      # a fresh snapshot and the decision again: a later decision exists
     latest = svc.opportunities.latest(sid)
     assert latest["id"] != first["id"]
-    r = c.post("/v3/drafts", json={"study_id": sid, "strategy": "shares", "scenario": {"version_id": first["version_id"], "decision_id": first["id"]}})
+    own = lambda d: ((d.get("setup") or {}).get("structures") or ["shares"])[0]           # noqa: E731
+    case = lambda d: {"case": d["setup"]["case"]} if (d.get("setup") or {}).get("case") else {}   # noqa: E731
+    r = c.post("/v3/drafts", json={"study_id": sid, "strategy": own(first), "scenario": {"version_id": first["version_id"], "decision_id": first["id"], **case(first)}})
     assert r.status_code == 400 and "superseded" in r.json()["error"]
-    r = c.post("/v3/drafts", json={"study_id": sid, "strategy": "shares", "scenario": {"version_id": latest["version_id"], "decision_id": latest["id"]}})
+    r = c.post("/v3/drafts", json={"study_id": sid, "strategy": own(latest), "scenario": {"version_id": latest["version_id"], "decision_id": latest["id"], **case(latest)}})
     assert r.status_code == 200, r.text
 
 
@@ -377,3 +388,103 @@ def test_the_migration_adds_only_tables(tmp_path):
 
 
 _ = replace
+
+
+# --- the independent review's findings, each pinned -------------------------------------------------------------------------
+
+def test_only_an_edit_of_the_official_runs_own_cases_can_be_promoted(app):
+    """Review 1: a manual import (its own triggers and invalidations) sized like the official version is not promotable,
+    nor is anything while the official run is in doubt (review 4), nor a version that adds extra uncertainty or puts a
+    factor shock against its driver (review 2)."""
+    from tests.test_catalyst_scenarios import FIXTURE
+    c, svc, st = app
+    sid = st["auto"]
+    b = _bundle(c, sid)
+    p = svc.pipeline.load(sid)
+    fx = json.loads(FIXTURE.read_text())
+    fx["seed_id"] = p["seed_id"]
+    r = c.post(f"/v3/studies/{sid}/scenario-runs", json={"provider": "manual", "seed_id": p["seed_id"], "result": fx})
+    assert r.status_code == 200, r.text
+    run_id = r.json()["run"]["id"]
+    keys = {x["key"] for x in r.json()["run"]["cases"]}
+    same = [a for a in _assumptions(b) if a["key"] in keys]
+    saved = c.post(f"/v3/studies/{sid}/scenario-lab/versions", json={"run_id": run_id, "cases": same})
+    if saved.status_code == 200:                    # the import's own drivers may not accept the official sizes at all
+        chk = c.get(f"/v3/studies/{sid}/scenario-lab/promotion", params={"version_id": saved.json()["version"]["id"]}).json()
+        assert chk["allowed"] is False and any("not edited from the automatic run's own cases" in x for x in chk["problems"])
+        assert c.post(f"/v3/studies/{sid}/scenario-lab/promote", json={"version_id": saved.json()["version"]["id"], "confirm": True}).status_code == 400
+    # Extra uncertainty is not something the automatic run adds.
+    widened = json.loads(json.dumps(_assumptions(b)))
+    for a in widened:
+        if a["key"] == "bullish":
+            a["dispersion"] = {"value_pct": 2.0, "session": 1, "source": "user_stress", "source_ids": []}
+    v = c.post(f"/v3/studies/{sid}/scenario-lab/versions", json={"from_version_id": b["selected_context"]["version_id"], "cases": widened}).json()["version"]
+    chk = c.get(f"/v3/studies/{sid}/scenario-lab/promotion", params={"version_id": v["id"]}).json()
+    assert chk["allowed"] is False and any("extra uncertainty" in x for x in chk["problems"])
+    # While the official run is in doubt (failed, needs attention), nothing is promoted.
+    plain = c.post(f"/v3/studies/{sid}/scenario-lab/versions", json={"from_version_id": b["selected_context"]["version_id"], "cases": _assumptions(b)}).json()["version"]
+    assert c.get(f"/v3/studies/{sid}/scenario-lab/promotion", params={"version_id": plain["id"]}).json()["allowed"] is True
+    svc.pipeline._update(sid, status="needs_attention")
+    try:
+        chk = c.get(f"/v3/studies/{sid}/scenario-lab/promotion", params={"version_id": plain["id"]}).json()
+        assert chk["allowed"] is False and any("did not finish" in x for x in chk["problems"])
+    finally:
+        svc.pipeline._update(sid, status="complete")
+    c.post(f"/v3/studies/{sid}/presentation", json={"selected_version_id": b["selected_context"]["version_id"]})
+
+
+def test_a_factor_shock_against_its_driver_is_not_promotable(monkeypatch):
+    seed = {"horizon_sessions": 5, "catalyst_session": 1}
+    cases = {"bearish": {"drivers": [{"type": "market", "direction": "down", "factor": "market", "timing": "first_session_after_release", "source_ids": ["S2"]}]}}
+    import tradeassist.v3.pipeline as PL
+    # A fall in the market moves the stock down: the sign that goes the driver's way is the negative one.
+    monkeypatch.setattr(PL.Pipeline, "_factor_sign", staticmethod(lambda seed, key, size, session, direction: -size))
+    ok = [{"key": "bearish", "issuer": None, "dispersion": None, "factors": [{"key": "market", "value": -1.5, "session": 1, "source": "factor_volatility"}]}]
+    assert promotion_problems(seed, cases, ok) == []
+    wrong = [{**ok[0], "factors": [{"key": "market", "value": 1.5, "session": 1, "source": "factor_volatility"}]}]
+    assert "against its driver's direction" in promotion_problems(seed, cases, wrong)[0]
+    late = [{**ok[0], "factors": [{"key": "market", "value": -1.5, "session": 3, "source": "factor_volatility"}]}]
+    assert "not its driver's (1)" in promotion_problems(seed, cases, late)[0]
+
+
+def test_a_draft_carries_a_decision_only_for_its_own_strategy_and_case(app):
+    """Review 5."""
+    c, svc, st = app
+    sid = st["auto"]
+    d = svc.opportunities.latest(sid)
+    s = d.get("setup") or {}
+    if not s.get("structures"):
+        pytest.skip("the demo decision has no setup")
+    mine, case = s["structures"][0], s.get("case")
+    ref = {"version_id": d["version_id"], "decision_id": d["id"], **({"case": case} if case else {})}
+    ok = c.post("/v3/drafts", json={"study_id": sid, "strategy": mine, "scenario": ref})
+    assert ok.status_code == 200, ok.text
+    other = next(k for k in ("shares", "long_call", "long_put", "bull_call_spread") if k != mine)
+    r = c.post("/v3/drafts", json={"study_id": sid, "strategy": other, "scenario": {**ref, "case": None} if not case else ref})
+    assert r.status_code == 400 and "another strategy" in r.json()["error"]
+    wrong_case = {"bullish": "bearish", "bearish": "bullish"}.get(case)
+    r = c.post("/v3/drafts", json={"study_id": sid, "strategy": mine, "scenario": {**ref, "case": wrong_case}})
+    assert r.status_code == 400 and ("another case" in r.json()["error"] or "goes" in r.json()["error"])
+
+
+def test_a_promoted_versions_setup_never_enters_the_outcome_record(app):
+    """Review 3: only the automatic run's own decisions are scored."""
+    _, svc, _ = app
+    d = {"status": "qualified", "setup": {"structures": ["shares"], "units": {"shares": 1}}, "id": "sdec_x"}
+    assert svc.outcomes.freeze("study_x", d, {"structures": []}, {"origin": "manual", "id": "v"}) is None
+
+
+def test_two_quick_preference_changes_both_stand(app):
+    """Review 11: the read, merge and write are one transaction."""
+    import threading
+    c, svc, st = app
+    sid = st["base_only"]
+    fs = svc.forecast_state
+    from tradeassist.v3.forecast_state import PresentationIn
+    ts = [threading.Thread(target=fs.save_presentation, args=(sid, PresentationIn(visible_layers={k: False}))) for k in ("bullish", "bearish", "range")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    lay = fs.presentation(sid)["visible_layers"]
+    assert lay["bullish"] is False and lay["bearish"] is False and lay["range"] is False

@@ -464,8 +464,10 @@ class Forward:
         """The direction of each Qualified (or triggered) setup against the realized move."""
         out = []
         for sid, r in graded_base.items():
-            d = self.svc.db.one("SELECT decision_json FROM scenario_decisions WHERE study_id = ? AND status = 'qualified' "
-                                "ORDER BY created_at DESC LIMIT 1", (sid,))
+            # 4.7: only a decision on an automatic run's own version: a promoted (person-edited) version's is never scored.
+            d = self.svc.db.one("""SELECT d.decision_json FROM scenario_decisions d JOIN scenario_versions v ON v.id = d.version_id
+                                   WHERE d.study_id = ? AND d.status = 'qualified' AND v.origin = 'auto'
+                                   ORDER BY d.created_at DESC LIMIT 1""", (sid,))
             if d is None:
                 continue
             s = (json.loads(d["decision_json"]).get("setup") or {})

@@ -11,6 +11,18 @@ go to Robinhood only if you switch live execution on in `.env` and choose it in 
 policy (see "Version 3" below). It is not financial advice, and passing every check does not
 make a trade safe. Buying an option always puts the whole premium at risk.
 
+## 4.7: Forecast Studio, one forecasting surface in Research
+
+Research is one surface now. A study has one result: the quantitative base, the official MiroFish (or other
+provider's) scenarios, the strategies valued under them and one decision. That result is drawn on the chart without a
+button, and the chart's legend is the one layer control, remembered per study. A full study (one click) or a
+baseline-only one is chosen in Study settings, and the simulation's options are folded away. The Scenario Lab
+previews an edit as an unsaved line, at no simulation cost. A saved edit is an exploratory, research-only version:
+valued and assessed, but never published, notified or scored, and never the decision that counts. It can be promoted
+to official only when its sizes meet the automatic run's standard. Discover's *Study it* opens Research on one study,
+and a draft carries its version, valuation and decision to the Trading Desk and links back. Design, routes, tests and
+operations: [docs/FORECAST_STUDIO.md](docs/FORECAST_STUDIO.md).
+
 ## 4.6: MiroFish production hardening and forward validation
 
 One-click Research (Run study → evidence → a self-hosted MiroFish simulation → price paths → the strategies revalued →

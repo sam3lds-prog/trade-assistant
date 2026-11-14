@@ -92,8 +92,9 @@ language model and Zep keys stay there) and `FLASK_HOST=127.0.0.1`, so it listen
 Assistant sends it only the shareable packet: no credentials, holdings, orders or budgets. The hosted MiroFish
 dashboard's API is not used.
 
-In Research → the study's **Study settings**, *Run scenarios after the study* (and *On by default*) and the provider
-can be changed without editing `.env`; the provider's readiness is shown beside them.
+In Research → the study's **Study settings**, choose **Full study** (the study, then the provider, with one click) or
+**Baseline only**; the provider, the profile and *Full study by default* are under **Simulation settings** (4.7), and
+can be changed without editing `.env`. The provider's readiness and the next run's estimate are shown on one line.
 
 ### What happens on Run study
 
@@ -104,9 +105,11 @@ can be changed without editing `.env`; the provider's readiness is shown beside 
 | Price paths and valuation | Cases checked against the packet, sized by the app's rules, version saved; the candidates priced under each case from one snapshot | Research's `scenarios` worker |
 | Findings | A short conclusion, the cases with their triggers and invalidations, the mixes | Saved on the study |
 
-The panel at the top of the study's Summary follows the stages, the provider's progress (its project and simulation
-ids as they arrive) and the elapsed time, with Cancel while it runs and Retry after a failure. The cases are drawn on
-the linked chart from their saved prices as soon as the version exists.
+4.7: the study's status line (above its sections) says where it is (simulation queued, running, waiting for your
+approval, decision ready, did not finish) with Approve, Cancel and Retry when they apply; the stages, the provider's
+progress and its ids are under Forecast & Scenarios → Catalyst and simulation (ids and costs under *Simulation
+details*). The cases are drawn on the linked chart from their saved prices as soon as the version exists, with no
+button. See [FORECAST_STUDIO.md](FORECAST_STUDIO.md) for the whole 4.7 screen.
 
 ### What the numbers are
 
@@ -133,8 +136,8 @@ the linked chart from their saved prices as soon as the version exists.
 
 ### Try it on demo data
 
-`DATA_MODE=demo`, then in Research's Study settings choose **Demo provider** and tick *On by default*, and click Run
-the study. The demo provider returns canned cases built from the packet (labelled *Demo provider: nothing was
+`DATA_MODE=demo`, then in Research's Study settings → *Simulation settings* choose **Demo provider** and tick *Full
+study by default*, and click Run the study. The demo provider returns canned cases built from the packet (labelled *Demo provider: nothing was
 simulated*), and the rest of the pipeline is the real one.
 
 ## 3. Opportunities and reporting (4.4)
@@ -224,13 +227,18 @@ FRESHNESS_OPTION_QUOTE_SECONDS=300 # how old an option's bid and ask may be whil
 
 | Profile | Agents (at most) | Rounds | Platforms | Time cap | Starts on its own? |
 | --- | --- | --- | --- | --- | --- |
-| Quick (default) | half of `MIROFISH_MAX_AGENTS`, at most 20 | at most 4 | one (reddit) | at most 20 min | when its estimate allows |
-| Standard | `MIROFISH_MAX_AGENTS` | `MIROFISH_MAX_ROUNDS` | both | `MIROFISH_RUN_MINUTES` | when its estimate allows |
-| Deep | three times Standard | three times | both | twice | never: always asks |
+| Quick (default) | half of `MIROFISH_MAX_AGENTS`, at most 20 | at most 4 active rounds | both (parallel runner) | at most 20 min | when its estimate allows |
+| Standard | `MIROFISH_MAX_AGENTS` | `MIROFISH_MAX_ROUNDS` active rounds | both (parallel runner) | `MIROFISH_RUN_MINUTES` | when its estimate allows |
+| Deep | three times Standard | three times | both (parallel runner) | twice | never: always asks |
+
+Since 4.6.1 every profile uses MiroFish's parallel runner (both platforms): it is the only runner that reports round
+progress and completion. The app asks for enough rounds that the profile's number fall in hours when the agents are
+active (MiroFish's simulated clock starts at midnight); rounds with no active agent are skipped and cost nothing. The
+time cap starts when you approve a run that needed approval.
 
 MiroFish makes one agent per entity in the graph it builds and has no agent cap of its own, so the app reads the
 entity count after the graph is built and **before any agent is prepared**; above the profile's cap it asks you.
-Choose the profile in Research → Study settings (*Simulation*), or `SCENARIO_DEFAULT_PROFILE`.
+Choose the profile in Research → Study settings → *Simulation settings* (*Profile*), or `SCENARIO_DEFAULT_PROFILE`.
 
 ### Spending
 
