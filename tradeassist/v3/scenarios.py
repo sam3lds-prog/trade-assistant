@@ -769,6 +769,22 @@ class Scenarios:
         """`origin` is "manual" (applied by a person) or "auto" (the one-click pipeline, 4.3)."""
         self._on()
         r = self._run_row(run_id)
+        seed, cases, assumptions = self.checked(r, body)
+        result = self.compute(seed, cases, assumptions)
+        vid = C.new_id("sver")
+        now = C.utc_now()
+        with self.svc.db.tx() as cur:
+            cur.execute("SELECT COALESCE(MAX(version), 0) FROM scenario_versions WHERE run_id = ?", (run_id,))
+            n = int(cur.fetchone()[0]) + 1
+            cur.execute("""INSERT INTO scenario_versions (id, run_id, version, parent_version, created_at, calc_version, assumptions_json,
+                           result_json, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (vid, run_id, n, body.parent_version, now, CALC_VERSION, json.dumps(assumptions), json.dumps(result), origin))
+        self.svc.bus.publish("scenario.applied", vid, run_id=run_id, study_id=r["study_id"], symbol=seed["symbol"], version=n, origin=origin)
+        return self.version(vid)
+
+    def checked(self, r: Any, body: C.ScenarioVersionIn) -> tuple[dict[str, Any], dict[str, dict[str, Any]], list[dict[str, Any]]]:
+        """A run's seed, its cases by key and the full set of reviewed assumptions, checked whole (4.7: the same check for
+        a saved version and for an unsaved preview). Raises with every problem listed."""
         if r["status"] != "complete":
             raise RequestError(f"This run is {r['status']}: only a complete run's cases can be applied.")
         seed = self._seed(r["seed_id"])
@@ -835,17 +851,7 @@ class Scenarios:
         given = {a.key: a.model_dump() for a in body.cases}
         assumptions = [given.get(k) or {"key": k, "visible": True, "issuer": None, "factors": [], "dispersion": None}
                        for k in C.CASE_KEYS if k in cases]
-        result = self.compute(seed, cases, assumptions)
-        vid = C.new_id("sver")
-        now = C.utc_now()
-        with self.svc.db.tx() as cur:
-            cur.execute("SELECT COALESCE(MAX(version), 0) FROM scenario_versions WHERE run_id = ?", (run_id,))
-            n = int(cur.fetchone()[0]) + 1
-            cur.execute("""INSERT INTO scenario_versions (id, run_id, version, parent_version, created_at, calc_version, assumptions_json,
-                           result_json, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (vid, run_id, n, body.parent_version, now, CALC_VERSION, json.dumps(assumptions), json.dumps(result), origin))
-        self.svc.bus.publish("scenario.applied", vid, run_id=run_id, study_id=r["study_id"], symbol=seed["symbol"], version=n, origin=origin)
-        return self.version(vid)
+        return seed, cases, assumptions
 
     def compute(self, seed: dict[str, Any], cases: dict[str, dict[str, Any]], assumptions: list[dict[str, Any]]) -> dict[str, Any]:
         b = seed["base"]

@@ -20,6 +20,33 @@ each change, is [IMPROVEMENTS.md](IMPROVEMENTS.md).
 4. To go back, stop the app and put the copy from `data/backups/` in place of
    `data/tradeassist.db` (or the file `TRADEASSIST_DB` names), then run the older version.
 
+## 4.7.0 — Forecast Studio: one forecasting surface in Research
+
+Built from the 4.7 plan (*Unified Forecasting, Scenario UX and Trading Workflow*) in three pull requests; the full
+design, the audit it started from and the routes are in [FORECAST_STUDIO.md](FORECAST_STUDIO.md). **No trading
+permission is added or changed; nothing here places an order.**
+
+### One authoritative forecast state, and a Scenario Lab that cannot contaminate what is official (PR 1)
+
+- **One result per study.** `GET /v3/studies/{id}/result` assembles the study's base, its official automatic run, every
+  scenario version (official, exploratory, control, earlier), the selected version and case, one comparison, the
+  selected version's own valuation and decision, the strategies as one table, the lifecycle and provenance. It reads
+  saved records only: no simulation, no market data, no repricing.
+- **A valuation or decision is never shown with another version.** The decision of the official version stays with
+  it; an exploratory version shows its own research-only assessment, and says whose the official decision is.
+- **View preferences per study** (`/v3/studies/{id}/presentation`, migration 31): the selected version and case, the
+  comparison, the chart layers and focus. Hiding a line on one study no longer hides it on another; a version of
+  another study is refused.
+- **Scenario Lab backend.** A preview computes edited paths and writes nothing. Saving keeps a new version with its
+  parent, values the strategies under it, and runs the Opportunity Engine's checks as a research-only assessment that
+  is never published, notified or scored. Promotion is the only way an edit becomes official: confirmed, and only when
+  every size comes from the packet's own rules for a cited driver of its case.
+- **Draft references are checked whole.** A draft is refused when its decision belongs to another version, was made
+  from another valuation, has been superseded or is an exploratory assessment, or when the version's sessions have
+  passed. A draft from an exploratory version says it is research only.
+- **A neutral base says what it can claim**: calibration pending, too little history, range only, no validated edge,
+  validated edge, or both validated. A flat base is never an unexplained 0.00%.
+
 ## 4.6.2 — The time-cap message says where the run was
 
 - A run stopped by its time cap now says which stage it was in, for example "... while building the graph (40%)" or

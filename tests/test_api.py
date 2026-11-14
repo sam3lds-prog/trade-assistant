@@ -44,6 +44,12 @@ V3_WRITES = {
     # 4.5.2: approve a waiting simulation's spending (simulation spending only, never a trade), enter what a run actually
     # cost, and reset the provider's circuit breaker. Records and settings; no orders.
     "/v3/studies/{study_id}/pipeline/approve", "/v3/scenarios/usage/{run_id}", "/v3/scenarios/circuit/reset",
+    # 4.7: a study's view preferences (the version and case selected, the comparison, the chart layers); the Scenario
+    # Lab's preview (writes nothing), saved exploratory versions with their valuation and research-only assessment, a
+    # fresh valuation of one, and the explicit, checked promotion of an edit to the official version (which decides
+    # through the official path). Models and records; no orders.
+    "/v3/studies/{study_id}/presentation", "/v3/studies/{study_id}/scenario-lab/preview", "/v3/studies/{study_id}/scenario-lab/versions",
+    "/v3/studies/{study_id}/scenario-lab/versions/{version_id}/value", "/v3/studies/{study_id}/scenario-lab/promote",
 }
 V2_WRITES = {
     # 2.6: your broker history, imported read-only from a file you download, and removing an import again.
