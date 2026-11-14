@@ -15,15 +15,21 @@
   const words = (list, map) => list.map(k => map[k] || k).join(", ");
   const when = iso => (iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
   const select = (label, options, value) => el("select", { "aria-label": label }, options.map(([v, t]) => el("option", { value: v, selected: v === (value || "") }, t)));
-  // What a study of an opportunity looks at: today's move for an intraday one, a week for the rest.
-  const studyOf = c => ({ horizon_days: c.horizon === "intraday" ? 1 : 5,
+  // What a study of an opportunity looks at: today's move for an intraday one, a week for the rest. 4.7: Discover's
+  // horizons are categories and Research's are trading sessions; the one map between them is WS.horizonSessions.
+  const studyOf = c => ({ horizon_days: WS.horizonSessions(c.horizon) || 5,
     thesis: c.kinds.includes("reversal") ? "reversal" : c.horizon === "intraday" ? "intraday_bounce"
       : c.next_event && c.next_event.kind === "earnings" && c.next_event.in_trading_days <= 5 ? "earnings_reaction" : "swing" });
+  // The opportunity as the linked widgets receive it: its category horizon, its sessions and kind of trade for a study,
+  // where it came from, and its catalyst when it has one.
+  const oppOf = c => { const s = studyOf(c); return { id: c.id, symbol: c.symbol, direction: c.direction, horizon: c.horizon, horizon_sessions: s.horizon_days,
+    thesis: s.thesis, source: (c.sources || [])[0] || null, catalyst: c.next_event ? `${c.next_event.kind}${c.next_event.date ? ` on ${c.next_event.date}` : ""}` : null }; };
 
-  async function startStudy(w, c) {
+  async function startStudy(w, c, key) {
     const s = studyOf(c);
-    const r = await api("/v3/studies", { symbol: c.symbol, direction: c.direction, horizon_days: s.horizon_days, thesis: s.thesis, opportunity_id: c.id });
-    w.set({ symbol: c.symbol, direction: c.direction, horizon: c.horizon, opportunity: { id: c.id, symbol: c.symbol, direction: c.direction, horizon: c.horizon }, study: r.id });
+    const r = await api("/v3/studies", { symbol: c.symbol, direction: c.direction, horizon_days: s.horizon_days, thesis: s.thesis, opportunity_id: c.id,
+      request_key: key });
+    w.set({ symbol: c.symbol, direction: c.direction, horizon: c.horizon, opportunity: oppOf(c), study: r.id });
     return r.id;
   }
 
@@ -91,8 +97,7 @@
     function pick(c) {
       picked = c.id; w.save();
       mark(c);
-      w.set({ symbol: c.symbol, direction: c.direction, horizon: c.horizon, opportunity: { id: c.id, symbol: c.symbol, direction: c.direction, horizon: c.horizon },
-        ...(c.study_id ? { study: c.study_id } : {}) });
+      w.set({ symbol: c.symbol, direction: c.direction, horizon: c.horizon, opportunity: oppOf(c), ...(c.study_id ? { study: c.study_id } : {}) });
       showDetail(c);
     }
 
@@ -139,12 +144,16 @@
       const go = el("button", { class: "ws-btn primary", type: "button" }, full.study_id ? "Study it again" : "Study it");
       const open = full.study_id ? el("button", { class: "ws-btn", type: "button", onclick: () => { w.set({ study: full.study_id }); WS.goWorkspace("research"); } }, "Open its study") : "";
       const note = el("span", { class: "small muted" });
+      // 4.7: Study it starts exactly one study (a repeat of the same click finds it) and opens Research on it.
+      let key = null;
       go.addEventListener("click", async () => {
         go.disabled = true; note.textContent = "Starting the study…";
+        key = key || (window.crypto && crypto.randomUUID ? crypto.randomUUID() : `k${Date.now()}${Math.random().toString(16).slice(2)}`);
         try {
-          await startStudy(w, full);
-          note.textContent = "Study started. Research shows it to widgets in the same link colour.";
-          WS.toast(`Studying ${full.symbol}: open Research to read it.`);
+          await startStudy(w, full, key);
+          key = null;
+          note.textContent = "Study started: Research follows it.";
+          WS.goWorkspace("research");
         } catch (e) { note.textContent = e.message; }
         go.disabled = false;
       });

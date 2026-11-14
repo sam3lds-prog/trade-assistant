@@ -28,13 +28,16 @@ def _points(lines, key):
     return [(p["time"], round(p["value"], 6)) for p in lines[key]["points"]]
 
 
-def test_catalyst_scenarios_export_import_apply_draw_refresh_and_reload(tmp_path):
+def test_catalyst_scenarios_export_import_edit_save_draw_refresh_and_reload(tmp_path):
+    """4.1's manual pilot, 4.7's way: the packet is exported and another provider's cases imported under Advanced; their
+    sizes are edited in the Scenario Lab and saved as a version, drawn without another click."""
     with demo_page(tmp_path) as (page, errors):
         open_research(page)
         study = widget(page, "study")
         study.locator("button:text-is('Run the study')").click()
         page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-sections", timeout=60000)
-        study.locator(".ws-sections button:text-is('Forecast')").click()
+        study.locator(".ws-sections button:text-is('Forecast & Scenarios')").click()
+        study.locator("details.ws-advanced > summary").click()
         cat = study.locator(".ws-catalyst")
         cat.locator("input[aria-label='Catalyst']").wait_for(timeout=15000)
         assert "No case has a probability" in cat.inner_text()
@@ -53,30 +56,29 @@ def test_catalyst_scenarios_export_import_apply_draw_refresh_and_reload(tmp_path
         cat.locator("textarea[aria-label='Result JSON']").fill(json.dumps(wrong))
         cat.locator("button:text-is('Import cases')").click()
         page.wait_for_selector(f"{SHOWN} .ws-catalyst .error:has-text('not this study')", timeout=10000)
-        # The fixture's cases: three cards, the uncited driver labelled a hypothesis, the report kept as text.
+        # The fixture's cases are imported and checked; the Scenario Lab takes them from there.
         good = json.loads(FIXTURE.read_text())
         good["seed_id"] = seed_id
         cat.locator("textarea[aria-label='Result JSON']").fill(json.dumps(good))
         cat.locator("textarea[aria-label='Report excerpt']").fill("<b>bold?</b> The swarm leaned bearish.")
         cat.locator("button:text-is('Import cases')").click()
-        page.wait_for_selector(f"{SHOWN} .ws-catalyst .ws-case[data-case='bearish']", timeout=15000)
-        assert cat.locator(".ws-case").count() == 3
-        text = cat.inner_text()
-        assert "Hypothesis: no exported source" in text and "Invalidated if: Management maintains or raises the outlook" in text
-        assert cat.locator(".ws-cat-report").text_content().startswith("<b>bold?</b>") and cat.locator(".ws-cat-report b").count() == 0
-        # The provider's cited sizes start the review; Apply assumptions saves version 1 and draws it.
-        bull = cat.locator(".ws-case[data-case='bullish']")
-        assert bull.locator("input[aria-label='Bullish stock-specific move']").input_value() == "4"
-        cat.locator("button:text-is('Apply assumptions')").click()
-        page.wait_for_function("WS.ctx.blue.scenario && WS.ctx.blue.scenario.catalyst && WS.ctx.blue.scenario.catalyst.version === 1", timeout=15000)
-        page.wait_for_selector(f"{SHOWN} .ws-catalyst .ws-cat-version[data-version='1']", timeout=10000)
+        page.wait_for_function("(() => { const l = document.querySelector(\"section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] .ws-lab\"); return l && /cases imported/.test(l.textContent); })()", timeout=15000)
+        lab = study.locator(".ws-lab")
+        # The provider's cited sizes start the edit (a provider's size only where it cites the packet).
+        lab.locator("input[value='bullish']").check()
+        page.wait_for_selector(f"{SHOWN} .ws-lab input[aria-label='Bullish stock-specific move']", timeout=10000)
+        assert study.locator(".ws-lab input[aria-label='Bullish stock-specific move']").input_value() == "4"
+        study.locator(".ws-lab button:text-is('Save version')").click()
+        page.wait_for_function("WS.ctx.blue.scenario && WS.ctx.blue.scenario.catalyst && WS.ctx.blue.scenario.catalyst.version === 1", timeout=30000)
+        page.wait_for_selector(f"{SHOWN} .ws-versions .ws-cat-version[data-version='1']", timeout=10000, state="attached")
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:case:bullish']; }})()", timeout=15000)
         lines = page.evaluate(LINES)
         assert {"forecast:base", "forecast:case:bullish", "forecast:case:bearish"} <= set(lines)
-        assert "forecast:case:central" not in lines                     # no quantified assumption: it is the base
+        assert "forecast:case:central" not in lines and lines["forecast:note:central"]["noLine"]       # the base path: named, not drawn
         assert lines["forecast:case:bearish"]["style"] == 2 and lines["forecast:base"]["style"] == 0     # dashed beside solid
         run_id = page.evaluate("WS.ctx.blue.scenario.catalyst.run_id")
         v = page.evaluate(f"api('/v3/scenario-runs/{run_id}').then(r => r.latest)")
+        assert v["origin"] == "manual"
         anchor_time = page.evaluate(f"Date.UTC(...'{v['anchor']['bar_date']}'.split('-').map((x, i) => i === 1 ? x - 1 : +x), 9, 30) / 1000")
         for key in ("bullish", "bearish"):
             case = next(c for c in v["cases"] if c["key"] == key)
@@ -96,8 +98,6 @@ def test_catalyst_scenarios_export_import_apply_draw_refresh_and_reload(tmp_path
         page.reload()
         open_research(page)
         page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-sections", timeout=30000)
-        widget(page, "study").locator(".ws-sections button:text-is('Forecast')").click()
-        page.wait_for_selector(f"{SHOWN} .ws-catalyst .ws-cat-version[data-version='1']", timeout=20000)
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:case:bearish']; }})()", timeout=20000)
         assert {k: _points(page.evaluate(LINES), k) for k in before} == before
         # Another stock: its chart has no scenario lines and its study widget shows none of the old study's.
@@ -120,18 +120,22 @@ def test_one_click_run_study_draws_the_cases_and_values_the_strategies(tmp_path)
     with demo_page(tmp_path, prepare=_demo_provider) as (page, errors):
         open_research(page)
         study = widget(page, "study")
-        study.locator(".ws-scen-settings input[aria-label='Run scenarios']").wait_for(timeout=15000)
-        assert study.locator("input[aria-label='Run scenarios']").is_checked()
+        study.locator(".ws-study-kind input[value='full']").wait_for(timeout=15000, state="attached")
+        assert study.locator(".ws-study-kind input[value='full']").is_checked()        # 4.7: a full study, by the setting
         assert study.locator("select[aria-label='Scenario provider']").input_value() == "demo"
         study.locator("button:text-is('Run the study')").click()
-        page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-pipeline[data-status='complete']", timeout=90000)
-        panel = study.locator(".ws-pipeline")
-        assert panel.locator(".ws-stage").count() == 4 and panel.locator(".ws-stage.done").count() == 4
+        page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-lifecycle[data-state='decision_ready']", timeout=90000)
+        study.locator(".ws-sections button:text-is('Forecast & Scenarios')").click()
+        panel = study.locator("[data-section='forecast']")
+        assert panel.locator(".ws-pipeline[data-status='complete'] .ws-stage").count() == 4 and panel.locator(".ws-stage.done").count() == 4
         text = panel.inner_text()
         assert "Demo provider" in text and "nothing was simulated" in text and "Findings:" in text and "None has a probability" in text
-        assert panel.locator(".ws-valuation table").count() >= 1 and "Cash" in panel.locator(".ws-valuation").inner_text()
-        # 4.4: the decision, above the findings: here (the trial policy's $25 loss limit) No setup, with its reason.
-        card = panel.locator(".ws-decision")
+        study.locator(".ws-sections button:text-is('Strategies')").click()
+        study.locator("[data-section='strategies'] details > summary").first.click()
+        assert study.locator(".ws-valuation table").count() >= 1 and "Cash" in study.locator(".ws-valuation").inner_text()
+        # 4.4: the decision, on the Summary: here (the trial policy's $25 loss limit) No setup, with its reason.
+        study.locator(".ws-sections button:text-is('Summary')").click()
+        card = study.locator("[data-section='summary'] .ws-decision")
         assert card.count() == 1 and card.get_attribute("data-status") in ("qualified", "watch", "no_setup")
         assert "Demo example" in card.inner_text()
         if card.get_attribute("data-status") == "no_setup":
@@ -148,7 +152,7 @@ def test_one_click_run_study_draws_the_cases_and_values_the_strategies(tmp_path)
         bull = next(c for c in v["cases"] if c["key"] == "bullish")
         assert [p["value"] for p in lines["forecast:case:bullish"]["points"][1:]] == pytest.approx(bull["price"])
         # The manual tools are still there, under Advanced.
-        study.locator(".ws-sections button:text-is('Forecast')").click()
+        study.locator(".ws-sections button:text-is('Forecast & Scenarios')").click()
         adv = study.locator("details.ws-advanced")
         assert adv.count() == 1 and adv.get_attribute("open") is None
         before = _points(lines, "forecast:case:bearish")
@@ -156,7 +160,7 @@ def test_one_click_run_study_draws_the_cases_and_values_the_strategies(tmp_path)
         saved(page)
         page.reload()
         open_research(page)
-        page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-pipeline[data-status='complete']", timeout=30000)
+        page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-lifecycle[data-state='decision_ready']", timeout=30000)
         page.wait_for_function(f"(() => {{ const l = {LINES}; return l && l['forecast:case:bearish']; }})()", timeout=20000)
         assert _points(page.evaluate(LINES), "forecast:case:bearish") == before
     assert errors == []
@@ -174,7 +178,7 @@ def test_a_watch_decision_is_noticed_and_opens_its_study(tmp_path):
     with demo_page(tmp_path, prepare=_demo_provider_wide_limits) as (page, errors):
         open_research(page)
         study = widget(page, "study")
-        study.locator(".ws-scen-settings input[aria-label='Run scenarios']").wait_for(timeout=15000)
+        study.locator(".ws-study-kind input[value='full']").wait_for(timeout=15000, state="attached")
         study.locator("button:text-is('Run the study')").click()
         page.wait_for_selector(f"{SHOWN} .ws-widget[data-type='study'] .ws-decision[data-status='watch']", timeout=90000)
         card = study.locator(".ws-decision")

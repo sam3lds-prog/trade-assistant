@@ -81,6 +81,16 @@
         catch (e) { note.textContent = "Select the order above and copy it."; }
       } }, "Copy the order"));
     }
+    // 4.7: back to the study and the scenario version the draft was chosen under, to read its reasoning as it was.
+    const ref = (d.source || {}).scenario || null;
+    buttons.push(el("button", { class: "ws-btn", type: "button", title: "Open the study this draft came from, at its scenario version", onclick: async () => {
+      if (ref && ref.version_id) {
+        try { await api(`/v3/studies/${encodeURIComponent(d.source.study_id)}/presentation`, { selected_version_id: ref.version_id, ...(ref.case ? { selected_case_key: ref.case } : {}) }); }
+        catch (e) { /* the study still opens, at its own selection */ }
+      }
+      WS.set(w.group === "none" ? "blue" : w.group, { symbol: d.symbol, study: d.source.study_id });
+      WS.goWorkspace("research");
+    } }, "Open its study"));
     buttons.push(el("button", { class: "ws-btn", type: "button", onclick: () => w.set({ draft: null }) }, "Discard the draft"));
     return el("div", { class: "ws-draft", "data-route": ex.route },
       el("h4", {}, `Draft from Research: ${d.strategy.label} on ${d.symbol} `, routeTag(ex.route)),
@@ -92,6 +102,9 @@
         ["Size", `${d.quantity} ${d.unit}: ${d.sizing || ""}`],
         ["Limit", d.limit && isNum(d.limit.price) ? `${money(d.limit.price)} (${d.limit.basis})` : "none: no price to set it from"],
         ["Scenario", `Base ${pctOrNa(sc.expected_pct)}; ${sc.range_words || "range"} ${pctOrNa(sc.low_pct)} to ${pctOrNa(sc.high_pct)}. Model ${sc.model_version || "n/a"}, ${String(sc.calibration || "").replace(/_/g, " ")}.`],
+        ref ? ["Chosen under", el("span", {}, `${ref.case_label ? `the ${ref.case_label} case of ` : ""}scenario version ${ref.version} (${ref.official ? "official" : ref.exploratory ? "exploratory: research only" : ref.origin || ""})`
+          + `${ref.decision_id ? `, decision ${ref.decision_status ? ref.decision_status.replace(/_/g, " ") : ref.decision_id}` : ""}${ref.snapshot_at ? `; quotes of ${new Date(ref.snapshot_at).toLocaleString()}` : ""}`
+          + `${ref.trigger ? `; if ${ref.trigger}` : ""}${ref.invalidation ? `; invalidated if ${ref.invalidation}` : ""}.`)] : null,
         ["Most it can lose", `${loss} (contract terms)`],
         ["Modeled downside", `${isNum(r.modeled_p10) ? money(r.modeled_p10, 0) : "n/a"} at the 10th percentile; expected shortfall ${isNum(r.expected_shortfall) ? money(r.expected_shortfall, 0) : "n/a"}`],
         ["Capital it ties up", `${isNum(r.capital_required) ? money(r.capital_required, 0) : "n/a"} (a broker's requirement can differ)`],

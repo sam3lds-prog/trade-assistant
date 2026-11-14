@@ -206,15 +206,16 @@ def test_a_study_runs_draws_its_forecast_and_sends_a_contract_to_the_ticket_and_
         # 3.1: read in sections.
         text = study.inner_text()
         # 4.2: the readiness says why there is no validated forecast (here: the calibration has not run on demo data).
-        for words in ("calibration not run yet", "Strategies under the same scenarios", "Model-implied 10th–90th percentile range"):
+        for words in ("calibration not run yet", "Compare the strategies", "Model-implied 10th–90th percentile range", "flat by design"):
             assert words in text, words
-        for section, words in (("Evidence", ("Missing or not yet trusted", "Similar past situations")),
-                               ("Forecast", ("Other paths to test against", "What would prove it wrong"))):
+        for section, words in (("Evidence", ("Missing or not yet trusted", "Similar past situations", "Evidence cutoff")),
+                               ("Forecast & Scenarios", ("Other paths to test against", "What would prove it wrong", "Scenario Lab", "Versions"))):
             study.locator(f".ws-sections button:text-is('{section}')").click()
             text = study.inner_text()
             assert all(x in text for x in words), (section, words)
         assert "80% of outcomes" not in text
-        study.locator("[data-section='forecast'] button:text-is('Draw on the linked chart')").click()
+        # 4.7: drawn on the linked chart with no button: the forecast is part of the study's one result.
+        assert study.locator("button:text-is('Draw on the linked chart')").count() == 0
         page.wait_for_function("WS.ctx.blue.scenario && WS.ctx.blue.scenario.kind === 'forecast' && WS.ctx.blue.scenario.base.path_pct.length === 5",
                                timeout=10000)
         study.locator(".ws-sections button:text-is('Strategies')").click()
@@ -227,7 +228,7 @@ def test_a_study_runs_draws_its_forecast_and_sends_a_contract_to_the_ticket_and_
         saved(page)
         page.reload()
         open_research(page)
-        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] :text('Strategies under the same scenarios')", timeout=30000)
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] :text('Compare the strategies')", timeout=30000)
         assert page.evaluate("WS.ctx.blue.study") == study_id
     assert errors == []
 
@@ -257,9 +258,14 @@ def test_discover_ranks_once_explains_the_score_splits_a_budget_and_studies_an_o
         page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='allocator'] :text('most it can lose')", timeout=60000)
         feed.locator("button:text-is('Study it')").click()
         page.wait_for_function("WS.ctx.blue.study && WS.ctx.blue.study.startsWith('study_')", timeout=20000)
-        page.click(".ws-tab-btn[data-workspace='research']")
-        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] :text('Strategies under the same scenarios')", timeout=90000)
+        # 4.7: Study it opens Research on the study it started (one study), with the opportunity's numeric horizon.
+        page.wait_for_selector(".ws-tab-btn[aria-selected='true'][data-workspace='research']", timeout=10000)
+        page.wait_for_selector("section.ws-tabset:not(.hidden) .ws-widget[data-type='study'] :text('Compare the strategies')", timeout=90000)
         assert opp["symbol"] in widget(page, "study").locator("h3").first.inner_text()
+        made = page.evaluate(f"api('/v3/studies?symbol={opp['symbol']}').then(r => r.studies)")
+        assert [x["id"] for x in made] == [page.evaluate("WS.ctx.blue.study")]
+        sessions = page.evaluate("WS.horizonSessions(WS.ctx.blue.opportunity.horizon)")
+        assert made[0]["horizon_days"] == sessions == page.evaluate("WS.ctx.blue.opportunity.horizon_sessions")
     assert errors == []
 
 
