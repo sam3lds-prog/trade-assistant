@@ -41,11 +41,14 @@ permission is added or changed; nothing here places an order.**
   parent, values the strategies under it, and runs the Opportunity Engine's checks as a research-only assessment that
   is never published, notified or scored. Promotion is the only way an edit becomes official: confirmed, and only when
   every size comes from the packet's own rules for a cited driver of its case.
-- **Draft references are checked whole.** A draft is refused when its decision belongs to another version, was made
-  from another valuation, has been superseded or is an exploratory assessment, or when the version's sessions have
-  passed. A draft from an exploratory version says it is research only.
+- **Draft references are checked.** A draft is refused in these cases: its decision belongs to another version, was
+  made from another valuation, has been superseded, is about another strategy or case, or is an exploratory
+  assessment; or the version's sessions have passed. A draft from an exploratory version says it is research only.
 - **A neutral base says what it can claim**: calibration pending, too little history, range only, no validated edge,
   validated edge, or both validated. A flat base is never an unexplained 0.00%.
+- **Promotion is narrow by design**: only an edit of the finished official run's own cases, with every size one the
+  automatic run could have made itself (no user stress, no provider number, no extra uncertainty, factor shocks the
+  driver's way). A promoted version's decisions never enter the forward scorecard or the outcome record.
 
 ### The Research study, the chart and the handoffs (PR 2)
 
@@ -74,6 +77,9 @@ permission is added or changed; nothing here places an order.**
   has *Open its study*, which reopens the study at that version.
 - **The What-If explorer** (Advanced) no longer draws its orange and purple lines beside a study's paths unless asked,
   takes them off the chart when closed, and can hand its factor values to the Scenario Lab.
+- **Independent review fixes** (see IMPROVEMENTS.md): promotion tied to the official run; previews dropped when you
+  switch versions and drawn only over the version they were made on; *Discard* really discards; an old study's poll
+  can no longer take the widget back; comparison lines are one legend entry; two quick legend clicks both stand.
 - **Fix: a trigger's publication time** typed in the trigger form is now sent with its time zone. It was read as UTC,
   so a source published minutes ago in Denver could be refused as published before the study.
 

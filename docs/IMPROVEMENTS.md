@@ -1779,3 +1779,39 @@ hold, reproduced what it found with scripts, and reported it. Every finding was 
 | 12 | Low | A crash right after saving the valuation made a second one | the version's saved valuation is reused | same test |
 | 13 | Low | Unreported open interest could qualify; an unreported agent count went ahead; the control never started after an approval-gated start; the smoke test changed Research's default profile; a rollback could leave a replaced source "verified" | research quality; approval asked; control started on approval; settings restored; a verification is bound to the source it read | the tests above and `test_unreported_open_interest_is_not_execution_quality` |
 
+
+## 4.7: Forecast Studio
+
+The plan (*Unified Forecasting, Scenario UX and Trading Workflow*) was checked against `2edf51c` (4.6.2), whose suite
+was green (1,611 passed, 2 skipped). The audit of the Research screen at that commit, and the design, are in
+[FORECAST_STUDIO.md](FORECAST_STUDIO.md). Three pull requests:
+
+| PR | What | Tests |
+| --- | --- | --- |
+| #70 | ForecastBundle read model, per-study presentation state, Scenario Lab backend (preview, exploratory save and assessment, promotion), draft reference checks, migration 31 | `tests/test_forecast_studio.py` |
+| #71 | the Research study, chart states, Scenario Lab UI, versions, Discover and desk handoffs, What-If lines, trigger time zone fix | `tests/test_forecast_studio_ui.py`, `tests/test_acceptance_47.py`, older browser tests updated |
+| #72 | the independent review's fixes, docs, 4.7.0 | the review tests below |
+
+### 4.7 independent review
+
+A separate reviewer read `2edf51c..v4.7-research-ui` against the design, ran the new tests and reproduced its two
+most serious findings on the demo app. Every finding was fixed:
+
+| # | Severity | Finding | Fix | Test |
+| --- | --- | --- | --- | --- |
+| 1 | High | Promotion only checked the sizes: a manual import (its own triggers and invalidations) sized like the official version, an edit of the control or of an earlier attempt could be promoted, published and notified | Promotion needs an edit of the official run's own cases (the pipeline's run, not the control or a manual import) | `test_only_an_edit_of_the_official_runs_own_cases_can_be_promoted` |
+| 2 | Medium | Extra uncertainty credited to the options-implied move was never size-checked; factor shocks were not checked for sign or session | No extra uncertainty at promotion; issuer and factor sessions must be the driver's; factor signs must move the stock the driver's way (`_factor_sign`) | `test_a_factor_shock_against_its_driver_is_not_promotable`, `test_promotion_rules_follow_the_automatic_runs_standard` |
+| 3 | Medium | A promoted version's Qualified decision counted in the forward scorecard's setups and would be frozen in the outcome record | Both count only decisions on `origin = 'auto'` versions | `test_a_promoted_versions_setup_never_enters_the_outcome_record` |
+| 4 | Medium | Promotion over a failed or needs-attention run hid the failure ("Decision ready") | Promotion needs the official run complete | the first test above |
+| 5 | Medium | A draft accepted a decision of another strategy or case | The decision must be about the strategy and case drafted; the Strategies table sends a decision only with its own strategy and case | `test_a_draft_carries_a_decision_only_for_its_own_strategy_and_case` |
+| 6 | Medium | A preview in flight when you switched versions was drawn over the new one | The Lab's timer and generation belong to the widget and stop on select, compare and dispose; a preview is drawn only over the version (or imported run) it was made from | `test_preview_save_compare_and_return_to_the_official_version` |
+| 7 | Medium | Discard did not repaint, so a later Save version saved the discarded edit | Discard clears the timer and repaints | the same |
+| 8 | Medium | An old study's poll could take the widget back after you switched studies (older than 4.7, worse with it) | One followed study; a stale poll's answer is dropped | browser tests |
+| 9 | Low | A preview of imported cases (no version yet) was not drawn | Drawn over the imported run's cases | browser tests |
+| 10 | Low | Preview lines were not tied to a study; comparison lines shared a layer but had separate legend entries; a reply in flight could undo a legend click | Preview lines carry the study; the comparison is one entry; local legend clicks win | browser tests |
+| 11 | Low | Two quick preference changes could lose one (read and merge outside the transaction) | Read, merge and write in one transaction | `test_two_quick_preference_changes_both_stand` |
+| 12 | Low | Wording: the replaced automatic version was called an "earlier automatic run"; a promoted version's record note said "exploratory"; after a Retry the old decision was called superseded; the release notes overstated the draft check; with the feature off the mode could say "official" without a version | A `replaced` kind; promoted versions say why they are not scored; "an earlier attempt… has not decided yet"; notes corrected; the mode is baseline without a version | bundle tests |
+
+The reviewer found no route that can place or authorize an order. Previews, exploratory saves and fresh
+valuations write no decision, Discover observation, notification, forward or outcome record. The bundle never shows
+another version's valuation, decision or assessment.

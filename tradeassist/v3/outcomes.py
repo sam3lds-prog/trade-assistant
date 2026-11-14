@@ -63,6 +63,8 @@ class Outcomes:
         """Freeze a Qualified setup's decision record (once per decision)."""
         if decision.get("status") != "qualified" or not decision.get("setup"):
             return None
+        if version.get("origin") not in (None, "auto"):
+            return None                     # 4.7: a promoted (person-edited) version's setup is not part of the outcome record
         s = decision["setup"]
         by_key = {x["key"]: x for x in valuation.get("structures") or []}
         parts = []

@@ -70,10 +70,23 @@ class PromoteIn(C.Strict):
     confirm: bool = False
 
 
+def _driver_session(d: dict[str, Any], h: int, cat_session: int, issuer: bool) -> int:
+    """The session the automatic run puts a driver's move on (pipeline.auto_assumptions)."""
+    if issuer:
+        return min(h, int(d.get("session") or cat_session))
+    return min(h, int(d.get("session") or (cat_session if d.get("timing") in ("first_session_after_release", "unknown") else 1)))
+
+
 def promotion_problems(seed: dict[str, Any], cases: dict[str, dict[str, Any]], assumptions: list[dict[str, Any]]) -> list[str]:
-    """Why a version may not become official: every size must come from a deterministic rule for a cited driver of its
-    case, going that driver's way, as the automatic run's do (pipeline.auto_assumptions). Empty when it may."""
+    """Why a version's sizes may not become official: each must be what the automatic run could have made itself
+    (pipeline.auto_assumptions): a stock-specific move sized by one of the packet's rules for a cited issuer driver of
+    that case, in its direction and on its session; a factor shock of one standard deviation of a factor a cited driver
+    of that case names, on its session and with the sign that moves the stock that driver's way; no extra uncertainty
+    (the automatic run never adds any). Empty when they may."""
+    from .pipeline import Pipeline
     out: list[str] = []
+    h = int(seed.get("horizon_sessions") or 0) or 1
+    cat_session = int(seed.get("catalyst_session") or 1)
     for a in assumptions:
         c = cases.get(a["key"]) or {}
         label = C.CASE_LABELS.get(a["key"], a["key"])
@@ -81,20 +94,36 @@ def promotion_problems(seed: dict[str, Any], cases: dict[str, dict[str, Any]], a
         iss = a.get("issuer")
         if iss:
             want = "up" if float(iss["value_pct"]) > 0 else "down"
+            match = [d for d in drivers if d.get("type") == "issuer_event" and d.get("direction") == want]
             if iss.get("source") not in RULE_SOURCES[:3]:
                 out.append(f"{label}: the stock's own move is {str(iss.get('source')).replace('_', ' ')}, not one of the packet's rules")
-            elif not any(d["type"] == "issuer_event" and d.get("direction") == want for d in drivers):
+            elif not match:
                 out.append(f"{label}: no cited issuer driver of this case goes {want}")
+            elif int(iss.get("session") or 0) != _driver_session(match[0], h, cat_session, True):
+                out.append(f"{label}: the stock's own move is on session {iss.get('session')}, not the session its driver gives "
+                           f"({_driver_session(match[0], h, cat_session, True)})")
         for f in a.get("factors") or []:
             if f.get("source") != "factor_volatility":
                 out.append(f"{label}: the {f['key']} shock is {str(f.get('source')).replace('_', ' ')}, not the factor's own volatility")
-            elif not any(d["type"] in ("market", "sector", "macro") and d.get("factor") == f["key"] for d in drivers):
+                continue
+            named = [d for d in drivers if d.get("type") in ("market", "sector", "macro") and d.get("factor") == f["key"]
+                     and d.get("direction") in ("up", "down")]
+            if not named:
                 out.append(f"{label}: no cited driver of this case names the {f['key']} factor")
-        disp = a.get("dispersion")
-        if disp and disp.get("source") not in ("implied_sensitivity", "options_implied_move"):
-            out.append(f"{label}: its extra uncertainty is {str(disp.get('source')).replace('_', ' ')}, not from the options market")
-        if disp and not disp.get("source_ids"):
-            out.append(f"{label}: its extra uncertainty cites no source in the packet")
+                continue
+            d = named[0]
+            sess = _driver_session(d, h, cat_session, False)
+            if int(f.get("session") or 0) != sess:
+                out.append(f"{label}: the {f['key']} shock is on session {f.get('session')}, not its driver's ({sess})")
+                continue
+            try:
+                signed = Pipeline._factor_sign(seed, f["key"], abs(float(f["value"])), sess, d["direction"])
+            except Exception:  # noqa: BLE001 - a fit that cannot be evaluated is not promotable
+                signed = None
+            if signed is None or (signed > 0) != (float(f["value"]) > 0):
+                out.append(f"{label}: the {f['key']} shock moves the stock against its driver's direction ({d['direction']})")
+        if a.get("dispersion"):
+            out.append(f"{label}: it adds extra uncertainty, which the automatic run never does")
     return out
 
 
@@ -195,14 +224,21 @@ class ScenarioLab:
         cases = {c["key"]: c for c in json.loads(r["cases_json"] or "[]")}
         problems = []
         p = self.svc.pipeline.load(study_id) if getattr(self.svc, "pipeline", None) else None
+        ext = json.loads(r["external_json"] or "{}") if "external_json" in r.keys() else {}
         if p is None:
             problems.append("this study has no automatic scenario run: start one (Run scenarios), then promote")
         elif p.get("status") in ("running", "awaiting_approval"):
             problems.append("the automatic run is still going: wait for it to finish")
-        elif p.get("status") == "canceled":
-            problems.append("the automatic run was canceled: Retry it first")
+        elif p.get("status") != "complete":
+            problems.append(f"the automatic run did not finish ({p.get('status')}): Retry it first; nothing official is replaced while it "
+                            "is in doubt")
         elif p.get("version_id") == version_id:
             problems.append("it is already the official version")
+        elif r["id"] != p.get("run_id") or ext.get("role") == "control" or r["provider"] == "manual":
+            # Only an edit of the official run's own cases (their triggers and invalidations are the provider's, from the
+            # frozen packet) can replace its version: not a manual import, the control, or an earlier attempt.
+            problems.append("it was not edited from the automatic run's own cases (a manual import, the single-prompt control or an "
+                            "earlier attempt): it stays exploratory")
         if ver.get("origin") != "manual":
             problems.append("only a version you edited can be promoted; an automatic run's version is official only for its own run")
         last = date.fromisoformat(ver["sessions"][-1]["date"])
@@ -213,7 +249,8 @@ class ScenarioLab:
                 "will": ["revalue the study's strategies from a fresh quote snapshot",
                          "decide through the Opportunity Engine's official checks (fresh, real-time quotes; verified triggers for this version)",
                          "publish or withdraw the Discover observation and notify as an automatic decision would",
-                         "keep the forward scorecard as it is: only the automatic run's predictions are scored"]}
+                         "keep the forward scorecard and the strategy outcome record as they are: only the automatic run's "
+                         "own decisions and predictions are scored"]}
 
     def promote(self, study_id: str, body: PromoteIn) -> dict[str, Any]:
         check = self.promotion(study_id, body.version_id)

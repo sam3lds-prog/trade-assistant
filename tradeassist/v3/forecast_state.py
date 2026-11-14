@@ -49,7 +49,8 @@ DEFAULT_LAYERS = {k: True for k in LAYERS}
 FOCUS = ("base", "cases", "decision", "compare")
 CASE_KEYS = ("central", "bullish", "bearish")
 KIND_WORDS = {"official": "Official (automatic)", "exploratory": "Exploratory (your edit)", "control": "Single-prompt control",
-              "previous": "Earlier automatic run", "promoted": "Official (promoted from your edit)"}
+              "previous": "Earlier automatic run", "promoted": "Official (promoted from your edit)",
+              "replaced": "Automatic (replaced by a promotion)"}
 LIFECYCLE_WORDS = {
     "no_study": "No study", "evidence_running": "Collecting the evidence", "study_failed": "The study did not finish",
     "baseline_complete": "Baseline complete", "simulation_queued": "Simulation queued", "simulation_running": "Simulation running",
@@ -176,25 +177,30 @@ class ForecastState:
         if self.svc.db.one("SELECT 1 FROM studies WHERE id = ?", (study_id,)) is None:
             raise RequestError(f"No study {study_id}")
         given = body.model_fields_set
-        r = self.svc.db.one("SELECT state_json FROM study_presentation WHERE study_id = ?", (study_id,))
-        saved = json.loads(r["state_json"]) if r else {}
-        if "selected_version_id" in given:
-            saved["selected_version_id"] = self.owned(study_id, body.selected_version_id)
-        if "compare_version_id" in given:
-            saved["compare_version_id"] = self.owned(study_id, body.compare_version_id)
-        if "selected_case_key" in given:
-            saved["selected_case_key"] = body.selected_case_key
-        if "chart_focus" in given:
-            saved["chart_focus"] = body.chart_focus
+        # Checked before the write; the read, merge and write are one transaction, so two quick changes (two legend
+        # clicks) both stand.
+        sel = self.owned(study_id, body.selected_version_id) if "selected_version_id" in given else None
+        cmp_ = self.owned(study_id, body.compare_version_id) if "compare_version_id" in given else None
         if "visible_layers" in given and body.visible_layers is not None:
             bad = sorted(k for k in body.visible_layers if k not in LAYERS)
             if bad:
                 raise RequestError(f"visible_layers: unknown layer(s) {', '.join(bad)}; the layers are {', '.join(LAYERS)}")
-            saved["visible_layers"] = {**(saved.get("visible_layers") or {}), **{k: bool(v) for k, v in body.visible_layers.items()}}
-        if saved.get("compare_version_id") and saved.get("compare_version_id") == saved.get("selected_version_id"):
-            saved["compare_version_id"] = None
         now = C.utc_now()
         with self.svc.db.tx() as cur:
+            r = cur.execute("SELECT state_json FROM study_presentation WHERE study_id = ?", (study_id,)).fetchone()
+            saved = json.loads(r["state_json"]) if r else {}
+            if "selected_version_id" in given:
+                saved["selected_version_id"] = sel
+            if "compare_version_id" in given:
+                saved["compare_version_id"] = cmp_
+            if "selected_case_key" in given:
+                saved["selected_case_key"] = body.selected_case_key
+            if "chart_focus" in given:
+                saved["chart_focus"] = body.chart_focus
+            if "visible_layers" in given and body.visible_layers is not None:
+                saved["visible_layers"] = {**(saved.get("visible_layers") or {}), **{k: bool(v) for k, v in body.visible_layers.items()}}
+            if saved.get("compare_version_id") and saved.get("compare_version_id") == saved.get("selected_version_id"):
+                saved["compare_version_id"] = None
             cur.execute("""INSERT INTO study_presentation (study_id, state_json, updated_at) VALUES (?, ?, ?)
                            ON CONFLICT(study_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at""",
                         (study_id, json.dumps(saved), now))
@@ -372,6 +378,7 @@ class ForecastState:
         pl = getattr(self.svc, "pipeline", None)
         raw_p = (pl.load(study_id) if (pl is not None and p) else None) or {}
         promoted = {x.get("version_id") for x in raw_p.get("promotions") or []}
+        replaced = {x.get("replaced") for x in raw_p.get("promotions") or []} - {official, None}
         # Every version of the study, in the order made, with what it is and how the scorecard treats it.
         raw = self.versions_of(study_id)
         from .forward import window_start
@@ -387,12 +394,13 @@ class ForecastState:
             elif origin == "control":
                 kind = "control"
             elif origin == "auto":
-                kind = "previous"
+                kind = "replaced" if r["id"] in replaced else "previous"
             else:
                 kind = "exploratory"
             made = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
             late = bool(opens and made >= opens)
             grading = ("frozen for the forward scorecard" if origin in ("auto", "control") else
+                       "not scored: promoted from your edit; only the automatic run's own predictions are scored" if kind == "promoted" else
                        "not graded: an exploratory version never enters the forward scorecard")
             if late and origin in ("auto", "control"):
                 grading = "late: made after the window opened, not scored"
@@ -436,7 +444,7 @@ class ForecastState:
             cmp_want = None
         selected = self._version(sel_id) if sel_id else None
         meta = by_id.get(sel_id) if sel_id else None
-        mode = meta["kind"] if meta else "baseline"
+        mode = meta["kind"] if (meta and selected) else "baseline"
         case_key = pres.get("selected_case_key")
         if selected and case_key not in {c["key"] for c in selected.get("cases") or []}:
             case_key = None
@@ -482,14 +490,17 @@ class ForecastState:
         if selected:
             preferred = (out["automatic_run"] or {}).get("valuation_id") if selected["id"] == official else None
             val = self._valuation_of(selected["id"], preferred)
-            if selected["id"] == official or meta["kind"] == "previous":
+            if selected["id"] == official or meta["kind"] in ("previous", "replaced"):
                 d = self._decision_of_version(study_id, selected["id"])
                 if d is not None:
                     latest = self._latest_decision(study_id) or {}
                     current = d.get("id") == latest.get("id") and selected["id"] == official
                     decision = {**d, "kind": "official", "research_only": False, "current": current}
-                    if not current:
+                    if not current and d.get("id") != latest.get("id"):
                         note = "This is an earlier decision, superseded by a later one: it is shown for the record, not as a current setup."
+                    elif not current:
+                        note = ("This decision belongs to an earlier attempt: the study's scenarios were run again, and the new attempt "
+                                "has not decided yet. It is shown for the record, not as a current setup.")
             else:
                 a = self._assessment(selected["id"])
                 if a is not None:
