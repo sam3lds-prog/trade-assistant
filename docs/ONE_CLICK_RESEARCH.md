@@ -150,7 +150,7 @@ SCENARIO_BUDGET=0                # the budget setups are sized to (0: the Tradin
 SCENARIO_MAX_LOSS=0              # the loss limit (0: the policy's daily loss stop; the trial policy's is $25)
 ```
 
-After every valuation the study's Scenarios panel opens with a decision card:
+After every valuation the study's Summary shows one decision card (4.7: the selected version's own; an edited version shows a research-only assessment instead):
 
 | Decision | When | What it shows |
 | --- | --- | --- |
@@ -259,7 +259,7 @@ SCENARIO_AI_OUTPUT_USD_PER_MTOK=
 These are starting limits, not measured costs. MiroFish reports **no** token usage, so a run's cost is an estimate
 (a range with its basis: `MIROFISH_COST_PER_RUN_USD` scaled by agents × rounds × platforms, or, once you enter actual
 costs for finished runs, those) until you enter what your model provider charged for it (Research → Study settings →
-Simulation details → *Simulation usage*). An estimate is not a hard cap: the app can refuse to start a run, stop one
+Simulation settings → *Simulation usage*). An estimate is not a hard cap: the app can refuse to start a run, stop one
 at its time cap, and stop at the agent check, but it cannot meter a run while it goes. A failed run is counted by the
 stages it reached. An unknown cost is shown as unknown, never as $0.00.
 
@@ -335,9 +335,9 @@ the next estimates are based on a real cost.
 | Start / stop / restart MiroFish | `./setup_mirofish.sh start`, `stop`, `restart` |
 | Is it up? | `./setup_mirofish.sh status`, or `check` for the app's view |
 | Logs | `./setup_mirofish.sh logs` (`logs -f` to follow); the app's own log as before |
-| A failed or stuck study | Research → the study's Scenarios panel: the stage, the reason, Retry or Cancel; *Retry (no new run)* finishes a saved report |
+| A failed or stuck study | Research → the study's status line: the reason, Retry or Cancel (*Retry (no new run)* finishes a saved report); the stages are under Forecast & Scenarios → Catalyst and simulation |
 | Interrupted simulation | Restart the app: left-over steps resume from the saved MiroFish ids; an ambiguous write asks you before a new run |
-| Usage | Study settings → Simulation details → *Simulation usage*; `GET /v3/scenarios/usage` |
+| Usage | Study settings → Simulation settings → *Simulation usage*; `GET /v3/scenarios/usage` |
 | Back up | Stop the app; copy `data/tradeassist.db` (each start also keeps the newest ten copies in `data/backups/`) |
 
 ### Roll back
